@@ -116,7 +116,8 @@ Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
 | GRUB (EFI) | ✅ |
 | GRUB (legacy BIOS) | ❌ |
 | Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ |
-| Encrypted argon2id `/boot` | ✅ |
+| Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ |
+| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ |
 | Plain `/boot` (unencrypted /boot) | ❌ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
 | Bare-metal restore **executing** the boot rebuild (not just its dry run) | ❌ |
@@ -307,7 +308,7 @@ The line that disagrees with reality is the bug. Then:
 | **Whether the archive is bootable** | `backup-common.sh` → `bx_boot_listing_counts`, used by `backup-verify.sh` section 3: patterns over the archive listing for a UKI, a `vmlinuz`/`Image`/`kernel*.img` or a kernel-install `<machine-id>/<version>/linux`, a `grub.cfg`, systemd-boot entries, and Pi `config.txt`+`cmdline.txt`. A bootloader they do not know produces a **false FAIL**: *"archive has NO bootloader config"* | Add a pattern for your bootloader's config file (or kernel name, e.g. `zImage`) and a synthetic listing to `tests/lib-fixture-test.sh`. | The fixture test; then `backup-verify.sh` after one real archive — section 3 must PASS |
 | **Which initramfs tool** | `restore-rebuild-boot.sh` — `update-initramfs` / `dracut` / `mkinitcpio` by `command -v`; otherwise a warning | Add your generator. | `restore-rebuild-boot.sh --dry-run` shows the `would:` line |
 | **Kernel command-line carriers on restore** | `lib-cmdline.sh` → `cl_find_carriers` (BLS/systemd-boot entries, `/etc/kernel/cmdline` + `cmdline.d`, `GRUB_CMDLINE_LINUX` + `grub.d`, `extlinux.conf`, `syslinux.cfg`, `cmdline.txt`, `refind_linux.conf`, `limine.conf`, `/etc/default/limine`) and `cl_rewrite_ids`; called by both restore scripts after the `fstab`/`crypttab` fix-up, checked by `cl_stale_ids` before reboot and by `backup-verify.sh` against the archive | Add your carrier's path to `cl_find_carriers` and, if it uses a new reference syntax, to `CL_REF_PREFIX`. | Add it to `tests/cmdline-fixture-test.sh`; `backup-verify.sh` section 3 reports "carriers agree with fstab/crypttab" |
-| **Encrypted `/boot`** | `restore-rebuild-boot.sh` — `BOOT_ON_LUKS` is inferred from `/boot` (or `/`) being on `/dev/mapper/*` | A LUKS `/boot` opened under another path, or LVM-on-plain-disk, needs a `cryptsetup status` check instead of the prefix test. | The report's boot-layout line `boot_on_luks=` |
+| **Encrypted `/boot`, and which GRUB can open it** | `restore-rebuild-boot.sh` — `BOOT_ON_LUKS` from `/boot` (or `/`) being on `/dev/mapper/*`, then the container's LUKS version and KDF decide the GRUB floor (LUKS1 → 2.02, LUKS2/pbkdf2 → 2.06, argon2 → 2.12); `backup-verify.sh` section 6 says the same | A LUKS `/boot` opened under another path, or LVM-on-plain-disk, needs a `cryptsetup status` check instead of the prefix test; a new KDF needs a floor. | The report's boot-layout line `boot_on_luks=` and the rebuild's dry-run `encrypted /boot:` line |
 | **Ad-hoc vs scheduled** | `deploy.sh` → `detect_schedule_mode` (removable, hotplug, or USB transport → ad-hoc) | Thunderbolt NVMe, SD readers and LVM stacks can misclassify. Override first: `SCHEDULE_MODE=` in the config or environment. | `sudo ./deploy.sh --dry-run` prints `Schedule mode (…): ` with the evidence |
 
 **Step 2 — prove it, then send it.** Run what CI runs, then a real backup and
@@ -597,7 +598,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.4.0
+- **Version:** 3.4.1
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

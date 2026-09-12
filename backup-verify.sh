@@ -478,9 +478,22 @@ if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
                 echo "        GRUB was replaced out of band, or a restore onto this GRUB"
                 echo "        version would leave /boot unreachable."
             fi
+        elif uses_grub && [[ "$boot_kdf" == pbkdf2 ]]; then
+            # The form stock GRUB opens: LUKS1 needs GRUB >= 2.02 (cryptodisk),
+            # LUKS2 with pbkdf2 needs GRUB >= 2.06. UNTESTED ON METAL — see the
+            # README status table.
+            gv="$(grub_version)"
+            if [[ "$boot_ver" == 1 ]]; then
+                note "/boot is encrypted ($boot_dev, $say_kdf), GRUB ${gv:-?}: LUKS1/pbkdf2 opens on any GRUB with cryptodisk (>= 2.02) — untested on metal"
+            elif [[ -n "$gv" ]] && ! ver_ge "$gv" "2.06"; then
+                bad "/boot is LUKS2/pbkdf2 but GRUB $gv predates LUKS2 support (>= 2.06) — this GRUB cannot open /boot after a restore"
+            else
+                note "/boot is encrypted ($boot_dev, $say_kdf), GRUB ${gv:-?}: LUKS2/pbkdf2 opens on GRUB >= 2.06 — untested on metal"
+            fi
+            echo "        A restore must keep GRUB_ENABLE_CRYPTODISK=y (the boot rebuild sets it)."
         elif uses_grub; then
             note "/boot is encrypted ($boot_dev, $say_kdf), GRUB in use."
-            echo "        Fleet contract is Argon2id; this volume reports ${boot_kdf:-unknown}."
+            echo "        KDF ${boot_kdf:-unknown} is neither argon2 nor pbkdf2 — check GRUB can open it."
         else
             note "/boot is encrypted ($boot_dev, $say_kdf)."
             echo "        Its header is covered by check 2. The initramfs/bootloader must"

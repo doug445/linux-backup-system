@@ -162,8 +162,22 @@ if [ "$USES_GRUB" = true ]; then
             runsh "sed -i '/^GRUB_ENABLE_CRYPTODISK=/d' /etc/default/grub 2>/dev/null; echo GRUB_ENABLE_CRYPTODISK=y >> /etc/default/grub"
         fi
         gv=$({ grub2-install --version 2>/dev/null || grub-install --version 2>/dev/null; } | grep -oE '[0-9]+\.[0-9]+' | head -1)
-        if [ -n "$gv" ] && [ "$(printf '2.12\n%s\n' "$gv" | sort -V | head -1)" != 2.12 ]; then
-            warn "GRUB $gv is older than 2.12 and cannot unlock an argon2id /boot — restore may leave /boot unopenable"
+        # What GRUB must be able to open depends on the /boot container: LUKS1
+        # needs cryptodisk (GRUB >= 2.02), LUKS2 with pbkdf2 needs >= 2.06,
+        # argon2 needs >= 2.12. Read the container, not an assumption.
+        boot_mapper=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//'); boot_mapper=${boot_mapper#/dev/mapper/}
+        boot_luks=$(cryptsetup status "$boot_mapper" 2>/dev/null | awk '/device:/{print $2}')
+        boot_kdf=$(cryptsetup luksDump "$boot_luks" 2>/dev/null | awk '/PBKDF:/{print $2; exit}')
+        boot_lv=$(cryptsetup luksDump "$boot_luks" 2>/dev/null | awk '/^Version:/{print $2; exit}')
+        case "${boot_lv:-?}/${boot_kdf:-?}" in
+            */argon2*) need=2.12 ;;
+            2/*)       need=2.06 ;;
+            1/*)       need=2.02 ;;
+            *)         need=2.12 ;;   # unknown: assume the strictest
+        esac
+        say "encrypted /boot: LUKS${boot_lv:-?}/${boot_kdf:-?} — needs GRUB >= $need (found ${gv:-unknown})"
+        if [ -n "$gv" ] && [ "$(printf '%s\n%s\n' "$need" "$gv" | sort -V | head -1)" != "$need" ]; then
+            warn "GRUB $gv is older than $need and cannot unlock this /boot (LUKS${boot_lv:-?}/${boot_kdf:-?}) — restore may leave /boot unopenable"
         fi
     fi
     # Reinstall the bootloader
