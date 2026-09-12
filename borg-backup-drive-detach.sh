@@ -52,26 +52,31 @@ if [ -z "$BACKUP_FS_UUID" ] && [ -z "$BACKUP_LUKS_UUID" ]; then
     exit 0
 fi
 
-# 1. The mount: gone backing device -> lazy unmount.
-if /usr/bin/mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
-    src=$(/usr/bin/findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed 's/\[.*//' || true)
-    if [ -n "$src" ] && [ ! -e "$src" ] || { [ -n "$BACKUP_FS_UUID" ] && [ ! -e "/dev/disk/by-uuid/$BACKUP_FS_UUID" ]; }; then
-        log "backing device gone — lazily unmounting $BACKUP_MOUNT"
-        /usr/bin/umount -l "$BACKUP_MOUNT" 2>/dev/null || true
-    else
-        log "$BACKUP_MOUNT still backed by a present device — leaving it."
-        exit 0
-    fi
+# Physically present (by the LUKS partition's own UUID link, or the fs UUID on
+# a plain drive)? Then this is a spurious event: touch nothing. The mapper
+# node and the fs UUID link inside it are NOT evidence — they outlive a yank.
+present=1
+if [ -n "$BACKUP_LUKS_UUID" ]; then [ -e "/dev/disk/by-uuid/$BACKUP_LUKS_UUID" ] || present=0
+else [ -e "/dev/disk/by-uuid/$BACKUP_FS_UUID" ] || present=0; fi
+if [ "$present" = 1 ]; then
+    log "drive is still present — leaving it."
+    exit 0
 fi
 
-# 2. The LUKS mapping: backing partition gone -> close it.
+# 1. The mount: lazily unmount so nothing can write into a dead filesystem.
+if /usr/bin/mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
+    log "drive gone — lazily unmounting $BACKUP_MOUNT"
+    /usr/bin/umount -l "$BACKUP_MOUNT" 2>/dev/null || true
+fi
+
+# 2. The LUKS mapping: close it (force the dm table away if it is still busy).
 if [ -n "$BACKUP_LUKS_UUID" ]; then
     MAPPER="luks-$BACKUP_LUKS_UUID"
-    if [ -e "/dev/mapper/$MAPPER" ] && [ ! -e "/dev/disk/by-uuid/$BACKUP_LUKS_UUID" ]; then
-        log "LUKS partition gone — closing /dev/mapper/$MAPPER"
+    if [ -e "/dev/mapper/$MAPPER" ]; then
+        log "drive gone — closing /dev/mapper/$MAPPER"
         /usr/sbin/cryptsetup close "$MAPPER" 2>/dev/null \
             || /usr/sbin/dmsetup remove --force "$MAPPER" 2>/dev/null \
-            || log "could not close $MAPPER (still busy?) — it will be closed on the next attach"
+            || log "could not close $MAPPER — it will be cleared on the next attach"
     fi
 fi
 log "done."

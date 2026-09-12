@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.2.0"
+BX_VERSION="3.2.1"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -115,12 +115,54 @@ bx_esp_mount() {
 bx_boot_is_mount() { mountpoint -q /boot 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
+# Is the configured drive physically here? A yanked LUKS drive leaves its
+# mapper node, the filesystem UUID link inside it, and the mount all in place;
+# only the LUKS partition's own by-uuid link (or, on a plain drive, the
+# filesystem's) disappears. Test that, never the mapper or the mount.
+# ---------------------------------------------------------------------------
+bx_backup_drive_present() {
+    if [ -n "${BACKUP_LUKS_UUID:-}" ]; then [ -e "/dev/disk/by-uuid/$BACKUP_LUKS_UUID" ]
+    elif [ -n "${BACKUP_FS_UUID:-}" ]; then [ -e "/dev/disk/by-uuid/$BACKUP_FS_UUID" ]
+    else return 1; fi
+}
+
+# Does a block device still rest on real hardware? A device-mapper node (LUKS,
+# LVM) outlives a yanked disk; what disappears is its sysfs slave link. Walk
+# the slave chain down to a non-dm device and require one to exist. Reads
+# sysfs only, so it works unprivileged.
+bx_dev_is_live() { # bx_dev_is_live /dev/xxx
+    local dev="$1" node kn s
+    [ -e "$dev" ] || return 1
+    node=$(readlink -f "$dev" 2>/dev/null || true); kn=$(basename "${node:-$dev}")
+    if [ -d "/sys/block/$kn/slaves" ]; then
+        for s in "/sys/block/$kn/slaves"/*; do
+            [ -e "$s" ] || continue
+            bx_dev_is_live "/dev/$(basename "$s")" && return 0
+        done
+        return 1     # a dm device with no live slave: its disk is gone
+    fi
+    [ -b "$node" ] && { [ -d "/sys/class/block/$kn" ] || [ -d "/sys/block/$kn" ]; }
+}
+
+# Is MOUNT a mount whose backing block device still exists? A dead mount (drive
+# unplugged) still answers `mountpoint -q` yes; this does not.
+bx_mount_is_live() { # bx_mount_is_live MOUNT
+    local m="$1" src
+    mountpoint -q "$m" 2>/dev/null || return 1
+    src=$(findmnt -no SOURCE --target "$m" 2>/dev/null | sed 's/\[.*//' || true)
+    [ -n "$src" ] || return 1
+    bx_dev_is_live "$src"
+}
+
+# ---------------------------------------------------------------------------
 # Wrong-drive guard: refuse to write to a drive whose fs UUID is not the one the
-# config pins. A no-op when BACKUP_FS_UUID is empty (unconfigured). Returns
-# non-zero and prints the reason on mismatch.
+# config pins, or whose backing device is gone (a yanked drive leaves a mount
+# that looks mounted and swallows writes). A no-op on the UUID when
+# BACKUP_FS_UUID is empty (unconfigured). Returns non-zero with the reason.
 # ---------------------------------------------------------------------------
 bx_check_backup_drive() {
     mountpoint -q "$BACKUP_MOUNT" 2>/dev/null || { echo "backup mount $BACKUP_MOUNT is not mounted"; return 1; }
+    bx_mount_is_live "$BACKUP_MOUNT" || { echo "backup mount $BACKUP_MOUNT is dead: its device is gone (drive unplugged?) — run borg-backup-drive-detach.sh"; return 1; }
     [ -n "$BACKUP_FS_UUID" ] || return 0
     local actual; actual=$(findmnt -n -o UUID --target "$BACKUP_MOUNT" 2>/dev/null)
     if [ "$actual" != "$BACKUP_FS_UUID" ]; then

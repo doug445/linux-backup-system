@@ -553,7 +553,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.2.0
+- **Version:** 3.2.1
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

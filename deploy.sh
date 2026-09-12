@@ -248,7 +248,18 @@ detect_backup_mount() {
     if [ -r /etc/backup-system.conf ]; then
         local existing_mount
         existing_mount=$(. /etc/backup-system.conf 2>/dev/null; echo "${BACKUP_MOUNT:-}")
-        if [ -n "$existing_mount" ] && mountpoint -q "$existing_mount" 2>/dev/null; then
+        if [ -n "$existing_mount" ] && mountpoint -q "$existing_mount" 2>/dev/null && ! bx_mount_is_live "$existing_mount"; then
+            # The drive was yanked while mounted: the mount answers "yes" but
+            # its device is gone. Writes into it vanish, and treating it as
+            # mounted would make the drive-type detection guess. Clear it.
+            warn "$existing_mount is a dead mount — its drive was unplugged while mounted. Clearing it."
+            if (( DRY )); then
+                log "  (dry run: a real run lazily unmounts it and closes the LUKS mapping)"
+            elif [ -x "$SCRIPT_DIR/borg-backup-drive-detach.sh" ]; then
+                BX_CONFIG=/etc/backup-system.conf bash "$SCRIPT_DIR/borg-backup-drive-detach.sh" | sed 's/^/  /'
+            fi
+        fi
+        if [ -n "$existing_mount" ] && bx_mount_is_live "$existing_mount"; then
             BACKUP_MOUNT="$existing_mount"
             log "Detected backup mount from /etc/backup-system.conf: $BACKUP_MOUNT"
             offer_blank_drive
@@ -934,10 +945,10 @@ detect_schedule_mode() {
     # Every pipeline here ends in "|| true": under set -e -o pipefail a failing
     # findmnt/lsblk inside $(...) would otherwise kill the script silently.
     src=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
-    if [ -z "$src" ] || ! mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
-        # No drive mounted: nothing may run on its own until one is set up.
+    if [ -z "$src" ] || ! bx_mount_is_live "$BACKUP_MOUNT"; then
+        # No live drive mounted: nothing may run on its own until one is set up.
         SCHEDULE_MODE=adhoc
-        log "Schedule mode (no backup drive mounted at $BACKUP_MOUNT): $SCHEDULE_MODE"
+        log "Schedule mode (no live backup drive at $BACKUP_MOUNT): $SCHEDULE_MODE"
         return
     fi
     if [[ "$src" == /dev/mapper/* ]]; then
@@ -948,7 +959,15 @@ detect_schedule_mode() {
     rm=$(cat "/sys/block/$base/removable" 2>/dev/null || echo 0)
     hp=$(lsblk -no HOTPLUG "/dev/$base" 2>/dev/null | head -1 || true)
     tran=$(lsblk -no TRAN "/dev/$base" 2>/dev/null | head -1 || true)
-    if [ "$rm" = 1 ] || [ "$hp" = 1 ] || [ "$tran" = usb ]; then
+    # "scheduled" enables timers that run backups unattended, so it needs
+    # positive evidence of a fixed internal disk: a resolvable disk that is
+    # neither removable nor hotplug nor on USB. Anything unresolved is ad-hoc.
+    if [ ! -d "/sys/block/$base" ]; then
+        SCHEDULE_MODE=adhoc
+        warn "Could not resolve the backup drive's disk (source ${src:-?}) — assuming ad-hoc; set SCHEDULE_MODE=scheduled yourself if it is an installed drive."
+        return
+    fi
+    if [ "$rm" = 1 ] || [ "$hp" = 1 ] || [ "$tran" = usb ] || [ -z "$tran" ]; then
         SCHEDULE_MODE=adhoc
     else
         SCHEDULE_MODE=scheduled
@@ -1194,7 +1213,7 @@ if [ "$HAS_SNAPPER" = true ]; then
 fi
 
 # Step 7: Deploy recovery scripts to backup drive
-if mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
+if bx_mount_is_live "$BACKUP_MOUNT"; then
     log "Deploying recovery scripts to backup drive..."
     mkdir -p "$BACKUP_MOUNT/recovery-scripts"
     for f in borg-backup.sh borg-restore.sh backintime-backup.sh backintime-restore.sh restore.sh restore-rebuild-boot.sh backup-common.sh backup-verify.sh luks-header-backup.sh timeshift-backup.sh backup-diag.sh README.md; do

@@ -150,6 +150,19 @@ if [ -n "$real" ]; then
     BACKUP_FS_UUID="$real"; bx_check_backup_drive >/dev/null; expect "matching UUID accepted" 0 "$?"
 fi
 
+echo "== live-mount and presence helpers"
+bx_mount_is_live /; expect "/ is a live mount" 0 "$?"
+bx_mount_is_live "$T/nope"; expect "non-mount is not live" 1 "$?"
+rootsrc=$(findmnt -no SOURCE --target / 2>/dev/null | sed 's/\[.*//')
+bx_dev_is_live "$rootsrc"; expect "root device is live ($rootsrc)" 0 "$?"
+bx_dev_is_live /dev/null; expect "/dev/null is not a live block device" 1 "$?"
+bx_dev_is_live "$T/absent"; expect "absent path is not live" 1 "$?"
+BACKUP_LUKS_UUID=""; BACKUP_FS_UUID=""; bx_backup_drive_present; expect "nothing configured -> not present" 1 "$?"
+BACKUP_LUKS_UUID="00000000-0000-0000-0000-000000000000"; bx_backup_drive_present; expect "absent LUKS uuid -> not present" 1 "$?"
+BACKUP_LUKS_UUID=""; BACKUP_FS_UUID="$(findmnt -n -o UUID --target / 2>/dev/null)"
+if [ -n "$BACKUP_FS_UUID" ] && [ -e "/dev/disk/by-uuid/$BACKUP_FS_UUID" ]; then bx_backup_drive_present; expect "root fs uuid -> present" 0 "$?"; fi
+BACKUP_FS_UUID=""
+
 echo "== free-space predicates"
 BACKUP_MOUNT=/
 pct=$(bx_free_pct); gib=$(bx_free_gib)
