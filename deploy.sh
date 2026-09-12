@@ -241,13 +241,31 @@ detect_backup_mount() {
         return
     fi
 
-    # Priority 2: an existing /etc/backup-system.conf whose drive is mounted
+    # Priority 2: an existing /etc/backup-system.conf. Mounted: use it. Not
+    # mounted: this host already has a drive, it is just not connected — keep
+    # the configured path so units and config are not rewritten to a default,
+    # and only offer the set-up flow as an alternative.
     if [ -r /etc/backup-system.conf ]; then
         local existing_mount
         existing_mount=$(. /etc/backup-system.conf 2>/dev/null; echo "${BACKUP_MOUNT:-}")
         if [ -n "$existing_mount" ] && mountpoint -q "$existing_mount" 2>/dev/null; then
             BACKUP_MOUNT="$existing_mount"
             log "Detected backup mount from /etc/backup-system.conf: $BACKUP_MOUNT"
+            return
+        fi
+        if [ -n "$existing_mount" ]; then
+            BACKUP_MOUNT="$existing_mount"
+            WAITING_FOR_DRIVE=1
+            warn "Configured backup drive is not connected (nothing mounted at $BACKUP_MOUNT)."
+            if (( DRY )) || [ ! -t 0 ]; then
+                log "Continuing with the configured drive; connect it and re-run to finish (recovery scripts, first backup)."
+                return
+            fi
+            echo ""
+            echo "  1) Continue — install/update everything; connect the drive later  (default)"
+            echo "  2) Set up a different drive now"
+            ask "Choice [1/2]: "
+            if [ "$REPLY" = 2 ]; then WAITING_FOR_DRIVE=0; prepare_backup_drive; fi
             return
         fi
     fi
@@ -611,9 +629,31 @@ generate_bit_config() {
     local user_to_exclude="$SUDO_USER"
     local exclude_idx=19
     local exclude_size=18  # base excludes (1-18)
+    local cfg=/root/.config/backintime/config
+
+    # An existing config is the user's — it may carry hand-tuned exclusions or
+    # rsync options — and is never regenerated over, except when a new drive
+    # was set up this run (the destination path changed); then the old one is
+    # kept beside it.
+    if [ -f "$cfg" ] && [ "$DRIVE_SETUP_DONE" != 1 ]; then
+        log "  $cfg exists — left as-is"
+        return
+    fi
+    if [ -f "$cfg" ]; then
+        /usr/bin/cp -a "$cfg" "$cfg.old-$(date +%Y%m%d-%H%M%S)"
+        log "  new drive this run — previous BIT config kept as $cfg.old-*"
+    fi
+
+    # SELinux hosts: rsync must not carry security.selinux xattrs into the
+    # snapshot tree, or every file restores with the label it had at backup
+    # time and the target relabels on first boot (or refuses to).
+    local rsync_en=false rsync_val=""
+    if [ -d /sys/fs/selinux ]; then
+        rsync_en=true; rsync_val="--filter='-x security.selinux'"
+    fi
 
     # Start with base config
-    cat > /root/.config/backintime/config << EOF
+    cat > "$cfg" << EOF
 config.version=6
 profile1.name=Full System Backup
 
@@ -728,8 +768,8 @@ profile1.snapshots.smart_remove.keep_one_per_month=2
 profile1.snapshots.smart_remove.run_remote_in_background=false
 
 # rsync options
-profile1.snapshots.rsync_options.enabled=false
-profile1.snapshots.rsync_options.value=
+profile1.snapshots.rsync_options.enabled=$rsync_en
+profile1.snapshots.rsync_options.value=$rsync_val
 profile1.snapshots.one_file_system=false
 
 # Preservation
@@ -1046,6 +1086,11 @@ TS_TIMER=""
 if [ "$SCHEDULE_MODE" = scheduled ]; then
     # shellcheck disable=SC2086
     systemctl unmask backintime-backup.timer borg-backup.timer $TS_TIMER 2>/dev/null || true
+    # unmask removes a previous ad-hoc mask symlink; put the real timers back.
+    for _t in backintime-backup.timer borg-backup.timer $TS_TIMER; do
+        install -m 644 "$SCRIPT_DIR/$_t" "/etc/systemd/system/$_t"
+    done
+    systemctl daemon-reload
     # shellcheck disable=SC2086
     systemctl enable --now backintime-backup.timer borg-backup.timer $TS_TIMER 2>/dev/null || true
     log "  scheduled mode: borg + BIT${TS_TIMER:+ + Timeshift} timers enabled (internal drive)"
@@ -1053,6 +1098,12 @@ else
     # ad-hoc: backups run by hand / on drive-attach; never on a timer
     # shellcheck disable=SC2086
     systemctl disable --now backintime-backup.timer borg-backup.timer $TS_TIMER 2>/dev/null || true
+    # A mask is a /dev/null symlink at /etc/systemd/system/<unit>; a real unit
+    # file there defeats it ("File exists"). Remove the timers first — the
+    # services stay, the tray and the shell functions run the scripts directly.
+    rm -f /etc/systemd/system/backintime-backup.timer /etc/systemd/system/borg-backup.timer \
+          ${TS_TIMER:+/etc/systemd/system/$TS_TIMER}
+    systemctl daemon-reload
     # shellcheck disable=SC2086
     systemctl mask backintime-backup.timer borg-backup.timer $TS_TIMER 2>/dev/null || true
     systemctl enable --now borg-backup-drive-attach.service 2>/dev/null || true
@@ -1060,8 +1111,8 @@ else
 fi
 # verify + header are read-only maintenance; safe to schedule on every box
 systemctl enable --now backup-verify.timer luks-header-backup.timer 2>/dev/null || true
-log "  Borg timer:  $(systemctl is-active borg-backup.timer 2>/dev/null || echo 'check manually')"
-log "  BIT timer:   $(systemctl is-active backintime-backup.timer 2>/dev/null || echo 'check manually')"
+log "  Borg timer:  $(systemctl is-enabled borg-backup.timer 2>/dev/null || true) / $(systemctl is-active borg-backup.timer 2>/dev/null || true)"
+log "  BIT timer:   $(systemctl is-enabled backintime-backup.timer 2>/dev/null || true) / $(systemctl is-active backintime-backup.timer 2>/dev/null || true)"
 if [ "$HAS_SNAPPER" = true ]; then
     log "  Snapper:     $(systemctl is-active snapper-timeline.timer 2>/dev/null || echo 'check manually')"
 fi
