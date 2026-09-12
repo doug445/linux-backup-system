@@ -13,7 +13,7 @@ purpose.
 | **Wanted** | Setup reports from distros, filesystems and boot layouts I cannot reach — see below |
 | **Wanted** | New Linux setups: a report, or a patch that passes the tests |
 | **Wanted** | Serious bugs, with a troubleshooting report |
-| **Declined** | Refactors, new options, general feature requests — regardless of quality |
+| **Qualifed** | Refactors, new options, general feature requests — high quality |
 
 ---
 
