@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.2.2**
+**linux-backup-system 3.3.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -41,6 +41,7 @@ a bug report — it is the only way a row ever turns ✅.
 | systemd-boot, UKI, GRUB EFI, encrypted argon2id `/boot` | ✅ | |
 | **GRUB legacy BIOS** | ❌ | `restore-rebuild-boot.sh` finds the boot disk; a restored machine boots |
 | **Plain (unencrypted) `/boot`** | ❌ | verify's boot-chain section; a restored machine boots |
+| **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
 | **Bare-metal restore executing the boot rebuild** | ❌ | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
 
 ### How to file a setup report

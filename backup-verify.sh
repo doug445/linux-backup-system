@@ -111,7 +111,7 @@ boot_paths() {
     # backup captured an empty directory, which must fail rather than go unseen.
     { findmnt -rno TARGET,FSTYPE 2>/dev/null | awk '$2=="vfat" {print $1}'
       awk '$1 !~ /^#/ && $3 == "vfat" {print $2}' /etc/fstab 2>/dev/null
-    } | grep -xE '/efi|/boot/efi' | sort -u | sed 's#^/##'
+    } | grep -xE "${BX_ESP_PATHS:-/efi|/boot/efi|/boot/firmware}" | sort -u | sed 's#^/##'
     return 0
 }
 
@@ -327,20 +327,19 @@ if [[ -d "$BORG_REPO" ]]; then
             # uses: UKI, plain vmlinuz+initramfs, GRUB, or systemd-boot.
             # Only look under boot/ and efi/: /usr/lib/modules keeps a vmlinuz
             # copy on Fedora and would satisfy a root-only archive.
-            uki=$(grep -icE '^(boot|efi)/.*/EFI/Linux/.*\.efi$' "$listing")
-            kern=$(grep -cE '^(boot|efi)/(.*/)?(vmlinuz|vmlinux|Image|kernel)(-|$)' "$listing")
-            gcfg=$(grep -icE '^(boot|efi)/.*/grub\.cfg$' "$listing")
-            sdb=$(grep -icE '^(boot|efi)/.*/loader/(loader\.conf|entries/.+\.conf)$' "$listing")
+            # One classifier for every boot form (backup-common.sh): UKI,
+            # vmlinuz/Image, GRUB, systemd-boot, Raspberry Pi firmware files.
+            read -r uki kern gcfg sdb pifw < <(bx_boot_listing_counts "$listing")
 
             if (( uki > 0 || kern > 0 )); then
-                ok "archive has a kernel ($uki UKI, $kern vmlinuz/Image)"
+                ok "archive has a kernel ($uki UKI, $kern vmlinuz/Image/kernel*.img)"
             else
                 bad "archive contains NO kernel image — restore would not boot"
             fi
-            if (( gcfg > 0 || sdb > 0 || uki > 0 )); then
-                ok "archive has a bootloader config ($gcfg grub.cfg, $sdb sd-boot, $uki UKI)"
+            if (( gcfg > 0 || sdb > 0 || uki > 0 || pifw >= 2 )); then
+                ok "archive has a bootloader config ($gcfg grub.cfg, $sdb sd-boot, $uki UKI, $pifw Pi firmware files)"
             else
-                bad "archive has NO bootloader config (no grub.cfg, loader entries, or UKI)"
+                bad "archive has NO bootloader config (no grub.cfg, loader entries, UKI, or Pi config.txt+cmdline.txt)"
             fi
         else
             bad "could not read archive $arch"
@@ -448,6 +447,12 @@ if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
             echo "        Its header is covered by check 2. The initramfs/bootloader must"
             echo "        still be able to unlock it after a restore."
         fi
+    fi
+    if bx_pi_firmware_boot; then
+        note "Raspberry Pi firmware boot: no bootloader to reinstall; the firmware reads"
+        echo "        config.txt / cmdline.txt / kernel*.img from the vfat partition. A restore"
+        echo "        onto a new card must rewrite root=PARTUUID= in cmdline.txt (the boot"
+        echo "        rebuild does this) — UNTESTED ON METAL, see the README status table."
     fi
     if is_asahi; then
         note "m1n1/U-Boot live in Apple-managed partitions that Linux cannot back up."

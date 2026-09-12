@@ -188,6 +188,33 @@ fi
 BACKUP_EXTRA_SOURCES="$T/not-mounted"
 if bx_backup_sources | grep -qx "$T/not-mounted"; then bad "unmounted extra source must be dropped"; else ok "unmounted extra source dropped"; fi
 
+echo "== boot-listing classifier (uki kern gcfg sdb pifw)"
+printf 'etc/fstab\nboot/vmlinuz-6.1.0\nboot/initramfs-6.1.0.img\nboot/grub2/grub.cfg\nboot/efi/EFI/fedora/grubx64.efi\nusr/lib/modules/6.1.0/vmlinuz\n' > "$T/l-grub"
+expect "GRUB + vmlinuz"        "0 1 1 0 0" "$(bx_boot_listing_counts "$T/l-grub")"
+printf 'efi/EFI/Linux/arch-linux.efi\nefi/loader/loader.conf\nefi/loader/entries/arch.conf\n' > "$T/l-uki"
+expect "systemd-boot + UKI"     "1 0 0 2 0" "$(bx_boot_listing_counts "$T/l-uki")"
+printf 'boot/efi/EFI/Linux/fedora.efi\nboot/efi/loader/entries/f.conf\nboot/efi/EFI/fedora/grub.cfg\n' > "$T/l-uki2"
+expect "ESP at /boot/efi: UKI + entry + grub.cfg" "1 0 1 1 0" "$(bx_boot_listing_counts "$T/l-uki2")"
+printf 'boot/vmlinuz-linux\nboot/initramfs-linux.img\nboot/loader/loader.conf\nboot/loader/entries/arch.conf\nboot/EFI/systemd/systemd-bootx64.efi\n' > "$T/l-sdb-boot"
+expect "systemd-boot, no UKI, ESP at /boot (Arch)" "0 1 0 2 0" "$(bx_boot_listing_counts "$T/l-sdb-boot")"
+printf 'efi/0123456789abcdef0123456789abcdef/6.10.0-1/linux\nefi/0123456789abcdef0123456789abcdef/6.10.0-1/initrd\nefi/loader/entries/0123456789abcdef0123456789abcdef-6.10.0-1.conf\n' > "$T/l-sdb-efi"
+expect "systemd-boot, no UKI, kernel-install Type #1 at /efi" "0 1 0 1 0" "$(bx_boot_listing_counts "$T/l-sdb-efi")"
+printf 'boot/0123456789abcdef0123456789abcdef/6.10.0-1/linux\nboot/loader/entries/x.conf\n' > "$T/l-sdb-xboot"
+expect "systemd-boot, no UKI, XBOOTLDR at /boot" "0 1 0 1 0" "$(bx_boot_listing_counts "$T/l-sdb-xboot")"
+printf 'home/x/0123456789abcdef0123456789abcdef/6.10.0-1/linux\n' > "$T/l-sdb-fake"
+expect "Type #1 layout outside boot/efi does not count" "0 0 0 0 0" "$(bx_boot_listing_counts "$T/l-sdb-fake")"
+printf 'boot/firmware/config.txt\nboot/firmware/cmdline.txt\nboot/firmware/kernel8.img\nboot/firmware/kernel_2712.img\nboot/firmware/initramfs8\nboot/firmware/bcm2712-rpi-5-b.dtb\n' > "$T/l-pi"
+expect "Raspberry Pi firmware"  "0 2 0 0 2" "$(bx_boot_listing_counts "$T/l-pi")"
+printf 'boot/config.txt\nboot/cmdline.txt\nboot/kernel8.img\n' > "$T/l-pi-old"
+expect "Pi, old /boot layout"   "0 1 0 0 2" "$(bx_boot_listing_counts "$T/l-pi-old")"
+printf 'etc/fstab\nusr/lib/modules/6.1.0/vmlinuz\nhome/x/kernel.txt\n' > "$T/l-none"
+expect "root-only archive"      "0 0 0 0 0" "$(bx_boot_listing_counts "$T/l-none")"
+mkdir -p "$T/pifw"; printf 'arm_64bit=1\n' > "$T/pifw/config.txt"
+if [ ! -d /sys/firmware/efi ]; then BX_PI_FW="$T/pifw" bx_pi_firmware_boot; expect "config.txt without EFI -> Pi firmware boot" 0 "$?"
+else BX_PI_FW="$T/pifw" bx_pi_firmware_boot; expect "EFI machine is never Pi firmware boot" 1 "$?"; fi
+BX_PI_FW="$T/nope" bx_pi_firmware_boot; r=$?; [ -f /boot/config.txt ] || expect "no config.txt -> not Pi" 1 "$r"
+expect "esp path list carries /boot/firmware" 0 "$(grep -qx '/boot/firmware' <<<"$(tr '|' '\n' <<<"$BX_ESP_PATHS")"; echo $?)"
+
 echo "== snapshot engine"
 e=$(bx_snapshot_engine)
 case "$e" in btrfs|timeshift|none) ok "engine is one of btrfs/timeshift/none ($e)" ;; *) bad "engine '$e'" ;; esac

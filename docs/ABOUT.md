@@ -171,7 +171,7 @@ the drive they live on.
 | **Architectures** | x86_64, aarch64 (Apple Silicon under Fedora Asahi Remix included) |
 | **Distro families** | Fedora / RHEL, Debian / Ubuntu / Mint, Arch / Manjaro, openSUSE — derivatives via `ID_LIKE` |
 | **Root filesystems** | btrfs (snapper + send/receive), ext4 (Timeshift); any other root takes the Timeshift layer, unverified |
-| **Boot layouts** | GRUB EFI, GRUB legacy BIOS, systemd-boot, Unified Kernel Images, encrypted argon2id `/boot`, plain `/boot` |
+| **Boot layouts** | GRUB EFI, GRUB legacy BIOS, systemd-boot, Unified Kernel Images, encrypted argon2id `/boot`, plain `/boot`, Raspberry Pi firmware boot (untested) |
 | **Layers** | Borg, Back In Time format (direct rsync), btrfs send/receive or Timeshift, LUKS header backup, restore-readiness verify |
 | **Requires** | borg, rsync, cryptsetup; `btrfs-progs` + snapper on btrfs; timeshift elsewhere — each script installs what it is missing |
 | **Author** | William MacKinnon &lt;spilled-bowline0j@icloud.com&gt; |

@@ -111,13 +111,14 @@ Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
 
 | Setup | Status |
 |---|:--:|
-| systemd-boot | ✅ |
+| systemd-boot (Type #1 entries, no UKI) | ✅ |
 | UKI (unified kernel image) | ✅ |
 | GRUB (EFI) | ✅ |
 | GRUB (legacy BIOS) | ❌ |
 | Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ |
 | Encrypted argon2id `/boot` | ✅ |
 | Plain `/boot` (unencrypted /boot) | ❌ |
+| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
 | Bare-metal restore **executing** the boot rebuild (not just its dry run) | ❌ |
 
 To turn a ❌ into a ✅: deploy it, run one real backup on each layer, run
@@ -300,9 +301,9 @@ The line that disagrees with reality is the bug. Then:
 | **Distro family → package manager** | `backup-common.sh` → `bx_distro_family` (matches `ID` and each word of `ID_LIKE` from `os-release`) and `bx_pkg_install_cmd`; `deploy.sh` → `detect_distro` (the same families, plus per-family package names) | Add your `ID` / `ID_LIKE` token to the family it belongs to, or add a family with its install command. Both places, or the library will accept a distro the installer refuses. | Add a synthetic `os-release` case to `tests/lib-fixture-test.sh`; `sudo ./deploy.sh --dry-run` prints `Distro:` with the right family |
 | **Package names** (borg, Back In Time, AppIndicator, Timeshift) | `backup-common.sh` → `bx_pkg_for`; `deploy.sh` → `detect_distro` (`BIT_PKGS`, `BORG_PKG`) and the two `case "$DISTRO_FAMILY"` blocks in *Step 1: Install packages* | Map the command to your distro's package name. | `sudo borg-backup.sh --dry-run` — its `[deps]` lines name what it would install |
 | **Root filesystem → snapshot engine** | `backup-common.sh` → `bx_snapshot_engine` (btrfs → send/receive, else Timeshift); consumed by `borg-backup.sh` (replica block), `timeshift-backup.sh` (early exit on btrfs), `backup-verify.sh` (section 4) | A new engine means a new branch in all four. A filesystem that should simply use Timeshift needs nothing — it already does. | `--dry-run` of both backup scripts; one real run; `backup-verify.sh` section 4 |
-| **Where the ESP is** | `backup-common.sh` → `bx_esp_mount`, `backup-verify.sh` → `boot_paths`, `restore-rebuild-boot.sh` (ESP block) — **all three accept only `/boot/efi` and `/efi`** | Add your mountpoint to the accepted list in all three. Stopgap until then: `BACKUP_EXTRA_SOURCES="/your/esp"` in the config gets it into the backup set. | The report's *ESP candidates*; `borg-backup.sh --dry-run` lists it under `backup sources` |
-| **Which bootloader, and how to rebuild it** | `restore-rebuild-boot.sh` — the detection block (`IS_UKI`, `USES_GRUB`, `USES_SDBOOT`) and the per-bootloader steps; an unknown bootloader **warns and continues** | Add a detection test and a rebuild step for rEFInd, Limine, syslinux/extlinux, U-Boot… | `restore-rebuild-boot.sh --dry-run` on the live system shows the plan; `tests/cli-test.sh` proves the dry run executes nothing |
-| **Whether the archive is bootable** | `backup-verify.sh` section 3 — four `grep` patterns over the archive listing for a UKI, a `vmlinuz`/`Image`, a `grub.cfg` and systemd-boot entries. A bootloader they do not know produces a **false FAIL**: *"archive has NO bootloader config"* | Add a pattern for your bootloader's config file (or kernel name, e.g. `zImage`). | `backup-verify.sh` after one real archive — section 3 must PASS |
+| **Where the boot-firmware partition is** | `backup-common.sh` → `BX_ESP_PATHS` (used by `bx_esp_mount` and `backup-verify.sh`), `bx_backup_sources`, and the ESP block in `restore-rebuild-boot.sh` — **the accepted paths are `/boot/efi`, `/efi` and `/boot/firmware`** | Add your mountpoint to `BX_ESP_PATHS`, the sources list, and the rebuild script's loop. Stopgap until then: `BACKUP_EXTRA_SOURCES="/your/esp"` in the config gets it into the backup set. | The report's *ESP candidates*; `borg-backup.sh --dry-run` lists it under `backup sources` |
+| **Which bootloader, and how to rebuild it** | `restore-rebuild-boot.sh` — the detection block (`IS_UKI`, `USES_GRUB`, `USES_SDBOOT`, `IS_PI_FW`) and the per-bootloader steps; an unknown bootloader **warns and continues** | Add a detection test and a rebuild step for rEFInd, Limine, syslinux/extlinux, U-Boot… The Raspberry Pi case (no bootloader, fix `root=PARTUUID` in `cmdline.txt`) is the template for a firmware-reads-the-partition board. | `restore-rebuild-boot.sh --dry-run` on the live system shows the plan; `tests/cli-test.sh` proves the dry run executes nothing |
+| **Whether the archive is bootable** | `backup-common.sh` → `bx_boot_listing_counts`, used by `backup-verify.sh` section 3: patterns over the archive listing for a UKI, a `vmlinuz`/`Image`/`kernel*.img` or a kernel-install `<machine-id>/<version>/linux`, a `grub.cfg`, systemd-boot entries, and Pi `config.txt`+`cmdline.txt`. A bootloader they do not know produces a **false FAIL**: *"archive has NO bootloader config"* | Add a pattern for your bootloader's config file (or kernel name, e.g. `zImage`) and a synthetic listing to `tests/lib-fixture-test.sh`. | The fixture test; then `backup-verify.sh` after one real archive — section 3 must PASS |
 | **Which initramfs tool** | `restore-rebuild-boot.sh` — `update-initramfs` / `dracut` / `mkinitcpio` by `command -v`; otherwise a warning | Add your generator. | `restore-rebuild-boot.sh --dry-run` shows the `would:` line |
 | **Encrypted `/boot`** | `restore-rebuild-boot.sh` — `BOOT_ON_LUKS` is inferred from `/boot` (or `/`) being on `/dev/mapper/*` | A LUKS `/boot` opened under another path, or LVM-on-plain-disk, needs a `cryptsetup status` check instead of the prefix test. | The report's boot-layout line `boot_on_luks=` |
 | **Ad-hoc vs scheduled** | `deploy.sh` → `detect_schedule_mode` (removable, hotplug, or USB transport → ad-hoc) | Thunderbolt NVMe, SD readers and LVM stacks can misclassify. Override first: `SCHEDULE_MODE=` in the config or environment. | `sudo ./deploy.sh --dry-run` prints `Schedule mode (…): ` with the evidence |
@@ -475,6 +476,17 @@ the same drive, on every layout, with the boot chain rebuilt for you — and it
 keeps the ad-hoc drive, the count-based retention and the no-backup-on-plug-in
 policy that a bare timer gets wrong.
 
+### Does it work on a Raspberry Pi?
+
+In design, yes — Raspberry Pi OS is the Debian family on aarch64, the backup
+layers need nothing special, and a USB drive is ad-hoc like anywhere else. The
+Pi boots without a bootloader: its firmware reads `config.txt`, `cmdline.txt`
+and `kernel*.img` from a vfat partition at `/boot/firmware`. 3.3.0 recognises
+that partition as the boot source, counts those files as a bootable archive in
+the verify pass, and on restore rewrites `root=PARTUUID=` in `cmdline.txt` for
+the new card instead of trying to install GRUB. **None of it has run on a
+Pi** — it is a ❌ row, and a setup report from one is what turns it green.
+
 ### Can I run it on Apple Silicon?
 
 Yes — Fedora Asahi Remix (aarch64) is the development platform. GRUB on
@@ -503,11 +515,16 @@ says where each decision lives.
   2026-09-11) and `backup-verify.sh` confirmed its rsync payload. The count and
   free-space prune paths have still not fired on a real drive — that needs more
   snapshots than `KEEP`, or a drive tight enough to trip `MIN_FREE_*`.
-- **The ESP is only recognised at `/boot/efi` or `/efi`**, in all three places
-  that look for it. `BACKUP_EXTRA_SOURCES` is the stopgap.
-- **`backup-verify.sh` knows GRUB, systemd-boot and UKIs.** rEFInd, Limine and
-  syslinux archives produce a false "no bootloader config" FAIL until a pattern
-  is added.
+- **The boot-firmware partition is only recognised at `/boot/efi`, `/efi` or
+  `/boot/firmware`** (`BX_ESP_PATHS`). `BACKUP_EXTRA_SOURCES` is the stopgap.
+- **`backup-verify.sh` knows GRUB, systemd-boot, UKIs and Raspberry Pi firmware
+  files.** rEFInd, Limine and syslinux archives produce a false "no bootloader
+  config" FAIL until a pattern is added.
+- **Raspberry Pi: written, never run.** The firmware-boot recogniser, the
+  verify patterns and the `cmdline.txt` `root=PARTUUID` rewrite in
+  `restore-rebuild-boot.sh` are exercised only against synthetic listings in
+  the fixture test. The author has Pis in storage and no plan to run one; that
+  row will stay ❌ until someone with a Pi sends a setup report.
 - Verify the ❌ rows on real hardware and flip them to ✅.
 
 ## Documentation
@@ -564,7 +581,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.2.2
+- **Version:** 3.3.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

@@ -75,9 +75,16 @@ grep -qsvE '^\s*#|^\s*$' /etc/crypttab 2>/dev/null && HAS_LUKS=true
 
 # ESP mountpoint.
 ESP=""
-for e in /boot/efi /efi; do mountpoint -q "$e" 2>/dev/null && { ESP="$e"; break; }; done
+for e in /boot/efi /efi /boot/firmware; do mountpoint -q "$e" 2>/dev/null && { ESP="$e"; break; }; done
 [ -z "$ESP" ] && { for e in /boot/efi /efi; do [ -d "$e/EFI" ] && { ESP="$e"; break; }; done; }
 IS_EFI=false; [ -d /sys/firmware/efi ] && IS_EFI=true
+# Raspberry Pi firmware boot: the SoC firmware reads config.txt / cmdline.txt /
+# kernel*.img straight from the vfat partition; there is no bootloader to
+# install. UNTESTED ON METAL — see the README status table.
+IS_PI_FW=false; PI_FW_DIR=""
+if [ "$IS_EFI" = false ]; then
+    for d in /boot/firmware /boot; do [ -f "$d/config.txt" ] && { IS_PI_FW=true; PI_FW_DIR="$d"; break; }; done
+fi
 
 # Kernel form: UKI if the ESP holds unified images, or kernel-install is set to uki.
 IS_UKI=false
@@ -108,7 +115,7 @@ boot_src=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//')
 
 say "distro=$DISTRO_FAMILY arch=$ARCH efi=$IS_EFI esp=${ESP:-none}"
 say "kernels: ${KVERS[*]:-none}"
-say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT"
+say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT pi_firmware=$IS_PI_FW"
 [ ${#KVERS[@]} -eq 0 ] && warn "no kernels found under /lib/modules — cannot rebuild"
 
 # ---------------------------------------------------------------------------
@@ -206,7 +213,26 @@ if [ "$USES_SDBOOT" = true ]; then
     fi
 fi
 
-[ "$USES_GRUB" = false ] && [ "$USES_SDBOOT" = false ] && \
-    warn "no bootloader detected (neither GRUB nor systemd-boot) — boot install skipped"
+if [ "$IS_PI_FW" = true ]; then
+    say "===== Raspberry Pi firmware boot ($PI_FW_DIR) — nothing to install ====="
+    # The firmware finds the root by PARTUUID in cmdline.txt; a restore onto a
+    # new card has a new PARTUUID. Rewrite root= to the device / is on now.
+    root_src=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')
+    root_puuid=$(lsblk -no PARTUUID "$root_src" 2>/dev/null | head -1)
+    if [ -f "$PI_FW_DIR/cmdline.txt" ] && [ -n "$root_puuid" ]; then
+        if grep -q "root=PARTUUID=$root_puuid" "$PI_FW_DIR/cmdline.txt"; then
+            say "cmdline.txt already points root= at PARTUUID=$root_puuid"
+        else
+            runsh "sed -i 's#root=[^ ]*#root=PARTUUID=$root_puuid#' $PI_FW_DIR/cmdline.txt"
+        fi
+    else
+        warn "could not rewrite root= in $PI_FW_DIR/cmdline.txt (file or PARTUUID missing) — check it by hand before rebooting"
+    fi
+    [ -f "$PI_FW_DIR/config.txt" ] && grep -q '^initramfs' "$PI_FW_DIR/config.txt" \
+        && say "config.txt loads an initramfs; update-initramfs (rpi hooks) refreshed it above" \
+        || say "config.txt loads no initramfs — kernel*.img boots the root directly"
+elif [ "$USES_GRUB" = false ] && [ "$USES_SDBOOT" = false ]; then
+    warn "no bootloader detected (neither GRUB nor systemd-boot nor Pi firmware) — boot install skipped"
+fi
 
 say "===== boot rebuild ${DRY:+(dry run) }complete ====="

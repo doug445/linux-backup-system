@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.2.2"
+BX_VERSION="3.3.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -97,18 +97,52 @@ bx_snapshot_engine() {
 bx_backup_sources() {
     echo /
     local m
-    for m in /home /boot /boot/efi /efi $BACKUP_EXTRA_SOURCES; do
+    for m in /home /boot /boot/efi /efi /boot/firmware $BACKUP_EXTRA_SOURCES; do
         [ "$m" = / ] && continue
         mountpoint -q "$m" 2>/dev/null && echo "$m"
     done | sort -u
 }
 
-# The ESP mountpoint for this host (empty on legacy BIOS), from live mounts then
-# fstab so a declared-but-unmounted ESP is still found.
+# The boot-firmware partition for this host — the ESP on UEFI machines, the
+# vfat firmware partition on a Raspberry Pi — from live mounts then fstab, so a
+# declared-but-unmounted one is still found. Empty on legacy BIOS. These are
+# the ONLY paths the suite recognises; a new layout is added here and in the
+# matching lists in backup-verify.sh and restore-rebuild-boot.sh.
+BX_ESP_PATHS='/efi|/boot/efi|/boot/firmware'
 bx_esp_mount() {
     { findmnt -rno TARGET,FSTYPE 2>/dev/null | awk '$2=="vfat"{print $1}'
       awk '$1 !~ /^#/ && $3=="vfat"{print $2}' /etc/fstab 2>/dev/null
-    } | grep -xE '/efi|/boot/efi' | head -1
+    } | grep -xE "$BX_ESP_PATHS" | head -1
+}
+
+# Raspberry Pi firmware boot: no UEFI, no GRUB, no systemd-boot. The SoC's
+# firmware reads config.txt / cmdline.txt / kernel*.img from a vfat partition
+# (/boot/firmware on Raspberry Pi OS bookworm+, /boot before). Recognised by
+# config.txt in that partition on a machine without EFI. UNTESTED ON METAL.
+bx_pi_firmware_boot() {
+    [ -d /sys/firmware/efi ] && return 1
+    [ -f "${BX_PI_FW:-/boot/firmware}/config.txt" ] || [ -f /boot/config.txt ]
+}
+
+# Classify an archive/snapshot listing (paths relative to the root, one per
+# line) by what would let it boot. Prints: uki kern gcfg sdb pifw — counts of
+# UKIs, plain kernels, grub.cfg files, systemd-boot entries, and Raspberry Pi
+# firmware config files. Plain kernels include the kernel-install Type #1
+# layout, <esp>/<machine-id>/<version>/linux, which systemd-boot without UKIs
+# uses on Fedora, Debian and Arch when the ESP is /efi or XBOOTLDR is /boot. Only boot/ and efi/ are considered: /usr/lib/modules
+# keeps a vmlinuz copy on Fedora and would satisfy a root-only archive.
+# The path segment between boot/|efi/ and the file is optional: with the ESP
+# at /efi a UKI lists as efi/EFI/Linux/x.efi and an entry as
+# efi/loader/entries/x.conf, with nothing in between — the old patterns
+# required a directory there and missed every systemd-boot host with /efi.
+bx_boot_listing_counts() { # bx_boot_listing_counts LISTING_FILE
+    local f="$1"
+    printf '%s %s %s %s %s\n' \
+        "$(grep -icE '^(boot|efi)/(.*/)?EFI/Linux/.*\.efi$' "$f")" \
+        "$(grep -cE '^(boot|efi)/(.*/)?(vmlinuz|vmlinux|Image|kernel)(-|$)|^(boot|efi)/[0-9a-f]{32}/[^/]+/linux$|^boot/(firmware/)?kernel[0-9_a-z]*\.img$' "$f")" \
+        "$(grep -icE '^(boot|efi)/(.*/)?grub\.cfg$' "$f")" \
+        "$(grep -icE '^(boot|efi)/(.*/)?loader/(loader\.conf|entries/.+\.conf)$' "$f")" \
+        "$(grep -cE '^boot/(firmware/)?(config|cmdline)\.txt$' "$f")"
 }
 
 # Is /boot its own filesystem (vs a directory on root)?
