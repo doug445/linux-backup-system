@@ -422,22 +422,32 @@ if [[ "$(findmnt -no FSTYPE / 2>/dev/null)" == btrfs ]]; then
     fi
 else
     # Non-btrfs root: Timeshift is this layer. A snapshot dir is complete when it
-    # carries the rsync payload (localhost/) that a restore actually reads back.
+    # carries the rsync payload (localhost/) that a restore actually reads back
+    # AND info.json, which Timeshift writes last — localhost/ appears the moment
+    # rsync starts, so on its own it does not prove the copy finished.
     ts_dir="$BACKUP_MOUNT/timeshift/snapshots"
     if [[ -d "$ts_dir" ]]; then
         tot=0; inc=0
+        ts_busy=0; pgrep -x timeshift >/dev/null 2>&1 && ts_busy=1
         while IFS= read -r s; do
             [[ -n "$s" ]] || continue
             tot=$((tot + 1))
             if [[ ! -d "$s/localhost" ]]; then
                 bad "incomplete Timeshift snapshot (no localhost/ payload): $s"
                 inc=$((inc + 1))
+            elif [[ ! -f "$s/info.json" ]]; then
+                if (( ts_busy )); then
+                    note "Timeshift snapshot still being written (timeshift is running): $s"
+                else
+                    bad "aborted Timeshift snapshot (no info.json; timeshift-backup.sh will prune it): $s"
+                fi
+                inc=$((inc + 1))
             fi
         done < <(find "$ts_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
         if (( tot == 0 )); then
             note "no Timeshift snapshots yet under $ts_dir"
         elif (( inc == 0 )); then
-            ok "$tot Timeshift snapshot(s), all complete (rsync payload present)"
+            ok "$tot Timeshift snapshot(s), all complete (rsync payload + info.json present)"
         fi
     else
         note "no Timeshift snapshots at $ts_dir (non-btrfs local layer not in use)"

@@ -79,6 +79,58 @@ when the drive is connected. See [Install](#install).
 | Restore-readiness check | `backup-verify.sh` | every distro | asserts a restore would boot — kernel, bootloader config, and every kernel command line agreeing with `fstab`/`crypttab`; exit 0 / 1 (warnings) / 2 (a restore would fail) |
 | Troubleshooting report | `backup-diag.sh` | every distro | read-only, redacted; the file a bug or setup report is built from |
 
+## Why three backup layers instead of one
+
+A single backup tool is a single point of failure. Every backup program has a
+format, a code path and a retention policy, and each of those can fail
+silently: a deduplicated repository with one corrupt chunk, an rsync run that
+quietly stopped copying a directory, a snapshot engine that pruned the wrong
+thing. If that one tool is your only copy, its bug is your data loss. Three
+independent layers on Linux — a deduplicated **Borg archive**, plain **rsync
+file snapshots** (Back In Time format) and a **filesystem-level snapshot**
+(btrfs send/receive or Timeshift) — fail in different ways, are read back by
+different code, and give you three different ways to get a machine back:
+
+| Need | Layer that answers it | Why the others don't |
+|---|---|---|
+| Roll the whole OS back after a bad update, in minutes | btrfs / Timeshift snapshot | borg and rsync restores rebuild file by file |
+| Get one file, one directory, or one config from last month | BIT rsync snapshot | plain files, browsable with `ls`, `cp`, any file manager, no tool required |
+| Long history in little space, encrypted, integrity-checked | Borg archive | dedup + compression; `borg check` proves the bits are intact |
+| Restore onto a fresh disk and have it **boot** | any layer + `restore-rebuild-boot.sh` | that is what `backup-verify.sh` asserts every day |
+
+The point is not redundancy for its own sake. Each layer covers a failure the
+other two cannot, and a restore-readiness check runs against all of them so a
+broken layer is found on a normal day, not on the day the disk dies. That is
+what makes this a **restorable** Linux backup strategy rather than a backup
+that merely exists.
+
+### The recommended 3-2-1 storage strategy
+
+The widely recommended **3-2-1 backup strategy** is: keep **3** copies of your
+data, on **2** different kinds of storage media, with **1** copy off-site.
+Modern variants add **1** copy offline or immutable (against ransomware and
+accidental deletion) and **0** errors on verification (3-2-1-1-0). How the
+layers here map onto it:
+
+- **3 copies** — the live system plus the three independent backup layers.
+- **2 media** — the internal disk and a separate backup drive; a second drive
+  of a different type (SSD vs spinning disk, or a NAS) covers the "different
+  media" clause fully.
+- **1 off-site** — the Borg repo is the natural candidate: it is encrypted and
+  deduplicated, so pushing it to a remote host over SSH, to a storage provider,
+  or to a drive kept at another address costs little bandwidth and exposes no
+  plaintext. `borg` can target a second repository directly, or the repository
+  directory can be mirrored with `rsync`.
+- **1 offline** — in ad-hoc mode the backup drive is unplugged between runs, so
+  it is unreachable by ransomware or a stray `rm -rf` on the live system.
+- **0 errors** — `backup-verify.sh` runs daily and fails loudly when a restore
+  would not boot, the verification step most setups skip. A real restore onto
+  spare hardware after deploying, and after any change to the boot layout,
+  proves the rest.
+
+Apply the full rule to the machines whose data you cannot recreate; a
+disposable box gets the on-site layers and nothing more.
+
 ## Tested / untested
 
 Green ✅ means a real backup **and** a `backup-verify` pass have been confirmed
@@ -86,8 +138,12 @@ on that setup. A red ❌ means the code paths exist and dry-run clean but that
 exact combination has **not** been verified yet — run it there and confirm
 before trusting it. The tooling was developed and dry-run-verified on Fedora
 Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
-(x86_64, ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI) on
-2026-09-11.
+(x86_64, ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI): real
+backups and a `backup-verify` pass on 2026-09-11, and the Timeshift retention
+paths (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot
+cleanup) on 2026-09-12 — first against a loop-device drive seeded with
+fabricated snapshots, then a real count prune on the production backup drive,
+deleting through `timeshift --delete` and confirmed by `backup-verify.sh`.
 
 **Distros**
 
@@ -104,7 +160,7 @@ Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
 | Root fs | Local-snapshot engine | Status |
 |---|---|:--:|
 | btrfs | btrfs send/receive (`borg-backup.sh`) | ✅ |
-| ext4 | Timeshift (`timeshift-backup.sh`) | ✅ create · ❌ prune (never fired on a real drive) |
+| ext4 | Timeshift (`timeshift-backup.sh`) | ✅ |
 | xfs / f2fs / anything else | Timeshift | ❌ |
 
 **Boot layouts**
@@ -143,6 +199,13 @@ Override detection with `SCHEDULE_MODE=adhoc|scheduled` in the config or the
 environment. The read-only `backup-verify` and `luks-header-backup` timers are
 enabled on every host regardless — they never write a backup.
 
+On non-btrfs hosts `deploy.sh` also switches **Timeshift's own scheduler off**
+(every `schedule_*` flag in `/etc/timeshift/timeshift.json`, plus its
+`cron.d/timeshift-hourly` and `timeshift-boot` entries), forces rsync mode and
+pins it to the backup drive. Timeshift's built-in schedule is time-based and
+prunes by age, which is exactly what fleet retention must never do; the
+`timeshift-backup` timer is the only thing that creates Timeshift snapshots.
+
 ## Retention
 
 Count-based **and** free-space based, **never** time-based — an ad-hoc drive can
@@ -159,6 +222,13 @@ layer (borg archives, btrfs/Timeshift replicas, BIT snapshots):
 Normal runs keep `KEEP`. Only when the drive is genuinely tight does it drop the
 oldest, one at a time, down to `MIN_KEEP`.
 
+Precedence is environment > `/etc/backup-system.conf` > built-in default, so a
+one-off override needs no config edit:
+
+```bash
+sudo env KEEP=5 /usr/local/sbin/timeshift-backup.sh --prune-only   # apply retention, no new snapshot
+```
+
 ## Install
 
 ```bash
@@ -172,7 +242,10 @@ touching anything else; deploys every script plus `backup-common.sh`; generates
 `/etc/backup-system.conf` (never clobbering an existing one); deploys the
 units and the udev rule; enables timers only in scheduled mode; installs the
 tray; and adds `timeback` / `bitback` / `snapback` shell functions. On
-non-btrfs roots it installs Timeshift as the local-snapshot layer.
+non-btrfs roots it installs Timeshift as the local-snapshot layer and
+configures it as a pure engine for `timeshift-backup.sh`: built-in schedule
+off, rsync mode, pinned to the backup drive (idempotent; the exclude list is
+left alone).
 
 **Setting the drive up.** When no backup drive is mounted, a real run (never
 the dry run, never a non-interactive session) offers:
@@ -256,6 +329,14 @@ sudo /usr/local/sbin/timeshift-backup.sh --dry-run   # non-btrfs roots
 sudo /usr/local/sbin/backup-verify.sh                # read-only by nature
 sudo /usr/local/sbin/restore-rebuild-boot.sh --dry-run   # the boot-chain plan a restore would execute here
 ```
+
+`timeshift-backup.sh` also takes `--prune-only` (retention without a new
+snapshot). Its prune treats a snapshot directory without `info.json` — which
+Timeshift writes last — as aborted and removes it, then keeps the newest `KEEP`
+complete snapshots, then frees space oldest-first down to `MIN_KEEP`. Every
+`timeshift` call is pinned to the backup drive with `--snapshot-device`, never
+to whatever device Timeshift's own config remembers. `backup-verify.sh` applies
+the same completeness rule.
 
 Logs: `/var/log/borg-backup.log`, `/var/log/backintime-backup.log`,
 `/var/log/timeshift-backup.log`, `/var/log/luks-header-backup.log`. The verify
@@ -390,7 +471,7 @@ lib-cmdline.sh                every kernel command-line carrier: find, rewrite i
 backup-system.conf.example    per-host config template (installed to /etc/backup-system.conf)
 borg-backup.sh                borg archive + btrfs replicas (btrfs roots)   --dry-run
 backintime-backup.sh          BIT-format rsync snapshots                    --dry-run
-timeshift-backup.sh           Timeshift snapshots + count/space retention (non-btrfs local layer)  --dry-run
+timeshift-backup.sh           Timeshift snapshots + count/space retention (non-btrfs local layer)  --dry-run --prune-only
 backup-verify.sh              restore-readiness assertion (exit 0/1/2)
 luks-header-backup.sh         LUKS header backup, keyslot-tagged
 backup-diag.sh                troubleshooting report: read-only, redacted   (-o FILE, --no-redact, --full)
@@ -524,11 +605,10 @@ says where each decision lives.
   `update-initramfs -k all -c` + `grub-install` + `update-grub` — but that plan
   has not yet been *executed* by a real bare-metal restore. Run the real restore
   path on hardware before trusting it, using `--dry-run` first.
-- **Timeshift wrapper: create verified on ext4, prune still untested.**
-  `timeshift-backup.sh` created a real snapshot on an ext4 root (Mint 22.3,
-  2026-09-11) and `backup-verify.sh` confirmed its rsync payload. The count and
-  free-space prune paths have still not fired on a real drive — that needs more
-  snapshots than `KEEP`, or a drive tight enough to trip `MIN_FREE_*`.
+- **Timeshift free-space prune has fired only in the sandbox.** On the ext4
+  host the count prune, the `MIN_KEEP` floor and the aborted-snapshot cleanup
+  ran for real; the free-space branch deleted real directories only on the
+  loop-device drive (the production drive is 87% free). Same code path.
 - **The boot-firmware partition is only recognised at `/boot/efi`, `/efi` or
   `/boot/firmware`** (`BX_ESP_PATHS`). `BACKUP_EXTRA_SOURCES` is the stopgap.
 - **The command-line rewrite on restore is exercised only against synthetic
@@ -599,7 +679,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.4.2
+- **Version:** 3.5.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

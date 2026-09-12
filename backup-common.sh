@@ -38,16 +38,24 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.4.2"
+BX_VERSION="3.5.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
 # ---------------------------------------------------------------------------
 BX_CONFIG="${BX_CONFIG:-/etc/backup-system.conf}"
 
+# Precedence: environment > /etc/backup-system.conf > built-in default, so a
+# one-off override works from the shell (KEEP=2 timeshift-backup.sh --prune-only)
+# and from a unit's Environment= line, without editing the host config.
+BX_CONFIG_VARS="BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE BACKUP_MOUNT_OPTS SCHEDULE_MODE BACKUP_EXTRA_SOURCES KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB"
+
 bx_load_config() {
+    local _v _env=()
+    for _v in $BX_CONFIG_VARS; do [ -n "${!_v+x}" ] && _env+=("$_v=${!_v}"); done
     # shellcheck disable=SC1090
     [ -r "$BX_CONFIG" ] && . "$BX_CONFIG"
+    for _v in "${_env[@]}"; do declare -g "$_v"; done
 
     BACKUP_MOUNT="${BACKUP_MOUNT:-/mnt/backup}"
     BORG_REPO="${BORG_REPO:-$BACKUP_MOUNT/borg-backup}"

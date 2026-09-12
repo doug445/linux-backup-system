@@ -57,6 +57,16 @@ for s in deploy.sh borg-backup.sh backintime-backup.sh timeshift-backup.sh backu
     if [ "$rc" -eq 2 ]; then ok "$s --bogus-flag -> 2"; else bad "$s --bogus-flag -> $rc"; fi
 done
 
+echo "== timeshift-backup.sh --prune-only: accepted, no snapshot planned, drive guard first"
+out=$(BX_CONFIG=/dev/null BACKUP_MOUNT="$T/no-such-mount" TIMESHIFT_BACKUP_LOG="$T/ts.log" \
+      bash "$ROOT/timeshift-backup.sh" --prune-only --dry-run 2>&1); rc=$?
+if grep -q 'btrfs' <<<"$out" && [ "$rc" -eq 0 ]; then
+    ok "btrfs root: layer skipped (exit 0)"
+else
+    [ "$rc" -eq 1 ] && grep -q 'is not mounted' <<<"$out" && ok "unmounted drive refused (exit 1) before any action" || bad "expected the drive guard to abort with 1: rc=$rc: $out"
+fi
+if grep -q 'would run: timeshift' <<<"$out"; then bad "--prune-only planned a snapshot"; else ok "no snapshot planned"; fi
+
 echo "== restore-rebuild-boot.sh --dry-run executes nothing"
 out=$(bash "$ROOT/restore-rebuild-boot.sh" --dry-run 2>&1); rc=$?
 [ "$rc" -eq 0 ] && ok "exit 0" || bad "exit $rc"

@@ -1016,6 +1016,64 @@ EOF
 }
 
 ###############################################################################
+# Timeshift (non-btrfs roots): make it a pure engine for timeshift-backup.sh.
+# Timeshift's own scheduler is time-based (hourly/daily/weekly/monthly/boot
+# with per-tag counts): left on, it would create snapshots behind the wrapper's
+# back and prune them by AGE — the one thing fleet retention must never do —
+# onto whatever device its config last remembered. Turn every built-in schedule
+# off, drop its cron entries, force rsync mode and pin it to the backup drive.
+# The wrapper's snapshots are tagged "ondemand", which Timeshift never
+# auto-prunes. Idempotent; the exclude list and everything else are untouched.
+###############################################################################
+configure_timeshift() {
+    local cfg=/etc/timeshift/timeshift.json fs_uuid dev luks_uuid="" out
+    fs_uuid=$(findmnt -n -o UUID --target "$BACKUP_MOUNT" 2>/dev/null || true)
+    dev=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//")
+    if [[ "$dev" == /dev/mapper/* ]]; then
+        local backing; backing=$(cryptsetup status "${dev#/dev/mapper/}" 2>/dev/null | awk "/device:/{print \$2}")
+        luks_uuid=$(cryptsetup luksUUID "$backing" 2>/dev/null || true)
+    fi
+    mkdir -p /etc/timeshift
+    out=$(python3 - "$cfg" "$fs_uuid" "$luks_uuid" <<'PY'
+import json, os, sys
+path, fs_uuid, luks_uuid = sys.argv[1:4]
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except ValueError:
+        cfg = {}
+# Timeshift stores every scalar as a string ("true"/"false"), so match that.
+want = {"btrfs_mode": "false", "do_first_run": "false", "stop_cron_emails": "true"}
+for k in ("schedule_boot", "schedule_hourly", "schedule_daily", "schedule_weekly", "schedule_monthly"):
+    want[k] = "false"
+if fs_uuid:
+    want["backup_device_uuid"] = fs_uuid
+    want["parent_device_uuid"] = luks_uuid
+changed = sorted(k for k, v in want.items() if cfg.get(k) != v)
+if changed:
+    cfg.update(want)
+    cfg.setdefault("exclude", [])
+    cfg.setdefault("exclude-apps", [])
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    print("set " + " ".join(changed))
+else:
+    print("already configured")
+PY
+    ) || { warn "could not update $cfg — Timeshift's own schedule may still be active"; return; }
+    # Timeshift (re)writes these from its schedule flags; with every flag off it
+    # removes them itself on its next run, but do not wait for that.
+    rm -f /etc/cron.d/timeshift-hourly /etc/cron.d/timeshift-boot
+    log "  Timeshift: built-in schedule off, rsync mode, pinned to ${fs_uuid:-$dev} ($out)"
+}
+
+###############################################################################
 # Deploy the verify/header units, the drive-attach unit and the udev rule.
 ###############################################################################
 deploy_extra_units() {
@@ -1091,11 +1149,12 @@ if (( DRY )); then
     log "             luks-header-backup.sh timeshift-backup.sh backup-diag.sh backup-common.sh lib-cmdline.sh"
     log "             borg-backup-drive-attach.sh borg-backup-drive-detach.sh + restore scripts"
     log "  config  -> /etc/backup-system.conf (mount=$BACKUP_MOUNT, schedule=$SCHEDULE_MODE)$([ -f /etc/backup-system.conf ] && echo ' [exists, kept]')"
-    log "  units   -> borg/BIT/backup-verify/luks-header + drive-attach/detach + udev rule"
+    [ "$HAS_BTRFS" = false ] && log "  timeshift -> /etc/timeshift/timeshift.json: built-in schedule OFF (fleet retention is never time-based), rsync mode, pinned to $BACKUP_MOUNT; cron.d/timeshift-* removed"
+    log "  units   -> borg/BIT/backup-verify/luks-header$([ "$HAS_BTRFS" = false ] && echo '/timeshift') + drive-attach/detach + udev rule"
     if [ "$SCHEDULE_MODE" = scheduled ]; then
-        log "  timers  -> borg + BIT ENABLED (internal drive)"
+        log "  timers  -> borg + BIT$([ "$HAS_BTRFS" = false ] && echo ' + Timeshift') ENABLED (internal drive)"
     else
-        log "  timers  -> borg + BIT MASKED (ad-hoc); drive-attach enabled for unlock-on-connect"
+        log "  timers  -> borg + BIT$([ "$HAS_BTRFS" = false ] && echo ' + Timeshift') MASKED (ad-hoc); drive-attach enabled for unlock-on-connect"
     fi
     log "  verify + luks-header timers ENABLED regardless (read-only maintenance)"
     [ "$HAS_SNAPPER" = true ] && log "  snapper-replicate.sh (if present) patched idempotently"
@@ -1144,6 +1203,7 @@ for s in borg-backup-drive-attach.sh borg-backup-drive-detach.sh; do
     [ -f "$SCRIPT_DIR/$s" ] && install -m 755 "$SCRIPT_DIR/$s" "/usr/local/sbin/$s"
 done
 write_system_conf
+[ "$HAS_BTRFS" = false ] && configure_timeshift
 if [ -f /usr/local/sbin/snapper-replicate.sh ] && [ -f "$SCRIPT_DIR/patch-snapper-replicate.py" ]; then
     python3 "$SCRIPT_DIR/patch-snapper-replicate.py" || warn "snapper-replicate patch needs manual attention"
 fi
