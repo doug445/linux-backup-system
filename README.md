@@ -32,13 +32,13 @@ layout is derived at run time. It replaces the older `BIT_deploy` and
 `borg-backup` projects, which were Back-In-Time-centric and carried one host's
 paths hardcoded.
 
-> ### Status: ✅ verified on metal, ❌ written but not yet verified
+> ### Status: ✅ verified on metal, ⚠️ undergoing testing now, ❌ written but not yet verified
 >
 > "Universal" is the goal and the design; the proof is per setup. The
 > [Tested / untested](#tested--untested) tables say which distros, root
 > filesystems and boot layouts have been confirmed with a real backup and a
-> passing `backup-verify.sh` on real hardware. **Each ❌ row turns ✅ as that
-> setup is tested and verified** — by the author where the hardware exists,
+> passing `backup-verify.sh` on real hardware. **Each ❌ row turns ⚠️ while it
+> is being tested and ✅ once it is verified** — by the author where the hardware exists,
 > and by a [setup report](CONTRIBUTING.md#most-wanted-setup-reports) from
 > anyone running one of those setups, or any Linux this suite has never seen.
 > A patch that passes the tests puts the contributor's name on the license.
@@ -134,8 +134,10 @@ disposable box gets the on-site layers and nothing more.
 ## Tested / untested
 
 Green ✅ means a real backup **and** a `backup-verify` pass have been confirmed
-on that setup. A red ❌ means the code paths exist and dry-run clean but that
-exact combination has **not** been verified yet — run it there and confirm
+on that setup. Yellow ⚠️ means that setup is **undergoing testing now** — it is
+deployed on real hardware and being run, but the backup-plus-verify pass has
+not been recorded yet. A red ❌ means the code paths exist and dry-run clean but
+that exact combination has **not** been verified yet — run it there and confirm
 before trusting it. The tooling was developed and dry-run-verified on Fedora
 Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
 (x86_64, ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI): real
@@ -152,7 +154,7 @@ deleting through `timeshift --delete` and confirmed by `backup-verify.sh`.
 | Fedora | ✅ |
 | Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ |
 | Debian / Ubuntu / Linux Mint | ✅ |
-| Arch / Manjaro / EndeavourOS | ❌ |
+| Arch / Manjaro / EndeavourOS | ⚠️ |
 | openSUSE (Leap / Tumbleweed) | ❌ |
 
 **Root filesystems** (this picks the local-snapshot engine — see Layers)
@@ -174,12 +176,13 @@ deleting through `timeshift --delete` and confirmed by `backup-verify.sh`.
 | Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ |
 | Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ |
 | Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ |
-| Plain `/boot` (unencrypted /boot) | ❌ |
+| Plain `/boot` (unencrypted /boot) | ⚠️ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
-| Bare-metal restore **executing** the boot rebuild (not just its dry run) | ❌ |
+| Bare-metal restore **executing** the boot rebuild (not just its dry run) | ⚠️ |
 
-A ❌ row turns ✅ when that setup has been deployed, has produced one real
-backup on each layer, and has passed `backup-verify.sh` — with the
+A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware,
+and ✅ when it has produced one real backup on each layer and has passed
+`backup-verify.sh` — with the
 [troubleshooting report](#troubleshooting-logs-dry-runs-and-the-report) from
 that machine kept as the evidence. Every backup and the installer take
 `--dry-run` first, so the plan can be inspected without touching anything.
@@ -562,7 +565,7 @@ pass.
 rebuilds it — initramfs or UKI, GRUB EFI or BIOS, systemd-boot — inside the
 chroot. Its `--dry-run` plan has been checked on the encrypted-`/boot` GRUB
 host; the plan has not yet been *executed* by a real bare-metal restore, which
-is why that row is ❌.
+is why that row is ⚠️ (under test now).
 
 ### How is this different from just running borg on a timer?
 
@@ -613,7 +616,7 @@ says where each decision lives.
   `/boot/firmware`** (`BX_ESP_PATHS`). `BACKUP_EXTRA_SOURCES` is the stopgap.
 - **The command-line rewrite on restore is exercised only against synthetic
   trees** (`tests/cmdline-fixture-test.sh`, every carrier kind). A real
-  restore onto a fresh disk is the ❌ "bare-metal restore" row.
+  restore onto a fresh disk is the ⚠️ "bare-metal restore" row (under test now).
 - **`backup-verify.sh` knows GRUB, systemd-boot, UKIs and Raspberry Pi firmware
   files.** rEFInd, Limine and syslinux archives produce a false "no bootloader
   config" FAIL until a pattern is added.
@@ -623,7 +626,7 @@ says where each decision lives.
   the fixture test. The author has Pis in storage and no plan to run one; that
   row will stay ❌ until someone with a Pi sends a setup report.
 - Every ❌ row above stays red until that setup has been run and verified on
-  real hardware; each turns ✅ as that happens.
+  real hardware; a row under test now is ⚠️, and each turns ✅ as that happens.
 
 ## Documentation
 
@@ -679,7 +682,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.5.1
+- **Version:** 3.5.2
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

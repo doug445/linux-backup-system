@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.5.1**
+**linux-backup-system 3.5.2**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -26,25 +26,26 @@ writes a real backup, and that `backup-verify.sh` then agrees a restore would
 boot.
 
 Every ❌ row in the README's status tables is a setup the code claims to handle
-and that has not been confirmed on metal by me. **Each row turns ✅ as that
-setup is tested and verified on real hardware.** A report that it worked is
+and that has not been confirmed on metal by me; a ⚠️ row is one undergoing
+testing now. **Each row turns ⚠️ while it is being tested and ✅ once it is
+verified on real hardware.** A report that it worked is
 as valuable as a bug report — it is how a row turns ✅ on hardware I do not
 have.
 
 | Setup | Status | What to confirm |
 |---|---|---|
 | Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint | ✅ | still worth a report on a different boot layout |
-| **Arch / Manjaro / EndeavourOS** | ❌ | packages resolve; `backintime` from AUR; a real backup + verify pass |
+| **Arch / Manjaro / EndeavourOS** | ⚠️ under test | packages resolve; `backintime` from AUR; a real backup + verify pass |
 | **openSUSE** | ❌ | `zypper` package names; a real backup + verify pass |
 | btrfs root → snapper + send/receive replicas | ✅ | |
-| ext4 root → Timeshift layer | ✅ create | **count and free-space prune never fired on a real drive** |
+| ext4 root → Timeshift layer | ✅ | |
 | **xfs / f2fs / any other root** | ❌ | that the Timeshift layer engages and verifies |
 | systemd-boot, UKI, GRUB EFI, encrypted argon2id `/boot` | ✅ | |
 | **GRUB legacy BIOS** | ❌ | `restore-rebuild-boot.sh` finds the boot disk; a restored machine boots |
-| **Plain (unencrypted) `/boot`** | ❌ | verify's boot-chain section; a restored machine boots |
+| **Plain (unencrypted) `/boot`** | ⚠️ under test | verify's boot-chain section; a restored machine boots |
 | **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
-| **Bare-metal restore executing the boot rebuild** | ❌ | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
+| **Bare-metal restore executing the boot rebuild** | ⚠️ under test | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
 
 ### How to file a setup report
 

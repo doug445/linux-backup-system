@@ -199,8 +199,16 @@ def is_snapper_running():
     return False, ""
 
 
+def unit_active(unit):
+    """True while a suite oneshot unit is running (the timers' and tray's runs)."""
+    out = run_quiet(["systemctl", "is-active", unit])
+    return bool(out) and out.strip() in ("active", "activating")
+
+
 def is_borg_running():
     """Borg, the borg-backup.sh wrapper, or a btrfs send/receive replica."""
+    if unit_active("borg-backup.service"):
+        return True, "borg-backup.service running"
     if os.path.exists(os.path.join(BORG_REPO, "lock.exclusive")):
         return True, "Borg repo locked"
 
@@ -219,14 +227,18 @@ def is_borg_running():
 
 
 def bit_lock_alive():
-    """True when the BIT worker lock names a live pid (or is unreadable)."""
+    """True when the BIT worker lock names a live pid.
+
+    The tray runs as the desktop user and the lock lives under /root, which it
+    usually cannot traverse; that is not evidence of a running job (treating it
+    as held showed "Back in Time running" forever), so an unreadable lock is
+    ignored and is_bit_running falls back to the unit and process checks.
+    """
     try:
         with open(BIT_LOCK_PATH) as f:
             content = f.read().strip()
-    except FileNotFoundError:
-        return False
     except OSError:
-        return True  # root-owned lock we cannot read: treat as held
+        return False
     pid_str = content.splitlines()[0] if content else ""
     if not pid_str.isdigit():
         return True
@@ -240,7 +252,9 @@ def bit_lock_alive():
 
 
 def is_bit_running():
-    """Back in Time: the worker lock, our rsync wrapper, or the GUI's own jobs."""
+    """Back in Time: the unit, the worker lock, our rsync wrapper, or the GUI's own jobs."""
+    if unit_active("backintime-backup.service"):
+        return True, "backintime-backup.service running"
     if bit_lock_alive():
         return True, "Back in Time running"
 
@@ -258,6 +272,8 @@ def is_bit_running():
 
 
 def is_timeshift_running():
+    if unit_active("timeshift-backup.service"):
+        return True, "timeshift-backup.service running"
     if pgrep(r"timeshift-backup\.sh"):
         return True, "timeshift-backup.sh running"
     for cmd in pgrep(r"timeshift(-launcher)?\s+--(create|delete|check)"):
@@ -266,12 +282,16 @@ def is_timeshift_running():
 
 
 def is_verify_running():
+    if unit_active("backup-verify.service"):
+        return True, "backup-verify.service running"
     if pgrep(r"backup-verify\.sh"):
         return True, "backup-verify.sh running"
     return False, ""
 
 
 def is_luks_header_running():
+    if unit_active("luks-header-backup.service"):
+        return True, "luks-header-backup.service running"
     if pgrep(r"luks-header-backup\.sh"):
         return True, "luks-header-backup.sh running"
     return False, ""
