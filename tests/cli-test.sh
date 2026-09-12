@@ -109,6 +109,15 @@ if command -v udevadm >/dev/null && udevadm verify --help >/dev/null 2>&1; then
     if udevadm verify --no-style "$T/99-test.rules" >/dev/null 2>&1; then ok "udevadm verify accepts the rule"; else bad "udevadm verify rejects the rule: $(udevadm verify --no-style "$T/99-test.rules" 2>&1 | head -3)"; fi
 fi
 
+echo "== backup-verify.sh and luks-header-backup.sh read /etc/backup-system.conf (BX_CONFIG) by themselves"
+printf 'BACKUP_MOUNT="%s/cfgmount"\n' "$T" > "$T/verify.conf"
+out=$(BX_CONFIG="$T/verify.conf" bash "$ROOT/backup-verify.sh" 2>&1 || true)
+grep -q "$T/cfgmount" <<<"$out" && ok "verify uses the configured mount" || bad "verify ignored the config: $(grep -m1 'not mounted' <<<"$out")"
+grep -q '/mnt/backup' <<<"$out" && bad "verify still mentions the /mnt/backup default" || ok "no /mnt/backup fallback leaked"
+out=$(BX_CONFIG="$T/verify.conf" BACKUP_MOUNT="$T/envmount" bash "$ROOT/backup-verify.sh" 2>&1 || true)
+grep -q "$T/envmount" <<<"$out" && ok "environment still overrides the config" || bad "environment did not override the config"
+grep -q 'KEEP=${_env_keep:-6}' "$ROOT/luks-header-backup.sh" && ok "luks-header-backup keeps its own KEEP default" || bad "luks-header-backup KEEP default lost"
+
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
 [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && ok "BX_VERSION=$v is semver" || bad "BX_VERSION '$v'"

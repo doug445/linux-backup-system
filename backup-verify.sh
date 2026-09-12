@@ -36,6 +36,18 @@
 # Exit: 0 = restore-ready, 1 = ready with warnings, 2 = a restore would fail.
 set -uo pipefail
 
+# Per-host config: source the shared library and /etc/backup-system.conf so a
+# run by hand (or from the tray) sees the same drive the units do. Values set
+# in the environment — the units' Environment= lines — still win.
+_env_mount="${BACKUP_MOUNT:-}"; _env_repo="${BORG_REPO:-}"; _env_keep="${KEEP:-}"
+_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _c in "$_self_dir/backup-common.sh" /usr/local/sbin/backup-common.sh /usr/local/lib/backup-common.sh; do
+    # shellcheck disable=SC1090
+    [ -r "$_c" ] && { . "$_c"; break; }
+done
+declare -f bx_load_config >/dev/null && bx_load_config
+[ -n "$_env_mount" ] && BACKUP_MOUNT="$_env_mount"
+[ -n "$_env_repo" ] && BORG_REPO="$_env_repo"
 BACKUP_MOUNT="${BACKUP_MOUNT:-/mnt/backup}"
 HEADER_DIRS=("/root/luks-headers" "$BACKUP_MOUNT/luks-headers")
 MAX_ARCHIVE_AGE_H=${MAX_ARCHIVE_AGE_H:-48}
