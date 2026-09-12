@@ -561,7 +561,7 @@ The goal is one backup system that runs on **any Linux** — universal in fact,
 not just in design — and one person cannot own every distro, filesystem and
 boot layout. That is what contributions are for. This project takes **setup
 reports**, **new Linux setups** (a report, or a patch that passes the tests)
-and **serious bugs**, and nothing else.
+and **serious bugs** and qualified unique patches.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the table of what is still unconfirmed;
 a report that a setup *worked* is the only way a row gets ticked. Run what CI
 runs before opening a pull request:
