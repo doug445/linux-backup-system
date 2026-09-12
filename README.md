@@ -146,6 +146,8 @@ paths (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot
 cleanup) on 2026-09-12 — first against a loop-device drive seeded with
 fabricated snapshots, then a real count prune on the production backup drive,
 deleting through `timeshift --delete` and confirmed by `backup-verify.sh`.
+It has also been tested and verified on **Fedora 44** (x86_64) on a 2019
+System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
 
 **Distros**
 

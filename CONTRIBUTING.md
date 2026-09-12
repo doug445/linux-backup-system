@@ -34,7 +34,7 @@ have.
 
 | Setup | Status | What to confirm |
 |---|---|---|
-| Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint | ✅ | still worth a report on a different boot layout |
+| Fedora (44 on a 2019 System76 laptop, two NVMe), Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint | ✅ | still worth a report on a different boot layout |
 | **Arch / Manjaro / EndeavourOS** | ⚠️ under test | packages resolve; `backintime` from AUR; a real backup + verify pass |
 | **openSUSE** | ❌ | `zypper` package names; a real backup + verify pass |
 | btrfs root → snapper + send/receive replicas | ✅ | |
