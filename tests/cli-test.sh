@@ -87,6 +87,28 @@ grep -q 'deadbeef-1111-2222-3333-444455556666' "$T/n.md" && ok "--no-redact keep
 out=$(BX_CONFIG="$T/conf" bash "$ROOT/backup-diag.sh" 2>/dev/null | head -1)
 [ "$out" = '# linux-backup-system troubleshooting report' ] && ok "stdout mode" || bad "stdout mode: '$out'"
 
+echo "== borg-backup-drive-detach.sh: safe when nothing is configured or present"
+printf 'BACKUP_MOUNT="%s/mnt"\n' "$T" > "$T/empty.conf"
+out=$(BX_CONFIG="$T/empty.conf" bash "$ROOT/borg-backup-drive-detach.sh" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "no UUIDs configured -> exit 0" || bad "exit $rc: $out"
+grep -q 'nothing to do' <<<"$out" && ok "says nothing to do" || bad "unexpected: $out"
+printf 'BACKUP_MOUNT="%s/mnt"\nBACKUP_FS_UUID="deadbeef-1111-2222-3333-444455556666"\nBACKUP_LUKS_UUID="deadbeef-aaaa-bbbb-cccc-ddddeeeeffff"\n' "$T" > "$T/absent.conf"
+out=$(BX_CONFIG="$T/absent.conf" bash "$ROOT/borg-backup-drive-detach.sh" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "configured drive absent, nothing mounted -> exit 0" || bad "exit $rc: $out"
+grep -q 'done' <<<"$out" && ok "completes without touching anything" || bad "unexpected: $out"
+out=$(BX_CONFIG="$T/absent.conf" bash "$ROOT/borg-backup-drive-attach.sh" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "attach with drive absent -> exit 0" || bad "attach exit $rc: $out"
+grep -q 'not present' <<<"$out" && ok "attach says not present" || bad "unexpected: $out"
+
+echo "== udev rule template"
+grep -q 'ACTION=="remove".*borg-backup-drive-detach.sh' "$ROOT/99-borg-backup.rules" && ok "remove rule runs the detach script" || bad "no remove rule"
+grep -q 'ACTION=="add|change".*borg-backup-drive-attach.service' "$ROOT/99-borg-backup.rules" && ok "add rule wants the attach unit" || bad "no add rule"
+n=$(grep -c '@BACKUP_DEV_UUID@' "$ROOT/99-borg-backup.rules"); [ "$n" -ge 3 ] && ok "every rule line is templated ($n)" || bad "template placeholder count $n"
+if command -v udevadm >/dev/null && udevadm verify --help >/dev/null 2>&1; then
+    sed 's/@BACKUP_DEV_UUID@/deadbeef-1111-2222-3333-444455556666/g' "$ROOT/99-borg-backup.rules" > "$T/99-test.rules"
+    if udevadm verify --no-style "$T/99-test.rules" >/dev/null 2>&1; then ok "udevadm verify accepts the rule"; else bad "udevadm verify rejects the rule: $(udevadm verify --no-style "$T/99-test.rules" 2>&1 | head -3)"; fi
+fi
+
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
 [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && ok "BX_VERSION=$v is semver" || bad "BX_VERSION '$v'"

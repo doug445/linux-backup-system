@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.1.1**
+**linux-backup-system 3.2.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path

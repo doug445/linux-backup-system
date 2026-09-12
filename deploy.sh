@@ -251,21 +251,24 @@ detect_backup_mount() {
         if [ -n "$existing_mount" ] && mountpoint -q "$existing_mount" 2>/dev/null; then
             BACKUP_MOUNT="$existing_mount"
             log "Detected backup mount from /etc/backup-system.conf: $BACKUP_MOUNT"
+            offer_blank_drive
             return
         fi
         if [ -n "$existing_mount" ]; then
             BACKUP_MOUNT="$existing_mount"
             WAITING_FOR_DRIVE=1
             warn "Configured backup drive is not connected (nothing mounted at $BACKUP_MOUNT)."
+            local blanks; blanks=$(blank_hotplug_disks | tr '\n' ' ')
+            [ -n "$blanks" ] && log "New blank drive connected: ${blanks% }"
             if (( DRY )) || [ ! -t 0 ]; then
                 log "Continuing with the configured drive; connect it and re-run to finish (recovery scripts, first backup)."
                 return
             fi
             echo ""
             echo "  1) Continue — install/update everything; connect the drive later  (default)"
-            echo "  2) Set up a different drive now"
+            echo "  2) Set up a different drive now${blanks:+ (blank drive seen: ${blanks% })}"
             ask "Choice [1/2]: "
-            if [ "$REPLY" = 2 ]; then WAITING_FOR_DRIVE=0; prepare_backup_drive; fi
+            if [ "$REPLY" = 2 ]; then WAITING_FOR_DRIVE=0; BACKUP_MOUNT=/mnt/backup; prepare_backup_drive "${blanks%% *}"; fi
             return
         fi
     fi
@@ -370,18 +373,76 @@ wait_for_drive() {
     echo ""
 }
 
+# A blank disk: no partition table, no filesystem, nothing on it in use. The
+# thing a user has just unboxed and plugged in.
+disk_is_blank() {
+    local dev="$1" pt fs
+    pt=$(lsblk -dno PTTYPE "$dev" 2>/dev/null || true); fs=$(lsblk -dno FSTYPE "$dev" 2>/dev/null || true)
+    [ -z "$pt" ] && [ -z "$fs" ] && [ "$(lsblk -rno NAME "$dev" 2>/dev/null | wc -l)" -le 1 ] && ! disk_in_use "$dev"
+}
+
 # Whole disks that are not in use: NAME SIZE TRAN HOTPLUG MODEL, one per line.
+# Blank ones are marked; the first blank hotplug/USB disk is remembered in
+# BLANK_DISK as the suggested default.
+BLANK_DISK=""
 list_candidate_disks() {
-    local line NAME SIZE TRAN HOTPLUG MODEL TYPE busy
+    local line NAME SIZE TRAN HOTPLUG MODEL TYPE busy mark
+    BLANK_DISK=""
     while IFS= read -r line; do
         NAME=""; SIZE=""; TRAN=""; HOTPLUG=""; MODEL=""; TYPE=""
         eval "$line"   # lsblk -P emits NAME="..." pairs, quoted and escaped by lsblk itself
         [ "$TYPE" = disk ] || continue
         case "$NAME" in loop*|zram*|sr*|ram*|nbd*) continue ;;
         esac
-        busy=""; disk_in_use "/dev/$NAME" && busy="   <- in use, not eligible"
-        printf '  %-14s %8s  %-6s %-8s %s%s\n' "/dev/$NAME" "$SIZE" "${TRAN:--}" "$([ "$HOTPLUG" = 1 ] && echo hotplug || echo fixed)" "${MODEL:-}" "$busy"
+        busy=""; mark=""
+        if disk_in_use "/dev/$NAME"; then busy="   <- in use, not eligible"
+        elif disk_is_blank "/dev/$NAME"; then
+            mark="   <- blank, ready to set up"
+            if [ -z "$BLANK_DISK" ] && { [ "$HOTPLUG" = 1 ] || [ "$TRAN" = usb ]; }; then BLANK_DISK="/dev/$NAME"; fi
+        fi
+        printf '  %-14s %8s  %-6s %-8s %s%s%s\n' "/dev/$NAME" "$SIZE" "${TRAN:--}" "$([ "$HOTPLUG" = 1 ] && echo hotplug || echo fixed)" "${MODEL:-}" "$busy" "$mark"
     done < <(lsblk -dPo NAME,SIZE,TRAN,HOTPLUG,MODEL,TYPE 2>/dev/null)
+}
+
+# Blank hotplug/USB disks present right now, one path per line (no prompt).
+blank_hotplug_disks() {
+    local line NAME TRAN HOTPLUG TYPE
+    while IFS= read -r line; do
+        NAME=""; TRAN=""; HOTPLUG=""; TYPE=""
+        eval "$line"
+        [ "$TYPE" = disk ] || continue
+        case "$NAME" in loop*|zram*|sr*|ram*|nbd*) continue ;; esac
+        { [ "$HOTPLUG" = 1 ] || [ "$TRAN" = usb ]; } || continue
+        disk_is_blank "/dev/$NAME" && echo "/dev/$NAME"
+    done < <(lsblk -dPo NAME,TRAN,HOTPLUG,TYPE 2>/dev/null)
+}
+
+# On a host that already has a drive configured: a blank drive that has just
+# been connected is worth mentioning, and on a terminal worth offering.
+offer_blank_drive() {
+    local blanks
+    blanks=$(blank_hotplug_disks | tr '\n' ' ')
+    [ -n "$blanks" ] || return 0
+    log "New blank drive connected: ${blanks% }"
+    if (( DRY )) || [ ! -t 0 ]; then
+        log "  (a real run on a terminal offers to set it up as the backup drive)"
+        return 0
+    fi
+    echo ""
+    echo "A blank drive is connected: ${blanks% }"
+    echo "Set it up as THIS host's backup drive? The current configuration ($BACKUP_MOUNT)"
+    echo "is replaced; the old config is kept beside the new one as .old-<date>."
+    ask "Set up the blank drive now? [y/N]: "
+    case "$REPLY" in y|Y|yes|YES)
+        if mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
+            log "unmounting the current drive at $BACKUP_MOUNT first"
+            umount "$BACKUP_MOUNT" 2>/dev/null || { err "could not unmount $BACKUP_MOUNT (busy?) — leaving the current drive in place"; return 0; }
+        fi
+        WAITING_FOR_DRIVE=0
+        BACKUP_MOUNT=/mnt/backup
+        prepare_backup_drive "${blanks%% *}"
+        ;;
+    esac
 }
 
 # A disk is in use if anything on it (partition, LUKS mapping, LV) is mounted
@@ -412,15 +473,23 @@ confirm_erase() { # confirm_erase DEV DESCRIPTION
 # Partition a whole disk (GPT, one partition) and make btrfs on it. btrfs is
 # used for the backup drive on every host: the send/receive replicas of a btrfs
 # root need a btrfs destination, and compression is free space on the others.
+drive_still_there() { # drive_still_there DEV — false (with a message) if it was unplugged
+    [ -b "$1" ] && return 0
+    err "$1 is gone — drive disconnected? Nothing further was written."
+    return 1
+}
+
 format_plain() { # format_plain DEV -> sets FORMATTED_PART
     local dev="$1"
     confirm_erase "$dev" "plain btrfs, label Borg-backup" || return 1
+    drive_still_there "$dev" || return 1
     log "Wiping signatures and writing a GPT with one partition on $dev ..."
     wipefs -a "$dev" >/dev/null
     printf 'label: gpt\n,,L\n' | sfdisk --quiet --wipe always "$dev"
     udevadm settle 2>/dev/null || sleep 2
+    drive_still_there "$dev" || return 1
     FORMATTED_PART=$(lsblk -rnpo NAME,TYPE "$dev" | awk '$2=="part"{print $1; exit}' || true)
-    [ -b "$FORMATTED_PART" ] || { err "partition did not appear on $dev"; return 1; }
+    [ -n "$FORMATTED_PART" ] && [ -b "$FORMATTED_PART" ] || { err "partition did not appear on $dev"; return 1; }
     log "mkfs.btrfs -L Borg-backup $FORMATTED_PART ..."
     mkfs.btrfs -f -q -L Borg-backup "$FORMATTED_PART" || { err "mkfs.btrfs failed"; return 1; }
     udevadm settle 2>/dev/null || sleep 1
@@ -459,6 +528,7 @@ enroll_keyfile() { # enroll_keyfile LUKS_DEV
 
 mount_backup_fs() { # mount_backup_fs FS_DEV
     local fsdev="$1" fstype
+    drive_still_there "$fsdev" || return 1
     fstype=$(lsblk -no FSTYPE "$fsdev" 2>/dev/null | head -1 || true)
     mkdir -p "$BACKUP_MOUNT"
     if [ "$fstype" = btrfs ]; then
@@ -472,30 +542,36 @@ mount_backup_fs() { # mount_backup_fs FS_DEV
     return 0
 }
 
-prepare_backup_drive() {
-    echo ""
-    echo "============================================"
-    echo "  No backup drive is mounted"
-    echo "============================================"
-    echo ""
-    echo "  1) I have a drive connected — set it up now"
-    echo "  2) Wait — install the backup system now, set the drive up later"
-    echo ""
-    ask "Choice [1/2]: "
-    case "$REPLY" in 1) ;; *) wait_for_drive; return ;; esac
+prepare_backup_drive() { # prepare_backup_drive [PRESELECTED_DEV]
+    local preselect="${1:-}"
+    if [ -z "$preselect" ]; then
+        echo ""
+        echo "============================================"
+        echo "  No backup drive is mounted"
+        echo "============================================"
+        echo ""
+        echo "  1) I have a drive connected — set it up now"
+        echo "  2) Wait — install the backup system now, set the drive up later"
+        echo ""
+        ask "Choice [1/2]: "
+        case "$REPLY" in 1) ;; *) wait_for_drive; return ;; esac
+    fi
 
-    local dev="" luks_part="" fs_part="" mapper="" inner_fs="" luks_uuid=""
+    local dev="" luks_part="" fs_part="" mapper="" inner_fs="" luks_uuid="" suggested=""
     while :; do
         echo ""
         echo "Connect the backup drive now if it is not already. Whole disks seen:"
         echo ""
         list_candidate_disks
+        suggested="${preselect:-$BLANK_DISK}"
+        [ -n "$suggested" ] && [ -b "$suggested" ] || suggested=""
         echo ""
         echo "  (r) rescan    (w) wait — install now, set the drive up later"
-        ask "Device to use for backups (e.g. /dev/sdb): "
+        ask "Device to use for backups${suggested:+ [$suggested]}: "
         case "$REPLY" in
             r|R) continue ;;
-            w|W|"") wait_for_drive; return ;;
+            w|W) wait_for_drive; return ;;
+            "")  [ -n "$suggested" ] && REPLY="$suggested" || { wait_for_drive; return; } ;;
         esac
         dev="$REPLY"
         [ -b "$dev" ] || { warn "$dev is not a block device"; continue; }
@@ -528,6 +604,7 @@ prepare_backup_drive() {
             ask "Choice [1/2]: "
             if [ "$REPLY" = 2 ]; then
                 confirm_erase "/dev/mapper/$mapper" "inside of the LUKS container, btrfs" || { wait_for_drive; return; }
+                drive_still_there "$luks_part" || { wait_for_drive; return; }
                 mkfs.btrfs -f -q -L Borg-backup "/dev/mapper/$mapper" || { err "mkfs.btrfs failed"; wait_for_drive; return; }
                 udevadm settle 2>/dev/null || sleep 1
             fi
@@ -949,7 +1026,7 @@ deploy_extra_units() {
             > /etc/udev/rules.d/99-borg-backup.rules
         chmod 644 /etc/udev/rules.d/99-borg-backup.rules
     else
-        log "  no drive UUID in /etc/backup-system.conf — udev mount-on-attach rule not installed"
+        log "  no drive UUID in /etc/backup-system.conf — udev attach/detach rule not installed"
     fi
     systemctl daemon-reload
     udevadm control --reload 2>/dev/null || true
@@ -992,7 +1069,7 @@ if (( DRY )); then
     log "  packages: see the [deps] lines above — installed and verified before anything else"
     log "  scripts -> /usr/local/sbin: borg-backup.sh backintime-backup.sh backup-verify.sh"
     log "             luks-header-backup.sh timeshift-backup.sh backup-diag.sh backup-common.sh"
-    log "             borg-backup-drive-attach.sh + restore scripts"
+    log "             borg-backup-drive-attach.sh borg-backup-drive-detach.sh + restore scripts"
     log "  config  -> /etc/backup-system.conf (mount=$BACKUP_MOUNT, schedule=$SCHEDULE_MODE)$([ -f /etc/backup-system.conf ] && echo ' [exists, kept]')"
     log "  units   -> borg/BIT/backup-verify/luks-header + drive-attach + udev rule"
     if [ "$SCHEDULE_MODE" = scheduled ]; then
@@ -1042,10 +1119,9 @@ done
 [ -f "$SCRIPT_DIR/restore-rebuild-boot.sh" ] && install -m 755 "$SCRIPT_DIR/restore-rebuild-boot.sh" /usr/local/sbin/restore-rebuild-boot.sh
 [ -f "$SCRIPT_DIR/timeshift-backup.sh" ] && install -m 755 "$SCRIPT_DIR/timeshift-backup.sh" /usr/local/sbin/timeshift-backup.sh
 [ -f "$SCRIPT_DIR/backup-diag.sh" ] && install -m 755 "$SCRIPT_DIR/backup-diag.sh" /usr/local/sbin/backup-diag.sh
-if [ -f "$SCRIPT_DIR/borg-backup-drive-attach.sh" ]; then
-    cp "$SCRIPT_DIR/borg-backup-drive-attach.sh" /usr/local/sbin/
-    chmod +x /usr/local/sbin/borg-backup-drive-attach.sh
-fi
+for s in borg-backup-drive-attach.sh borg-backup-drive-detach.sh; do
+    [ -f "$SCRIPT_DIR/$s" ] && install -m 755 "$SCRIPT_DIR/$s" "/usr/local/sbin/$s"
+done
 write_system_conf
 if [ -f /usr/local/sbin/snapper-replicate.sh ] && [ -f "$SCRIPT_DIR/patch-snapper-replicate.py" ]; then
     python3 "$SCRIPT_DIR/patch-snapper-replicate.py" || warn "snapper-replicate patch needs manual attention"

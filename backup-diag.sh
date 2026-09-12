@@ -224,7 +224,7 @@ if [ -r "$CONF" ]; then
 else
     out "**\`$CONF\`**: not present — every value is at its built-in default"; out ""
 fi
-runsh "deployed scripts" 'for f in /usr/local/sbin/{backup-common,borg-backup,backintime-backup,timeshift-backup,backup-verify,luks-header-backup,restore-rebuild-boot,borg-backup-drive-attach,backup-diag}.sh /usr/local/bin/backup-tray; do [ -e "$f" ] && printf "%s  %s  %s\n" "$(stat -c "%a %U" "$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-12)" "$f"; done; true'
+runsh "deployed scripts" 'for f in /usr/local/sbin/{backup-common,borg-backup,backintime-backup,timeshift-backup,backup-verify,luks-header-backup,restore-rebuild-boot,borg-backup-drive-attach,borg-backup-drive-detach,backup-diag}.sh /usr/local/bin/backup-tray; do [ -e "$f" ] && printf "%s  %s  %s\n" "$(stat -c "%a %U" "$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-12)" "$f"; done; true'
 
 # ---------------------------------------------------------------------------
 section "What the suite's own detection reports"

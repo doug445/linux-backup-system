@@ -182,6 +182,23 @@ the dry run, never a non-interactive session) offers:
 2. **Wait.** Install everything now; re-run `deploy.sh` when the drive is
    connected and it finishes the configuration.
 
+**Blank drives, connected and disconnected.** A brand-new drive — no partition
+table, no filesystem — is marked *blank, ready to set up* in the disk list and
+offered as the default. On a host that already has a backup drive configured,
+a blank hotplug drive that has just been plugged in is reported on every run
+and, on a terminal, offered as a replacement (the previous config is kept
+beside the new one). A configured drive that is simply not connected is
+recognised as such: the run continues with the configured path and the
+summary says to reconnect and re-run — nothing is rewritten to a default. If
+a drive is unplugged in the middle of set-up, every write step re-checks the
+device first and aborts with *drive disconnected?* rather than formatting
+whatever appeared in its place. At run time, yanking the backup drive fires a
+udev *remove* rule that runs `borg-backup-drive-detach.sh`: the dead mount is
+lazily unmounted and the orphaned LUKS mapping closed, so the next plug-in
+attaches cleanly instead of failing on "already mounted" or "device already
+exists". The attach script also clears a stale mount or mapping it finds on
+the way in. Neither ever starts a backup.
+
 Encryption is never done by `deploy.sh`. Choose *encrypt first* and it prints
 the exact GNOME Disks, GParted and `cryptsetup` steps, then adopts the result
 on the next run. Choose *plain* and it states the risk in one paragraph — an
@@ -356,14 +373,15 @@ timeshift-backup.sh           Timeshift snapshots + count/space retention (non-b
 backup-verify.sh              restore-readiness assertion (exit 0/1/2)
 luks-header-backup.sh         LUKS header backup, keyslot-tagged
 backup-diag.sh                troubleshooting report: read-only, redacted   (-o FILE, --no-redact, --full)
-borg-backup-drive-attach.sh   unlock (if LUKS) + mount on connect; never backs up
+borg-backup-drive-attach.sh   unlock (if LUKS) + mount on connect, clears a stale mount/mapping; never backs up
+borg-backup-drive-detach.sh   udev remove hook: lazy-unmount + close the mapping after a yank
 patch-snapper-replicate.py    idempotent fixes for snapper-replicate.sh (btrfs snapper hosts)
 restore.sh                    interactive restore launcher (snapper/btrfs/borg/BIT/combined)
 borg-restore.sh               borg restore + UUID fixup + universal boot rebuild   --dry-run
 backintime-restore.sh         BIT restore + UUID fixup + universal boot rebuild    --dry-run [--files-only]
 restore-rebuild-boot.sh       universal boot-chain rebuild (GRUB/systemd-boot/UKI/encrypted-boot)  --dry-run
 backup-tray.py backup-tray.desktop                 tray: every layer, run/log/verify/report by hand
-*.service *.timer 99-borg-backup.rules             systemd units + udev rule template
+*.service *.timer 99-borg-backup.rules             systemd units + udev attach/detach rule template
 tests/                        lib fixtures, command lines, report redaction, deploy dry-run — what CI runs
 docs/ABOUT.md                 the long-form description
 ```
@@ -535,7 +553,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.1.1
+- **Version:** 3.2.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

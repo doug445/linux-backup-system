@@ -49,6 +49,7 @@ grep -q 'Distro:' <<<"$out" && ok "detected the distro" || bad "no distro line"
 grep -q 'Suite:' <<<"$out" && ok "printed the suite version" || bad "no suite version line"
 grep -q 'Schedule mode' <<<"$out" && ok "decided a schedule mode" || bad "no schedule decision"
 grep -q 'backup-diag.sh' <<<"$out" && ok "plan lists backup-diag.sh" || bad "plan omits backup-diag.sh"
+grep -q 'borg-backup-drive-detach.sh' <<<"$out" && ok "plan lists the detach script" || bad "plan omits borg-backup-drive-detach.sh"
 grep -q '\[deps\]' <<<"$out" && ok "dependency step ran (reported, not installed)" || bad "no [deps] line — dependencies were not checked"
 grep -qE 'tray dependencies (present|: )|would install tray' <<<"$out" && ok "tray dependencies probed" || bad "tray dependencies not probed"
 

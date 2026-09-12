@@ -6,11 +6,15 @@
 # the result as /etc/udev/rules.d/99-borg-backup.rules. With no UUID known the
 # rule is not installed at all, so nothing is ever pinned to one host's drive.
 #
-# This ONLY attaches the drive. It never starts a backup: the attach unit
-# unlocks and mounts, and auto-backup-on-connect is deliberately absent.
+# This ONLY attaches and detaches the drive. It never starts a backup: the
+# attach unit unlocks and mounts, the detach script clears what a yank left
+# behind, and auto-backup-on-connect is deliberately absent.
 
 # Trigger unlock+mount when the drive's partition appears
 ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", TAG+="systemd", ENV{SYSTEMD_WANTS}+="borg-backup-drive-attach.service"
+
+# Drive yanked: clean up the dead mount / mapping so the next plug-in attaches
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", RUN+="/usr/local/sbin/borg-backup-drive-detach.sh"
 
 # Keep udisks2 from tearing the mapping down
 ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", ENV{UDISKS_AUTO_CLEAR}="0"

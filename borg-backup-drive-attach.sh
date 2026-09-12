@@ -75,6 +75,23 @@ elif [ ! -e "/dev/disk/by-uuid/${LUKS_UUID}" ]; then
     exit 0
 fi
 
+# A previous yank can leave a dead mount and a mapping whose backing device
+# is gone (or is now a different device node). Clear those before attaching.
+if /usr/bin/mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+    _src=$(/usr/bin/findmnt -no SOURCE --target "$MOUNTPOINT" 2>/dev/null | sed 's/\[.*//' || true)
+    if [ -n "$_src" ] && [ ! -e "$_src" ]; then
+        log "stale mount at $MOUNTPOINT (source $_src gone) — lazily unmounting"
+        /usr/bin/umount -l "$MOUNTPOINT" 2>/dev/null || true
+    fi
+fi
+if [ -n "$LUKS_UUID" ] && [ -e "/dev/mapper/${MAPPER}" ]; then
+    _backing=$(/usr/sbin/cryptsetup status "$MAPPER" 2>/dev/null | awk '/device:/{print $2}' || true)
+    if [ -n "$_backing" ] && [ ! -e "$_backing" ]; then
+        log "stale mapping /dev/mapper/${MAPPER} (backing $_backing gone) — closing"
+        /usr/sbin/cryptsetup close "$MAPPER" 2>/dev/null || /usr/sbin/dmsetup remove --force "$MAPPER" 2>/dev/null || true
+    fi
+fi
+
 # Unlock
 if [ -z "$LUKS_UUID" ]; then
     :
