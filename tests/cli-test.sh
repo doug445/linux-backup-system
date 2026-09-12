@@ -67,6 +67,13 @@ else
 fi
 if grep -q 'would run: timeshift' <<<"$out"; then bad "--prune-only planned a snapshot"; else ok "no snapshot planned"; fi
 
+echo "== borg --pattern values that start with '-' use the = form (argparse reads a bare '-x' as a flag)"
+if grep -nE "\-\-pattern ['\"]-" "$ROOT"/*.sh >/dev/null 2>&1; then
+    bad "bare --pattern '-…' found: $(grep -nE "\-\-pattern ['\"]-" "$ROOT"/*.sh | cut -d: -f1,2 | tr '\n' ' ')"
+else
+    ok "no bare --pattern '-…' in any script"
+fi
+
 echo "== restore-rebuild-boot.sh --dry-run executes nothing"
 out=$(bash "$ROOT/restore-rebuild-boot.sh" --dry-run 2>&1); rc=$?
 [ "$rc" -eq 0 ] && ok "exit 0" || bad "exit $rc"

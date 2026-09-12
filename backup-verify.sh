@@ -350,6 +350,10 @@ if [[ -d "$BORG_REPO" ]]; then
             # name the same devices the archived fstab/crypttab do. A carrier
             # left behind by an earlier disk change restores to a machine
             # that stops in the initramfs — with every file present.
+            # The exclude patterns start with '-': they must be passed as
+            # --pattern=-... or argparse reads the value as a flag and the whole
+            # extract fails ("expected 1 argument"), which in 3.4.0 made this
+            # check warn "no carrier" on every host.
             if declare -f cl_find_carriers >/dev/null; then
                 xdir=$(mktemp -d /tmp/backup-verify-x.XXXXXX)
                 ( cd "$xdir" && borg extract --lock-wait 30 "$BORG_REPO::$arch" \
@@ -358,7 +362,7 @@ if [[ -d "$BORG_REPO" ]]; then
                       boot/loader/entries efi/loader/entries boot/efi/loader/entries \
                       boot/extlinux boot/syslinux boot/firmware/cmdline.txt boot/cmdline.txt \
                       boot/refind_linux.conf boot/efi/EFI boot/limine.conf boot/limine efi/EFI \
-                      --pattern '-boot/efi/EFI/**/*.efi' --pattern '-efi/EFI/**/*.efi' >/dev/null 2>&1 ) || true
+                      --pattern='-boot/efi/EFI/**/*.efi' --pattern='-efi/EFI/**/*.efi' >/dev/null 2>&1 ) || true
                 nc=$(cl_find_carriers "$xdir" | wc -l)
                 if (( nc == 0 )); then
                     note "archive holds no recognisable kernel command-line carrier (UKI-only, or a form this suite does not know)"
