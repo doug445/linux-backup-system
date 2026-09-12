@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly LUKS header backup
+
+[Timer]
+# Headers change only on keyslot edits; weekly bounds how long a stale
+# header backup can go unnoticed. Runs before the daily verify.
+OnCalendar=Sun *-*-* 03:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

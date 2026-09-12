@@ -1,0 +1,86 @@
+name: New Linux setup (distro / filesystem / boot layout)
+description: A setup the suite does not handle yet, with the report that lets it be added — or the patch that adds it
+labels: ["setup"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The suite detects everything from the machine it runs on; a setup it
+        has never seen produces a wrong decision somewhere in that detection.
+        The troubleshooting report shows exactly where:
+
+        ```
+        sudo ./backup-diag.sh -o backup-diag.md
+        ```
+
+        Attach it. If you have already hand-rolled a fix (see the README
+        section *Hand-rolling a fix for your setup and distro*), attach the
+        patch too. **A working patch that passes `tests/run-all.sh` gets your
+        name on the copyright line of `LICENSE` next to mine**, credit in the
+        release notes, and a row in the README — see CONTRIBUTING.md.
+
+  - type: input
+    id: setup
+    attributes:
+      label: The setup
+      placeholder: "Void Linux, xfs root, rEFInd on the ESP at /boot/efi, x86_64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: what
+    attributes:
+      label: What is new about it
+      multiple: true
+      options:
+        - A distro family the package map does not know
+        - A root filesystem other than btrfs / ext4
+        - A bootloader other than GRUB / systemd-boot
+        - An ESP somewhere other than /boot/efi or /efi
+        - Legacy BIOS boot
+        - A plain (unencrypted) /boot
+        - An initramfs generator other than dracut / mkinitcpio / initramfs-tools
+        - Something else (say below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: wrong
+    attributes:
+      label: Which detection decision is wrong, and what it should have been
+      description: >
+        Compare the "What the suite's own detection reports" section of the
+        report with the raw sections above it. Name the line.
+      placeholder: "snapshot engine: none — timeshift is not packaged here, but the root is xfs so it should be timeshift; the package is 'timeshift' from the extra repo"
+
+  - type: textarea
+    id: tested
+    attributes:
+      label: What you have actually run
+      description: >
+        Dry runs count. A real backup plus a `backup-verify.sh` pass is what
+        turns a row green. A real restore is what proves the boot rebuild.
+      placeholder: |
+        sudo ./deploy.sh --dry-run          — plan looked right
+        sudo borg-backup.sh --dry-run       — sources correct
+        sudo borg-backup.sh                 — real archive created
+        sudo backup-verify.sh               — exit 0
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Troubleshooting report
+      description: Attach `backup-diag.md` or paste it here.
+      render: markdown
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have attached the troubleshooting report.
+          required: true
+        - label: If I am sending a patch, `bash tests/run-all.sh` passes on it.
+          required: false

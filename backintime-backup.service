@@ -1,0 +1,14 @@
+[Unit]
+Description=Back in Time Backup to external drive
+# deploy.sh replaces these paths at install time
+RequiresMountsFor=/mnt/backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/backintime-backup.sh
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUSchedulingPolicy=idle
+MemoryMax=2G
+CPUQuota=50%

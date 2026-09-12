@@ -1,0 +1,37 @@
+# /etc/backup-system.conf — per-host settings for linux-backup-system.
+#
+# deploy.sh generates this from detection; it is safe to hand-edit. Every value
+# has a built-in default in backup-common.sh, so a missing line is fine. Nothing
+# about the boot layout goes here — that is derived at run time.
+
+# Where the backup drive is mounted, and the borg repo inside it.
+BACKUP_MOUNT="/mnt/backup"
+#BORG_REPO="/mnt/backup/borg-backup"      # default: $BACKUP_MOUNT/borg-backup
+
+# Wrong-drive guard: the backup filesystem's UUID. The backup scripts refuse to
+# run if the drive mounted here is not this one. Leave empty to disable.
+BACKUP_FS_UUID=""
+
+# Unlock-on-attach (external drives only): the drive's LUKS partition UUID and a
+# keyfile enrolled in one of its keyslots. Used by borg-backup-drive-attach.sh.
+BACKUP_LUKS_UUID=""
+BACKUP_KEYFILE="/etc/luks-keys/backup-drive.key"
+#BACKUP_MOUNT_OPTS="compress=zstd:1"      # btrfs example; leave empty on ext4/xfs
+
+# Scheduling policy:
+#   adhoc     — external/removable drive; backups run by hand or on drive-attach,
+#               timers are NOT enabled. (default; correct for most boxes)
+#   scheduled — second INSTALLED drive; the daily borg/BIT timers are enabled.
+SCHEDULE_MODE="adhoc"
+
+# Extra absolute mountpoints to include in file-level backups, space-separated.
+# / and a separate /home, /boot and the ESP are detected automatically.
+BACKUP_EXTRA_SOURCES=""
+
+# Retention — applied by every layer (borg, btrfs/Timeshift replicas, BIT).
+# Count-based plus free-space based, NEVER time-based: an ad-hoc drive may sit
+# unplugged for months and age must never delete a backup.
+KEEP=10             # normal: keep the newest KEEP of each set, any age
+MIN_KEEP=3          # hard floor: never prune below this, even when the drive is full
+MIN_FREE_PCT=10     # keep at least this % of the drive free
+MIN_FREE_GIB=0      # and at least this many GiB free (0 = ignore)

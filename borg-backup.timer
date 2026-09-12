@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Borg Backup Timer
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1800
+Persistent=true
+WakeSystem=false
+
+[Install]
+WantedBy=timers.target

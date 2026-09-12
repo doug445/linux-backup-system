@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/doug445/linux-backup-system/blob/main/SECURITY.md
+    about: Do not open a public issue. Report privately by email — see SECURITY.md.
+  - name: Setup report — did it work on your distro / filesystem / boot layout?
+    url: https://github.com/doug445/linux-backup-system/blob/main/CONTRIBUTING.md#most-wanted-setup-reports
+    about: Arch, openSUSE, legacy BIOS, a plain /boot and every non-btrfs/ext4 root are unconfirmed. A report that it WORKED is as valuable as a bug.
+  - name: Hand-rolling a fix for your own setup
+    url: https://github.com/doug445/linux-backup-system/blob/main/README.md#hand-rolling-a-fix-for-your-setup-and-distro
+    about: Where every detection decision lives, how to change it, how to prove it — and how the fix gets you onto the license.
+  - name: What this project accepts
+    url: https://github.com/doug445/linux-backup-system/blob/main/CONTRIBUTING.md
+    about: New Linux setups, serious bugs with a troubleshooting report, and nothing else. Read before opening anything.

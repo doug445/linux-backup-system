@@ -1,0 +1,113 @@
+name: Bug report
+description: A backup that did not happen, a verify that said the wrong thing, or a restore that did not boot
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This tooling decides, from detection, what your machine's backup and
+        boot chain look like** — so a description of what went wrong is rarely
+        enough to act on. The troubleshooting report is.
+
+        > ### Attach the troubleshooting report
+        > ```
+        > sudo ./backup-diag.sh -o backup-diag.md
+        > ```
+        > Read-only, truncates UUIDs, never includes keyfile contents or LUKS
+        > header material. It is the single most useful thing you can attach,
+        > and the fix is built from it. Read it before posting anyway.
+
+        > ### Never paste key material
+        > No keyfiles, no LUKS header backups (`*.img` from `luks-headers/`),
+        > no borg passphrase. Nothing in a bug needs them.
+
+        This project takes serious bugs, setup reports and new Linux setups, and
+        nothing else — see
+        [`CONTRIBUTING.md`](https://github.com/doug445/linux-backup-system/blob/main/CONTRIBUTING.md).
+
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup
+      description: Distro and version, root filesystem, boot layout, architecture — the four things every code path branches on.
+      placeholder: "Linux Mint 22.3, ext4 on LVM-on-LUKS, GRUB EFI with encrypted /boot, x86_64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component
+      options:
+        - deploy.sh (detection, packages, config, units)
+        - backup-common.sh (shared detection / policy library)
+        - borg-backup.sh (borg archives + btrfs replicas)
+        - backintime-backup.sh (BIT-format rsync snapshots)
+        - timeshift-backup.sh (Timeshift layer on non-btrfs roots)
+        - backup-verify.sh (restore-readiness check)
+        - luks-header-backup.sh
+        - borg-backup-drive-attach.sh / udev rule (unlock-on-attach)
+        - restore.sh / borg-restore.sh / backintime-restore.sh
+        - restore-rebuild-boot.sh (boot-chain rebuild)
+        - backup-tray.py (tray indicator)
+        - backup-diag.sh (troubleshooting report)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: linux-backup-system version
+      description: >
+        The `suite=` value at the top of any backup log, the first table row of
+        the troubleshooting report, or `git describe --tags --always --dirty`.
+        Only the latest release receives fixes.
+      placeholder: "3.0.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command you ran
+      description: Include any `BACKUP_*` / `SCHEDULE_MODE` variables you set. A `--dry-run` first is always welcome.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: >
+        Paste output verbatim. If a restore would not boot, say what the screen
+        showed and whether you reached an initramfs prompt, a bootloader prompt,
+        or nothing at all.
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Troubleshooting report
+      description: >
+        Attach `backup-diag.md`, or paste it here. It collects state and changes
+        nothing. If the "What the suite's own detection reports" section
+        disagrees with the raw output above it, say so — that is the bug.
+      render: markdown
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have attached the troubleshooting report, or said why I cannot.
+          required: true
+        - label: I have not pasted a keyfile, a LUKS header backup, or a passphrase.
+          required: true
+        - label: I am on the latest release, or I have said which commit above.
+          required: true
+        - label: This is not a security vulnerability. Those go to the address in SECURITY.md.
+          required: true

@@ -1,0 +1,19 @@
+[Unit]
+Description=Unlock and mount the Borg backup drive (no backup is started)
+Documentation=file:///usr/local/sbin/borg-backup-drive-attach.sh
+DefaultDependencies=no
+After=systemd-udevd.service local-fs.target
+Wants=local-fs.target
+
+# NOTE: deliberately does NOT pull in borg-backup-mount.service or any backup
+# unit. Auto-backup-on-connect is masked system-wide by policy; backups are
+# always started manually.
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/borg-backup-drive-attach.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

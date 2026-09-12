@@ -1,0 +1,13 @@
+[Unit]
+Description=Timeshift snapshot to the backup drive (non-btrfs local-snapshot layer)
+Documentation=file:/usr/local/sbin/timeshift-backup.sh
+ConditionPathIsMountPoint=/mnt/backup
+RequiresMountsFor=/mnt/backup
+
+[Service]
+Type=oneshot
+# deploy.sh rewrites the mount path for this host.
+Environment=BACKUP_MOUNT=/mnt/backup
+ExecStart=/usr/local/sbin/timeshift-backup.sh
+Nice=19
+IOSchedulingClass=idle

@@ -1,0 +1,25 @@
+# Editor / working copies — the git history is the backup, not these
+*.bak
+*.bak-*
+*.tmp
+*.orig
+
+# macOS sidecars (AppleDouble resource forks, Finder metadata) that appear when
+# the tree passes through a Mac or an SMB share
+._*
+.DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Troubleshooting reports — generated per host, may carry layout detail; never
+# commit one, attach it to an issue instead
+backup-diag*.md
+
+# Local SEO / launch scratch — not published
+github-about.txt
+
+# Agent scratch specs
+docs/superpowers/
+.ruff_cache/

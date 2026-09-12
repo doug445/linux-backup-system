@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily restore-readiness check
+
+[Timer]
+# After the nightly borg and Back in Time runs.
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

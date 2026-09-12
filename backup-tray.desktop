@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Backup Status
+Comment=System tray indicator for Borg/btrfs backup status
+Exec=/usr/local/bin/backup-tray
+Icon=drive-harddisk
+Terminal=false
+Categories=System;Utility;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,17 @@
+[Unit]
+Description=Verify backups could actually restore this machine
+Documentation=file:/usr/local/sbin/backup-verify.sh
+ConditionPathIsMountPoint=/mnt/backup
+RequiresMountsFor=/mnt/backup
+
+[Service]
+Type=oneshot
+# install.sh rewrites these two for the host's layout.
+Environment=BACKUP_MOUNT=/mnt/backup
+Environment=BORG_REPO=/mnt/backup/borg-backup
+ExecStart=/usr/local/sbin/backup-verify.sh
+# 0 = restore-ready, 1 = ready with warnings, 2 = a restore would fail.
+# Only 2 marks the unit failed, so `systemctl --failed` means something.
+SuccessExitStatus=0 1
+Nice=19
+IOSchedulingClass=idle

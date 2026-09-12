@@ -1,0 +1,86 @@
+name: lint
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: bash -n + shellcheck (warning severity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash syntax check (bash -n)
+        run: |
+          set -e
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f"
+            echo "syntax OK: $f"
+          done
+
+      - name: shellcheck (warning severity)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q shellcheck
+          shellcheck -S warning $(git ls-files '*.sh')
+
+  python:
+    name: ruff + compile (python tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile check
+        run: |
+          set -e
+          for f in $(git ls-files '*.py'); do python3 -B -m py_compile "$f"; echo "compiles: $f"; done
+
+      - name: Install ruff
+        # Pinned: ruff's default rule set moves between releases, and this gate
+        # must mean the same thing on every run as it does on the maintainer's
+        # machine.
+        run: pip install ruff==0.16.4
+
+      - name: Ruff (default ruleset is fatal)
+        # --isolated so a stray config cannot quietly change what this gate means.
+        run: ruff check --isolated --no-cache $(git ls-files '*.py')
+
+  license-headers:
+    name: SPDX header in every script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: every .sh and .py carries SPDX-License-Identifier MIT
+        run: |
+          rc=0
+          for f in $(git ls-files '*.sh' '*.py'); do
+            grep -q 'SPDX-License-Identifier: MIT' "$f" || { echo "missing SPDX header: $f"; rc=1; }
+          done
+          exit $rc
+
+  tests:
+    # Library fixtures, every script's command line, the read-only
+    # troubleshooting report with its redaction, restore-rebuild-boot.sh in
+    # dry-run, and deploy.sh --dry-run as root. Nothing is installed and no
+    # disk is touched: the dry-run test proves that by hashing the install
+    # directories before and after.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: library fixture test
+        run: bash tests/lib-fixture-test.sh
+      - name: command-line + troubleshooting-report test
+        run: bash tests/cli-test.sh
+      - name: deploy.sh --dry-run as root
+        run: sudo bash tests/deploy-dryrun-test.sh

@@ -1,0 +1,212 @@
+#!/bin/bash
+#
+# linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
+# https://github.com/doug445/linux-backup-system
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# restore-rebuild-boot.sh — rebuild the boot chain after a file restore.
+#
+# Universal across bootloaders and kernel forms. Run INSIDE the restored system
+# (the restore scripts copy it into $TARGET and execute it under chroot; it can
+# also be run standalone inside an arch-chroot, or with --dry-run on a live
+# system to see what it WOULD do). It detects everything from the system it runs
+# in — distro, arch, kernels, LUKS, ESP, bootloader and kernel form — so it needs
+# no arguments beyond the optional --dry-run.
+#
+# Handles:
+#   - initramfs: dracut / update-initramfs / mkinitcpio
+#   - UKI (unified kernel image): kernel-install / dracut --uefi
+#   - bootloader: GRUB (EFI + BIOS, x86_64/aarch64) and systemd-boot (bootctl)
+#   - encrypted /boot: enables GRUB cryptodisk; warns if GRUB < 2.12 with argon2
+#
+# Usage:  restore-rebuild-boot.sh [--dry-run]
+set -uo pipefail
+
+DRY=          # empty, not 0: ${DRY:+...} treats the string "0" as set
+[ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "-n" ] && DRY=1
+
+say()  { echo "[rebuild-boot]${DRY:+ [DRY]} $*"; }
+warn() { echo "[rebuild-boot]${DRY:+ [DRY]} WARNING: $*"; }
+# run: log the command; execute it unless --dry-run.
+run()  { if (( DRY )); then echo "[rebuild-boot] [DRY] would: $*"; else echo "[rebuild-boot] + $*"; "$@"; fi; }
+# runsh: same, for a shell snippet (redirections/pipes).
+runsh(){ if (( DRY )); then echo "[rebuild-boot] [DRY] would: $1"; else echo "[rebuild-boot] + $1"; bash -c "$1"; fi; }
+
+# ---------------------------------------------------------------------------
+# Detect the system we are rebuilding.
+# ---------------------------------------------------------------------------
+DISTRO_FAMILY=unknown
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    case "${ID:-}${ID_LIKE:-}" in
+        *debian*|*ubuntu*|*mint*) DISTRO_FAMILY=debian ;;
+        *fedora*|*rhel*|*centos*) DISTRO_FAMILY=fedora ;;
+        *arch*)                   DISTRO_FAMILY=arch ;;
+    esac
+fi
+ARCH=$(uname -m)
+
+# Kernel versions = the module directories present in the restored system.
+mapfile -t KVERS < <(ls -1 /lib/modules 2>/dev/null)
+
+# LUKS in use? (any active crypttab entry in the restored system)
+HAS_LUKS=false
+grep -qsvE '^\s*#|^\s*$' /etc/crypttab 2>/dev/null && HAS_LUKS=true
+
+# ESP mountpoint.
+ESP=""
+for e in /boot/efi /efi; do mountpoint -q "$e" 2>/dev/null && { ESP="$e"; break; }; done
+[ -z "$ESP" ] && { for e in /boot/efi /efi; do [ -d "$e/EFI" ] && { ESP="$e"; break; }; done; }
+IS_EFI=false; [ -d /sys/firmware/efi ] && IS_EFI=true
+
+# Kernel form: UKI if the ESP holds unified images, or kernel-install is set to uki.
+IS_UKI=false
+if [ -n "$ESP" ] && compgen -G "$ESP/EFI/Linux/*.efi" >/dev/null 2>&1; then IS_UKI=true; fi
+grep -qs 'layout[[:space:]]*=[[:space:]]*uki' /etc/kernel/install.conf 2>/dev/null && IS_UKI=true
+
+# Bootloader: GRUB if a grub.cfg exists; systemd-boot if its EFI binary is on the
+# ESP (or bootctl reports installed) — checked independently, a host can have one
+# or the other. loader/entries alone does NOT mean systemd-boot: Fedora GRUB uses
+# BLS entries in /boot/loader/entries too.
+USES_GRUB=false
+{ [ -f /boot/grub2/grub.cfg ] || [ -f /boot/grub/grub.cfg ] \
+  || command -v grub2-mkconfig >/dev/null 2>&1 || command -v grub-mkconfig >/dev/null 2>&1; } && USES_GRUB=true
+USES_SDBOOT=false
+if [ -n "$ESP" ] && compgen -G "$ESP/EFI/systemd/systemd-boot*.efi" >/dev/null 2>&1; then
+    USES_SDBOOT=true
+elif [ -n "$ESP" ] && [ -d "$ESP/loader/entries" ] && [ ! -f /boot/grub2/grub.cfg ] && [ ! -f /boot/grub/grub.cfg ] \
+     && { [ -f "$ESP/EFI/BOOT/BOOTX64.EFI" ] || [ -f "$ESP/EFI/BOOT/BOOTAA64.EFI" ]; }; then
+    USES_SDBOOT=true
+fi
+command -v bootctl >/dev/null 2>&1 && bootctl --quiet is-installed 2>/dev/null && [ "$USES_GRUB" = false ] && USES_SDBOOT=true
+
+# Is /boot on LUKS, and if GRUB, is it new enough for argon2?
+BOOT_ON_LUKS=false
+boot_src=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//')
+[ -z "$boot_src" ] && boot_src=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')
+[[ "$boot_src" == /dev/mapper/* ]] && BOOT_ON_LUKS=true
+
+say "distro=$DISTRO_FAMILY arch=$ARCH efi=$IS_EFI esp=${ESP:-none}"
+say "kernels: ${KVERS[*]:-none}"
+say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT"
+[ ${#KVERS[@]} -eq 0 ] && warn "no kernels found under /lib/modules — cannot rebuild"
+
+# ---------------------------------------------------------------------------
+# 1. Rebuild kernels: UKI or plain initramfs, distro-appropriate.
+# ---------------------------------------------------------------------------
+say "===== kernel / initramfs rebuild ====="
+if [ "$IS_UKI" = true ]; then
+    say "UKI layout — regenerating unified images"
+    if command -v kernel-install >/dev/null 2>&1; then
+        for kv in "${KVERS[@]}"; do
+            img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
+            run kernel-install add "$kv" "$img"
+        done
+    elif command -v dracut >/dev/null 2>&1; then
+        for kv in "${KVERS[@]}"; do run dracut --force --uefi --kver "$kv"; done
+    else
+        warn "no kernel-install or dracut — cannot regenerate UKI"
+    fi
+else
+    if command -v update-initramfs >/dev/null 2>&1; then
+        say "Debian family — update-initramfs -k all -c"
+        run update-initramfs -k all -c
+    elif command -v dracut >/dev/null 2>&1; then
+        say "Fedora family — dracut --regenerate-all --force"
+        if ! run dracut --regenerate-all --force; then
+            for kv in "${KVERS[@]}"; do run dracut --force "/boot/initramfs-$kv.img" "$kv"; done
+        fi
+    elif command -v mkinitcpio >/dev/null 2>&1; then
+        say "Arch family — mkinitcpio -P"
+        run mkinitcpio -P
+    else
+        warn "no initramfs tool found (update-initramfs/dracut/mkinitcpio)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 2. GRUB: enable cryptodisk when /boot is encrypted, reinstall, regenerate.
+# ---------------------------------------------------------------------------
+if [ "$USES_GRUB" = true ]; then
+    say "===== GRUB ====="
+    if [ "$BOOT_ON_LUKS" = true ]; then
+        if ! grep -qs '^GRUB_ENABLE_CRYPTODISK=y' /etc/default/grub 2>/dev/null; then
+            say "enabling GRUB_ENABLE_CRYPTODISK=y (encrypted /boot)"
+            runsh "sed -i '/^GRUB_ENABLE_CRYPTODISK=/d' /etc/default/grub 2>/dev/null; echo GRUB_ENABLE_CRYPTODISK=y >> /etc/default/grub"
+        fi
+        gv=$({ grub2-install --version 2>/dev/null || grub-install --version 2>/dev/null; } | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [ -n "$gv" ] && [ "$(printf '2.12\n%s\n' "$gv" | sort -V | head -1)" != 2.12 ]; then
+            warn "GRUB $gv is older than 2.12 and cannot unlock an argon2id /boot — restore may leave /boot unopenable"
+        fi
+    fi
+    # Reinstall the bootloader
+    if [ "$IS_EFI" = true ]; then
+        case "$ARCH" in x86_64) gt=x86_64-efi;; aarch64) gt=arm64-efi;; *) gt="$ARCH-efi";; esac
+        bid="${ID:-linux}"; edir="${ESP:-/boot/efi}"
+        if command -v grub2-install >/dev/null 2>&1; then
+            run grub2-install --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck
+        elif command -v grub-install >/dev/null 2>&1; then
+            run grub-install --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck
+        fi
+    else
+        disk=$(lsblk -npo PKNAME "$boot_src" 2>/dev/null | head -1)
+        if [ -n "$disk" ]; then
+            command -v grub2-install >/dev/null 2>&1 && run grub2-install "$disk" --recheck \
+                || { command -v grub-install >/dev/null 2>&1 && run grub-install "$disk" --recheck; }
+        else
+            warn "could not determine BIOS boot disk for grub-install"
+        fi
+    fi
+    # Regenerate config
+    if command -v update-grub >/dev/null 2>&1; then run update-grub
+    elif [ -f /boot/grub2/grub.cfg ] && command -v grub2-mkconfig >/dev/null 2>&1; then run grub2-mkconfig -o /boot/grub2/grub.cfg
+    elif command -v grub-mkconfig >/dev/null 2>&1; then run grub-mkconfig -o /boot/grub/grub.cfg
+    elif command -v grub2-mkconfig >/dev/null 2>&1; then run grub2-mkconfig -o /boot/grub2/grub.cfg
+    else warn "no grub config generator found"; fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3. systemd-boot: reinstall the loader and (re)create entries.
+# ---------------------------------------------------------------------------
+if [ "$USES_SDBOOT" = true ]; then
+    say "===== systemd-boot ====="
+    if command -v bootctl >/dev/null 2>&1; then
+        run bootctl ${ESP:+--esp-path="$ESP"} install
+        # kernel-install writes Type#1 entries (or UKIs) per the install layout
+        if command -v kernel-install >/dev/null 2>&1; then
+            for kv in "${KVERS[@]}"; do
+                img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
+                run kernel-install add "$kv" "$img"
+            done
+        else
+            warn "bootctl present but kernel-install missing — loader entries may be incomplete"
+        fi
+    else
+        warn "systemd-boot detected but bootctl not available"
+    fi
+fi
+
+[ "$USES_GRUB" = false ] && [ "$USES_SDBOOT" = false ] && \
+    warn "no bootloader detected (neither GRUB nor systemd-boot) — boot install skipped"
+
+say "===== boot rebuild ${DRY:+(dry run) }complete ====="

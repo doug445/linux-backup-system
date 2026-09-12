@@ -1,0 +1,16 @@
+# Backup drive: unlock (if LUKS) + mount on plug-in / boot coldplug, and stop
+# udisks2 from auto-clearing (auto-unmounting) it.
+#
+# deploy.sh replaces @BACKUP_DEV_UUID@ with the drive's LUKS UUID, or its
+# filesystem UUID for a plain drive, from /etc/backup-system.conf and installs
+# the result as /etc/udev/rules.d/99-borg-backup.rules. With no UUID known the
+# rule is not installed at all, so nothing is ever pinned to one host's drive.
+#
+# This ONLY attaches the drive. It never starts a backup: the attach unit
+# unlocks and mounts, and auto-backup-on-connect is deliberately absent.
+
+# Trigger unlock+mount when the drive's partition appears
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", TAG+="systemd", ENV{SYSTEMD_WANTS}+="borg-backup-drive-attach.service"
+
+# Keep udisks2 from tearing the mapping down
+ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", ENV{UDISKS_AUTO_CLEAR}="0"

@@ -1,0 +1,16 @@
+[Unit]
+Description=Borg Backup to LUKS-encrypted sdb1
+After=mnt-backup.mount
+RequiresMountsFor=/mnt/backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/borg-backup.sh
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUSchedulingPolicy=idle
+
+# Prevent backup from hogging resources
+MemoryMax=2G
+CPUQuota=50%
