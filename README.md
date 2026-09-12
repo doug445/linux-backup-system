@@ -32,16 +32,16 @@ layout is derived at run time. It replaces the older `BIT_deploy` and
 `borg-backup` projects, which were Back-In-Time-centric and carried one host's
 paths hardcoded.
 
-> ### ⚠️ Private until every status row is green
+> ### Status: ✅ verified on metal, ❌ written but not yet verified
 >
-> "Universal" is the goal and the design, not yet the proof: this repository
-> is private while the ❌ rows in [Tested / untested](#tested--untested) are
-> still unconfirmed on real hardware. When they are all ✅ it goes public.
-> If you have one of those setups — or any Linux this suite has never seen —
-> the fastest way to turn a row green is a
-> [setup report](CONTRIBUTING.md#most-wanted-setup-reports) with the
-> troubleshooting report attached, and a patch that passes the tests puts
-> your name on the license.
+> "Universal" is the goal and the design; the proof is per setup. The
+> [Tested / untested](#tested--untested) tables say which distros, root
+> filesystems and boot layouts have been confirmed with a real backup and a
+> passing `backup-verify.sh` on real hardware. **Each ❌ row turns ✅ as that
+> setup is tested and verified** — by the author where the hardware exists,
+> and by a [setup report](CONTRIBUTING.md#most-wanted-setup-reports) from
+> anyone running one of those setups, or any Linux this suite has never seen.
+> A patch that passes the tests puts the contributor's name on the license.
 
 > **A backup never starts because a drive appeared.** Plugging the backup
 > drive in unlocks and mounts it; a backup runs when a timer fires (installed
@@ -121,10 +121,11 @@ Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
 | Bare-metal restore **executing** the boot rebuild (not just its dry run) | ❌ |
 
-To turn a ❌ into a ✅: deploy it, run one real backup on each layer, run
-`backup-verify.sh`, and send the [troubleshooting report](#troubleshooting-logs-dry-runs-and-the-report).
-Every backup and the installer take `--dry-run` first, so the plan can be
-inspected without touching anything.
+A ❌ row turns ✅ when that setup has been deployed, has produced one real
+backup on each layer, and has passed `backup-verify.sh` — with the
+[troubleshooting report](#troubleshooting-logs-dry-runs-and-the-report) from
+that machine kept as the evidence. Every backup and the installer take
+`--dry-run` first, so the plan can be inspected without touching anything.
 
 ## Scheduling policy
 
@@ -539,7 +540,8 @@ says where each decision lives.
   `restore-rebuild-boot.sh` are exercised only against synthetic listings in
   the fixture test. The author has Pis in storage and no plan to run one; that
   row will stay ❌ until someone with a Pi sends a setup report.
-- Verify the ❌ rows on real hardware and flip them to ✅.
+- Every ❌ row above stays red until that setup has been run and verified on
+  real hardware; each turns ✅ as that happens.
 
 ## Documentation
 
@@ -549,7 +551,7 @@ says where each decision lives.
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Scope, the setup-report table, the troubleshooting report, adding a Linux setup and getting onto the license |
 | [`SECURITY.md`](SECURITY.md) | Supported versions, reporting, what is in and out of scope, what never to send |
 | [`backup-system.conf.example`](backup-system.conf.example) | Every per-host knob, with its default |
-| [`.github/rulesets/`](.github/rulesets/README.md) | Branch and tag protection as JSON, applied when the repo goes public |
+| [`.github/rulesets/`](.github/rulesets/README.md) | Branch and tag protection as JSON, applied to this repository |
 
 ## Contributing
 

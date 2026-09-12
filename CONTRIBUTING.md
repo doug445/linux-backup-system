@@ -26,9 +26,10 @@ writes a real backup, and that `backup-verify.sh` then agrees a restore would
 boot.
 
 Every ❌ row in the README's status tables is a setup the code claims to handle
-and that has not been confirmed on metal by me. **This repository stays
-private until every row is green.** A report that it worked is as valuable as
-a bug report — it is the only way a row ever turns ✅.
+and that has not been confirmed on metal by me. **Each row turns ✅ as that
+setup is tested and verified on real hardware.** A report that it worked is
+as valuable as a bug report — it is how a row turns ✅ on hardware I do not
+have.
 
 | Setup | Status | What to confirm |
 |---|---|---|

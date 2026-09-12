@@ -83,11 +83,9 @@ gh api "repos/doug445/linux-backup-system/rulesets/$ID" --jq '.enforcement, (.ru
 
 ## Status
 
-**Not yet applied to this repository.** Rulesets are a public-repository
-feature on a free GitHub plan, and this repository is private until every row
-of the README status tables is green. The two `POST` commands above are the
-first thing to run once it flips public. The rule bodies are the ones live on
-the sibling repositories (LinuxLocker, AsahiLocker, Panoptes), where the
-behaviour was tested on 2026-08-23: pushing a new `v*` tag succeeded, deleting
-it was rejected with `GH013: Repository rule violations found`, and an ordinary
+**Applied to this repository on 2026-09-12**, the day it went public, with the
+two `POST` commands above. The rule bodies are the ones live on the sibling
+repositories (LinuxLocker, AsahiLocker, Panoptes), where the behaviour was
+tested on 2026-08-23: pushing a new `v*` tag succeeded, deleting it was
+rejected with `GH013: Repository rule violations found`, and an ordinary
 fast-forward push to `main` was unaffected.
