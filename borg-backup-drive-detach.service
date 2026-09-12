@@ -1,0 +1,17 @@
+[Unit]
+Description=Clean up after the backup drive is unplugged (no backup is started)
+Documentation=file:///usr/local/sbin/borg-backup-drive-detach.sh
+DefaultDependencies=no
+
+# Started by the udev "remove" rule in 99-borg-backup.rules via
+# `systemctl --no-block start`. It must be a unit, not a udev RUN program:
+# systemd-udevd runs with PrivateMounts=yes, so an umount executed directly
+# from a RUN program only unmounts inside udevd's own mount namespace and the
+# host keeps the dead mount. A unit runs in the host namespace and its output
+# lands in the journal.
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/borg-backup-drive-detach.sh
+TimeoutStartSec=60

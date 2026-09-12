@@ -101,7 +101,18 @@ out=$(BX_CONFIG="$T/absent.conf" bash "$ROOT/borg-backup-drive-attach.sh" 2>&1);
 grep -q 'not present' <<<"$out" && ok "attach says not present" || bad "unexpected: $out"
 
 echo "== udev rule template"
-grep -q 'ACTION=="remove".*borg-backup-drive-detach.sh' "$ROOT/99-borg-backup.rules" && ok "remove rule runs the detach script" || bad "no remove rule"
+grep -q 'ACTION=="remove".*systemctl --no-block start borg-backup-drive-detach.service' "$ROOT/99-borg-backup.rules" && ok "remove rule starts the detach UNIT (udevd PrivateMounts)" || bad "remove rule must start the detach unit, not run the script"
+grep -q 'RUN+="/usr/local/sbin/' "$ROOT/99-borg-backup.rules" && bad "a RUN+= script in the udev rule would umount inside udevd's namespace" || ok "no direct RUN+= script in the udev rule"
+
+echo "== every unit's ExecStart names a script this repo installs to that path"
+for u in "$ROOT"/*.service; do
+    exe=$(sed -n 's/^ExecStart=//p' "$u" | awk '{print $1}')
+    case "$exe" in
+        /usr/local/sbin/*.sh) [ -f "$ROOT/$(basename "$exe")" ] && ok "$(basename "$u") -> $exe" || bad "$(basename "$u") ExecStart names $exe which is not in the repo" ;;
+        /usr/local/bin/*)     bad "$(basename "$u") ExecStart in /usr/local/bin — deploy installs scripts to /usr/local/sbin" ;;
+        *)                    bad "$(basename "$u") unexpected ExecStart: $exe" ;;
+    esac
+done
 grep -q 'ACTION=="add|change".*borg-backup-drive-attach.service' "$ROOT/99-borg-backup.rules" && ok "add rule wants the attach unit" || bad "no add rule"
 n=$(grep -c '@BACKUP_DEV_UUID@' "$ROOT/99-borg-backup.rules"); [ "$n" -ge 3 ] && ok "every rule line is templated ($n)" || bad "template placeholder count $n"
 if command -v udevadm >/dev/null && udevadm verify --help >/dev/null 2>&1; then

@@ -1033,8 +1033,9 @@ deploy_extra_units() {
             sed "s#/mnt/backup#$BACKUP_MOUNT#g" "$SCRIPT_DIR/$u" > "/etc/systemd/system/$u"
         done
     fi
-    [ -f "$SCRIPT_DIR/borg-backup-drive-attach.service" ] && \
-        install -m 644 "$SCRIPT_DIR/borg-backup-drive-attach.service" /etc/systemd/system/
+    for u in borg-backup-drive-attach.service borg-backup-drive-detach.service; do
+        [ -f "$SCRIPT_DIR/$u" ] && install -m 644 "$SCRIPT_DIR/$u" /etc/systemd/system/
+    done
     # The udev rule is a template: it fires on the backup drive's LUKS UUID from
     # /etc/backup-system.conf. No UUID known (plain drive, or unconfigured) means
     # no rule — never a rule pinned to some other machine's disk.
@@ -1090,7 +1091,7 @@ if (( DRY )); then
     log "             luks-header-backup.sh timeshift-backup.sh backup-diag.sh backup-common.sh lib-cmdline.sh"
     log "             borg-backup-drive-attach.sh borg-backup-drive-detach.sh + restore scripts"
     log "  config  -> /etc/backup-system.conf (mount=$BACKUP_MOUNT, schedule=$SCHEDULE_MODE)$([ -f /etc/backup-system.conf ] && echo ' [exists, kept]')"
-    log "  units   -> borg/BIT/backup-verify/luks-header + drive-attach + udev rule"
+    log "  units   -> borg/BIT/backup-verify/luks-header + drive-attach/detach + udev rule"
     if [ "$SCHEDULE_MODE" = scheduled ]; then
         log "  timers  -> borg + BIT ENABLED (internal drive)"
     else

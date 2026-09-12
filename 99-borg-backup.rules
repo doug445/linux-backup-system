@@ -13,8 +13,11 @@
 # Trigger unlock+mount when the drive's partition appears
 ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", TAG+="systemd", ENV{SYSTEMD_WANTS}+="borg-backup-drive-attach.service"
 
-# Drive yanked: clean up the dead mount / mapping so the next plug-in attaches
-ACTION=="remove", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", RUN+="/usr/local/sbin/borg-backup-drive-detach.sh"
+# Drive yanked: clean up the dead mount / mapping so the next plug-in attaches.
+# Through a unit, not RUN+=<script>: udevd's PrivateMounts=yes would confine
+# the umount to udevd's own namespace and leave the host's dead mount in place.
+# SYSTEMD_WANTS is ignored on remove events, hence systemctl from RUN.
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", RUN+="/usr/bin/systemctl --no-block start borg-backup-drive-detach.service"
 
 # Keep udisks2 from tearing the mapping down
 ENV{ID_FS_UUID}=="@BACKUP_DEV_UUID@", ENV{UDISKS_AUTO_CLEAR}="0"
