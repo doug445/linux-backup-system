@@ -1,9 +1,10 @@
 # About linux-backup-system
 
-**linux-backup-system is a multi-layer Linux backup and bare-metal restore
-suite that runs unchanged on every distro and every boot layout, and that
-answers the only question that matters once a disk is gone: could I actually
-restore this machine?** It combines **Borg** deduplicated archives, **Back In
+**linux-backup-system is a universal Linux backup and bare-metal restore
+suite: one multi-layer codebase meant to run unchanged on any Linux system —
+every distro, every root filesystem, every boot layout — that answers the only
+question that matters once a disk is gone: could I actually restore this
+machine?** It combines **Borg** deduplicated archives, **Back In
 Time**-format rsync snapshots, a local snapshot layer chosen by the root
 filesystem — **btrfs send/receive** replicas on btrfs, **Timeshift** on ext4
 and everything else — keyslot-tagged **LUKS header backups**, and a
@@ -56,6 +57,24 @@ a new disk** — and that is what linux-backup-system automates:
 - a restore that fixes up `fstab` and `crypttab` for the new disk's UUIDs,
   chroots in, and rebuilds the initramfs, the UKI, GRUB or systemd-boot for
   whatever it finds there.
+
+## Universal, and why that is a call for contributions
+
+"Universal" here is a design rule before it is a claim. Nothing in the suite
+is keyed to a distro name: the package manager, the root filesystem, the
+snapshot engine, where the ESP is, whether `/boot` is its own filesystem,
+which bootloader and initramfs generator the machine uses, whether the backup
+drive is removable — all of it is read from the machine at run time, and
+derivatives inherit support from their family through `ID_LIKE`. A Linux
+system this suite has never seen is therefore not a port to write but a
+detection gap to close: one wrong line in the troubleshooting report, one
+function to fix, one fixture to add.
+
+One maintainer cannot own every distro, filesystem and boot layout, which is
+why the README's status tables are honest about what has been confirmed on
+metal and why the project asks for setup reports and patches. A working patch
+for a setup that passes the tests puts the contributor's name on the license.
+That is the mechanism by which "universal" becomes true.
 
 ## Who it is for
 

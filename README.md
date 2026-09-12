@@ -4,11 +4,16 @@
 [![Layers: Borg | Back In Time | btrfs/Timeshift](https://img.shields.io/badge/layers-Borg%20%7C%20Back%20In%20Time%20%7C%20btrfs%2FTimeshift-blue.svg)](#layers)
 [![Boot: GRUB | systemd-boot | UKI](https://img.shields.io/badge/boot-GRUB%20%7C%20systemd--boot%20%7C%20UKI-informational.svg)](#restore)
 
-# linux-backup-system — restore-verified Linux backups for every distro and boot layout
+# linux-backup-system — universal, restore-verified backup and bare-metal restore for any Linux
 
-**One Linux backup codebase for the whole fleet — every distro, every root
-filesystem, every boot layout — that answers the only question that matters
-once a disk is gone: could I actually restore this machine?** It layers
+**A universal Linux backup system: one codebase meant to run unchanged on
+any Linux system — every distro, every root filesystem, every boot layout —
+that answers the only question that matters once a disk is gone: could I
+actually restore this machine?** Nothing is keyed to a distro name; every
+decision is made from what the machine shows at run time, so a setup this
+suite has never seen is a detection gap to close, not a port to write — and
+closing those gaps is what the [call for contributions](#contributing) is
+for. It layers
 **Borg** deduplicated archives, **Back In Time**-format rsync snapshots, a
 local snapshot layer chosen by the root filesystem (**btrfs send/receive**
 replicas of your snapper snapshots on btrfs, **Timeshift** on ext4 and
@@ -29,11 +34,14 @@ paths hardcoded.
 
 > ### ⚠️ Private until every status row is green
 >
-> This repository is private while the ❌ rows in [Tested / untested](#tested--untested)
-> are still unconfirmed on real hardware. When they are all ✅ it goes public.
-> If you have one of those setups, the fastest way to turn a row green is a
+> "Universal" is the goal and the design, not yet the proof: this repository
+> is private while the ❌ rows in [Tested / untested](#tested--untested) are
+> still unconfirmed on real hardware. When they are all ✅ it goes public.
+> If you have one of those setups — or any Linux this suite has never seen —
+> the fastest way to turn a row green is a
 > [setup report](CONTRIBUTING.md#most-wanted-setup-reports) with the
-> troubleshooting report attached.
+> troubleshooting report attached, and a patch that passes the tests puts
+> your name on the license.
 
 > **A backup never starts because a drive appeared.** Plugging the backup
 > drive in unlocks and mounts it; a backup runs when a timer fires (installed
@@ -514,8 +522,11 @@ says where each decision lives.
 
 ## Contributing
 
-This project takes **setup reports**, **new Linux setups** (a report, or a
-patch that passes the tests) and **serious bugs**, and nothing else.
+The goal is one backup system that runs on **any Linux** — universal in fact,
+not just in design — and one person cannot own every distro, filesystem and
+boot layout. That is what contributions are for. This project takes **setup
+reports**, **new Linux setups** (a report, or a patch that passes the tests)
+and **serious bugs**, and nothing else.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the table of what is still unconfirmed;
 a report that a setup *worked* is the only way a row gets ticked. Run what CI
 runs before opening a pull request:
