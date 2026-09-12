@@ -156,7 +156,8 @@ sudo ./deploy.sh               # install packages, scripts, config, units
 ```
 
 `deploy.sh` detects distro family, root filesystem, boot layout and drive type;
-installs the packages; deploys every script plus `backup-common.sh`; generates
+**installs and verifies every dependency the detected setup needs** before
+touching anything else; deploys every script plus `backup-common.sh`; generates
 `/etc/backup-system.conf` (never clobbering an existing one); deploys the
 units and the udev rule; enables timers only in scheduled mode; installs the
 tray; and adds `timeback` / `bitback` / `snapback` shell functions. On
@@ -194,13 +195,23 @@ a btrfs destination, and compression is free space on the others.
 
 ## Dependencies
 
-Every backup script checks its required tools **first** and installs any that are
-missing, rather than failing partway through. It maps the command to the package
-for the detected distro family (Debian/Ubuntu/Mint, Fedora/RHEL, Arch/Manjaro,
-openSUSE) and installs via that package manager. A `--dry-run` only reports what
-it would install; a real run that cannot install a required tool aborts with a
-clear message instead of a silent failure. Non-btrfs boxes get `timeshift`
-installed automatically as the local-snapshot layer.
+**`deploy.sh` installs what the detected box needs, automatically, as its
+first act after detection** — before the drive set-up, which needs
+`mkfs.btrfs` and `cryptsetup`, and before any layer is deployed. One package
+map in `backup-common.sh` serves the installer and every script it deploys, so
+what gets installed is exactly what the scripts later check for.
+
+| Set | Tools | On failure |
+|---|---|---|
+| **Required**, every host | borg, rsync, cryptsetup, btrfs-progs (the backup drive is always btrfs), util-linux (`findmnt`, `lsblk`, `sfdisk`, `wipefs`, `blkid`), `udevadm` | verified by `command -v` after the install; any still missing **aborts the deploy** with the package list (on Arch/Manjaro: run `pacman -Syu` first) |
+| **By layer** | Back In Time; `snapper` on a btrfs root; `timeshift` on any other root; `ecryptfs-utils` when an ecryptfs home is found | each installed on its own, so one the distro does not carry (Back In Time and Timeshift are AUR-only on Arch) costs a **warning naming the manual command**, not the deploy |
+| **Tray** | python3, GTK 3 and AppIndicator3 through GObject introspection, probed by importing them | warning; the tray does not start until they are present |
+
+Package names are resolved per family — Debian/Ubuntu/Mint, Fedora/RHEL,
+Arch/Manjaro, openSUSE — and installed with that family's package manager,
+non-interactively. A `--dry-run` reports every package it *would* install and
+installs nothing. Every backup script re-checks its own tools at run time and
+installs any that went missing since, rather than failing partway through.
 
 ## Troubleshooting: logs, dry-runs and the report
 
@@ -524,7 +535,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.0.0
+- **Version:** 3.1.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

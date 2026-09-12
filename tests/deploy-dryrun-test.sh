@@ -49,6 +49,8 @@ grep -q 'Distro:' <<<"$out" && ok "detected the distro" || bad "no distro line"
 grep -q 'Suite:' <<<"$out" && ok "printed the suite version" || bad "no suite version line"
 grep -q 'Schedule mode' <<<"$out" && ok "decided a schedule mode" || bad "no schedule decision"
 grep -q 'backup-diag.sh' <<<"$out" && ok "plan lists backup-diag.sh" || bad "plan omits backup-diag.sh"
+grep -q '\[deps\]' <<<"$out" && ok "dependency step ran (reported, not installed)" || bad "no [deps] line — dependencies were not checked"
+grep -qE 'tray dependencies (present|: )|would install tray' <<<"$out" && ok "tray dependencies probed" || bad "tray dependencies not probed"
 
 after=$(ls -la /usr/local/sbin /etc/systemd/system 2>/dev/null | sha256sum)
 [ "$before" = "$after" ] && ok "nothing installed" || bad "/usr/local/sbin or /etc/systemd/system changed"

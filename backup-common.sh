@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.0.0"
+BX_VERSION="3.1.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -156,10 +156,17 @@ bx_pkg_for() {
         borg)       [ "$fam" = arch ] && echo borg || echo borgbackup ;;
         btrfs)      echo btrfs-progs ;;
         mkfs.btrfs) echo btrfs-progs ;;
-        bootctl)    echo systemd ;;
-        findmnt|lsblk|blkid|wipefs) echo util-linux ;;
+        bootctl|systemd-inhibit|udevadm) echo systemd ;;
+        findmnt|lsblk|blkid|wipefs|sfdisk|mountpoint) echo util-linux ;;
         awk)        echo gawk ;;
         timeshift)  echo timeshift ;;
+        snapper)    echo snapper ;;
+        mount.ecryptfs) echo ecryptfs-utils ;;
+        backintime) case "$fam" in
+                        debian) echo "backintime-common backintime-qt" ;;
+                        fedora|suse) echo backintime-qt ;;
+                        *) echo backintime ;;   # arch: AUR only — the install fails loudly, deploy.sh says how
+                    esac ;;
         *)          echo "$cmd" ;;   # rsync, cryptsetup, dracut, etc. match their package name
     esac
 }

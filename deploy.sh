@@ -65,6 +65,10 @@ if [ "$(uname -s)" != "Linux" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The shared library: one package map and one installer for the deploy and for
+# every script it deploys, so what deploy.sh installs is what the scripts check.
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/backup-common.sh" || { echo "FATAL: backup-common.sh missing next to deploy.sh" >&2; exit 1; }
 SUDO_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 USER_HOME=$(eval echo "~$SUDO_USER")
 
@@ -99,35 +103,15 @@ detect_distro() {
         case "$_id" in
             ubuntu|linuxmint|debian|pop)
                 DISTRO_FAMILY="debian"
-                PKG_INSTALL="apt-get install -y"
-                PKG_UPDATE="apt-get update -qq"
-                BIT_PKGS="backintime-common backintime-qt"
-                BORG_PKG="borgbackup"
-                ECRYPTFS_PKG="ecryptfs-utils"
                 ;;
             fedora|fedora-asahi-remix|rhel|centos|asahi)
                 DISTRO_FAMILY="fedora"
-                PKG_INSTALL="dnf install -y"
-                PKG_UPDATE="dnf check-update || true"
-                BIT_PKGS="backintime-qt"
-                BORG_PKG="borgbackup"
-                ECRYPTFS_PKG="ecryptfs-utils"
                 ;;
             manjaro|arch|endeavouros)
                 DISTRO_FAMILY="arch"
-                PKG_INSTALL="pacman -S --noconfirm --needed"
-                PKG_UPDATE="pacman -Sy"
-                BIT_PKGS="backintime"
-                BORG_PKG="borg"
-                ECRYPTFS_PKG="ecryptfs-utils"
                 ;;
             opensuse*|suse|sles)
                 DISTRO_FAMILY="suse"
-                PKG_INSTALL="zypper --non-interactive install"
-                PKG_UPDATE="zypper --non-interactive refresh"
-                BIT_PKGS="backintime-qt"
-                BORG_PKG="borgbackup"
-                ECRYPTFS_PKG="ecryptfs-utils"
                 ;;
             *)
                 continue
@@ -172,6 +156,78 @@ detect_filesystem() {
         if command -v snapper &>/dev/null && snapper list-configs &>/dev/null 2>&1; then
             HAS_SNAPPER=true
         fi
+    fi
+}
+
+###############################################################################
+# Dependencies — installed as soon as the box is detected, before anything
+# that needs them (the drive set-up needs mkfs.btrfs and cryptsetup; the layers
+# need borg, rsync, snapper or timeshift; the tray needs GTK + AppIndicator).
+#
+# Required tools are installed together and verified by `command -v` after
+# the install; missing any of them aborts the deploy with the package list.
+# Optional layers are installed one at a time so a package the distro does not
+# carry (backintime on Arch is AUR-only) costs a warning, not the deploy.
+# A dry run only reports what it would install.
+###############################################################################
+install_dependencies() {
+    local required=(borg rsync cryptsetup btrfs mkfs.btrfs findmnt lsblk sfdisk wipefs blkid udevadm)
+    local optional=(backintime)
+    [ "$HAS_BTRFS" = true ]     && optional+=(snapper)
+    [ "$HAS_BTRFS" = false ]    && optional+=(timeshift)
+    [ "$HAS_ECRYPTFS" = true ]  && optional+=(mount.ecryptfs)
+
+    export BX_DEP_DRYRUN="$DRY"
+    log "Dependencies for $DISTRO_NAME ($DISTRO_FAMILY): required ${required[*]}"
+    if ! bx_ensure_deps "${required[@]}" 2>&1 | sed 's/^/  /'; then :; fi
+    if [ "${PIPESTATUS[0]}" -ne 0 ] && (( ! DRY )); then
+        err "Required tools could not be installed — cannot continue."
+        [ "$DISTRO_FAMILY" = arch ] && err "On Arch/Manjaro a stale package database is the usual cause: run  pacman -Syu  first, then re-run deploy.sh."
+        exit 1
+    fi
+
+    local tool
+    for tool in "${optional[@]}"; do
+        if ! bx_ensure_deps "$tool" 2>&1 | sed 's/^/  /'; then :; fi
+        if [ "${PIPESTATUS[0]}" -ne 0 ] && (( ! DRY )); then
+            case "$tool" in
+                backintime) warn "Back In Time is not installable here (Arch: AUR — yay -S backintime). The BIT layer is deployed but will not run until it is." ;;
+                timeshift)  warn "Timeshift is not installable here (Arch: AUR — yay -S timeshift). Non-btrfs local snapshots are off until it is." ;;
+                snapper)    warn "snapper could not be installed; btrfs replicas still run, snapper timeline snapshots are off." ;;
+                *)          warn "$tool could not be installed." ;;
+            esac
+        fi
+    done
+
+    # snapper may have just arrived: re-detect, and say how to configure it.
+    if [ "$HAS_BTRFS" = true ] && [ "$HAS_SNAPPER" = false ] && command -v snapper >/dev/null 2>&1; then
+        if snapper list-configs >/dev/null 2>&1; then HAS_SNAPPER=true
+        else warn "snapper is installed but has no config — create one with:  sudo snapper -c root create-config /"; fi
+    fi
+
+    install_tray_dependencies
+}
+
+# The tray is Python + GTK3 + AppIndicator3 via GObject introspection; those
+# are not commands, so they are probed by importing them.
+tray_deps_present() {
+    python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("AppIndicator3", "0.1"); from gi.repository import Gtk, AppIndicator3' >/dev/null 2>&1
+}
+install_tray_dependencies() {
+    if tray_deps_present; then log "  tray dependencies present (python3, GTK3, AppIndicator3)"; return; fi
+    local pkgs
+    case "$DISTRO_FAMILY" in
+        debian) pkgs="python3 python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1" ;;
+        fedora) pkgs="python3 python3-gobject gtk3 libappindicator-gtk3" ;;
+        arch)   pkgs="python python-gobject gtk3 libappindicator-gtk3" ;;
+        suse)   pkgs="python3 python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0 typelib-1_0-AppIndicator3-0_1" ;;
+        *)      warn "no tray packages known for family '$DISTRO_FAMILY' — the tray needs python3 + GTK3 + AppIndicator3 typelibs"; return ;;
+    esac
+    if (( DRY )); then log "  (dry-run) would install tray dependencies: $pkgs"; return; fi
+    log "  installing tray dependencies: $pkgs"
+    # shellcheck disable=SC2086
+    if ! eval "$(bx_pkg_install_cmd) $pkgs" >/dev/null 2>&1 || ! tray_deps_present; then
+        warn "tray dependencies did not install — the tray will not start until they do: $pkgs"
     fi
 }
 
@@ -872,11 +928,12 @@ echo ""
 detect_distro
 detect_ecryptfs
 detect_filesystem
+install_dependencies
 detect_backup_mount
 detect_existing_borg
 detect_schedule_mode
 
-log "Suite:     linux-backup-system $(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$SCRIPT_DIR/backup-common.sh" 2>/dev/null || echo '?')"
+log "Suite:     linux-backup-system ${BX_VERSION:-?}"
 log "Distro:    $DISTRO_NAME ($DISTRO_FAMILY)"
 log "User:      $SUDO_USER"
 log "Home:      $USER_HOME"
@@ -892,7 +949,7 @@ echo ""
 
 if (( DRY )); then
     echo -e "${CYAN}[DRY RUN]${NC} planned actions (nothing will change):"
-    log "  packages: $BORG_PKG rsync cryptsetup$([ "$HAS_BTRFS" = false ] && echo ' timeshift') + BIT + appindicator"
+    log "  packages: see the [deps] lines above — installed and verified before anything else"
     log "  scripts -> /usr/local/sbin: borg-backup.sh backintime-backup.sh backup-verify.sh"
     log "             luks-header-backup.sh timeshift-backup.sh backup-diag.sh backup-common.sh"
     log "             borg-backup-drive-attach.sh + restore scripts"
@@ -910,49 +967,9 @@ if (( DRY )); then
     exit 0
 fi
 
-# Step 1: Install packages
-log "Installing packages..."
-$PKG_UPDATE 2>/dev/null
-$PKG_INSTALL $BORG_PKG rsync cryptsetup 2>&1 | tail -3
-
-if [ "$HAS_ECRYPTFS" = true ]; then
-    $PKG_INSTALL $ECRYPTFS_PKG 2>&1 | tail -2 || warn "ecryptfs-utils not available"
-fi
-
-# BIT may need special handling on Arch
-if [ "$DISTRO_FAMILY" = "arch" ]; then
-    if ! pacman -Qi backintime &>/dev/null; then
-        warn "backintime not in official repos. Install from AUR:"
-        warn "  yay -S backintime"
-        warn "  or: pamac install backintime"
-        warn "Skipping BIT package install. Continue anyway."
-    fi
-else
-    $PKG_INSTALL $BIT_PKGS 2>&1 | tail -3 || warn "BIT install issue — check manually"
-fi
-
-# AppIndicator3 for tray
-case "$DISTRO_FAMILY" in
-    debian) $PKG_INSTALL gir1.2-appindicator3-0.1 2>&1 | tail -2 || true ;;
-    fedora) $PKG_INSTALL libappindicator-gtk3 2>&1 | tail -2 || true ;;
-    arch)   $PKG_INSTALL libappindicator-gtk3 2>&1 | tail -2 || true ;;
-    suse)   $PKG_INSTALL typelib-1_0-AppIndicator3-0_1 2>&1 | tail -2 || true ;;
-    *)      warn "no AppIndicator3 package known for family '$DISTRO_FAMILY' — tray needs it" ;;
-esac
-
-# Non-btrfs root: Timeshift is the local-snapshot layer (btrfs uses send/receive)
-if [ "$HAS_BTRFS" = false ]; then
-    case "$DISTRO_FAMILY" in
-        debian) $PKG_INSTALL timeshift 2>&1 | tail -2 || warn "timeshift install issue" ;;
-        fedora) $PKG_INSTALL timeshift 2>&1 | tail -2 || warn "timeshift not in repos — install manually" ;;
-        arch)   $PKG_INSTALL timeshift 2>&1 | tail -2 || warn "timeshift may be in AUR — yay -S timeshift" ;;
-        suse)   $PKG_INSTALL timeshift 2>&1 | tail -2 || warn "timeshift install issue" ;;
-        *)      warn "no timeshift package known for family '$DISTRO_FAMILY' — install it by hand" ;;
-    esac
-    log "  non-btrfs root: Timeshift installed as the local-snapshot layer"
-fi
-
-log "Packages installed."
+# Step 1: packages were installed by install_dependencies() straight after
+# detection (the drive set-up needed them); nothing left to do here.
+log "Packages verified."
 
 # Step 2: Deploy scripts
 log "Deploying scripts..."
