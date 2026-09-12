@@ -24,19 +24,19 @@
         "do_not_enforce_on_create": true,
         "required_status_checks": [
           {
-            "context": "shellcheck"
+            "context": "bash -n + shellcheck (warning severity)"
           },
           {
-            "context": "loopback (ubuntu-latest)"
+            "context": "ruff + compile (python tools)"
           },
           {
-            "context": "loopback (ubuntu-24.04-arm)"
+            "context": "SPDX header in every script"
           },
           {
-            "context": "uki-fixtures (ubuntu-latest)"
+            "context": "tests (ubuntu-latest)"
           },
           {
-            "context": "uki-fixtures (ubuntu-24.04-arm)"
+            "context": "tests (ubuntu-24.04-arm)"
           }
         ]
       }

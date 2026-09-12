@@ -25,6 +25,13 @@ gh api repos/doug445/linux-backup-system/rulesets/RULESET_ID --jq '.rules'
 |---|---|
 | `deletion` | `main` cannot be deleted |
 | `non_fast_forward` | no force-pushing `main`; history cannot be rewritten |
+| `required_status_checks` | a pull request merges into `main` only when the five CI jobs in `lint.yml` have passed: `bash -n + shellcheck (warning severity)`, `ruff + compile (python tools)`, `SPDX header in every script`, `tests (ubuntu-latest)`, `tests (ubuntu-24.04-arm)`. Not strict (the branch need not be up to date), and not enforced on branch creation |
+
+The status-check rule exists for contributors: this project asks for setup
+patches, and a patch that does not pass what CI runs must not merge. The
+contexts are the job `name:` values in `.github/workflows/lint.yml` — rename a
+job there and rename it here in the same commit, or every pull request waits
+for a check that never runs.
 
 **`tags-release.json`** — every tag matching `v*`:
 
@@ -42,10 +49,8 @@ deliberately not enabled.
 This is a small repository with direct pushes to `main`. Rules that assume a
 pull-request workflow would break it for no gain:
 
-- **`pull_request`** — would forbid pushing to `main` at all. Add it the moment a
-  second contributor appears.
-- **`required_status_checks`** — only evaluated when merging a pull request, so
-  it does nothing here while also implying `pull_request`.
+- **`pull_request`** — would forbid pushing to `main` at all. Contributors
+  arrive by pull request anyway; the maintainer pushes directly.
 - **`required_signatures`** — commits here are not GPG-signed, so this would
   reject every push, including your own.
 - **`required_linear_history`** — would block merge commits. Dependabot's grouped
@@ -54,9 +59,12 @@ pull-request workflow would break it for no gain:
 
 ## Bypass, and getting unstuck
 
-`bypass_actors` is empty on purpose. With a bypass entry for repository admin
-the rules would not bind you at all, and you are the only one pushing — the
-guard exists precisely to catch a bad `--force` from you or from tooling.
+`bypass_actors` names the repository admin role (`actor_id` 5) with
+`bypass_mode: always`. That is what lets the maintainer push straight to
+`main` past the status-check rule; GitHub reports it on every such push as
+`Bypassed rule violations for refs/heads/main`. It also means `deletion` and
+`non_fast_forward` do not bind the admin — the tag ruleset has no bypass and
+does bind everyone.
 
 Nothing is locked: as an admin you can set a ruleset to `disabled`, do the
 thing, and set it back.
