@@ -80,6 +80,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: library fixture test
         run: bash tests/lib-fixture-test.sh
+      - name: kernel command-line carrier fixture test
+        run: bash tests/cmdline-fixture-test.sh
       - name: command-line + troubleshooting-report test
         run: bash tests/cli-test.sh
       - name: deploy.sh --dry-run as root

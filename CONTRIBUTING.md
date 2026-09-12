@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.3.0**
+**linux-backup-system 3.4.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -195,6 +195,7 @@ or the pieces:
 shellcheck -S warning $(git ls-files '*.sh')
 ruff check --isolated $(git ls-files '*.py')     # ruff 0.16.4, the version CI pins
 bash tests/lib-fixture-test.sh                   # expect 0 failed
+bash tests/cmdline-fixture-test.sh               # expect 0 failed
 bash tests/cli-test.sh                           # expect 0 failed
 sudo bash tests/deploy-dryrun-test.sh            # expect 0 failed; changes nothing
 ```
@@ -226,11 +227,17 @@ refused, `restore-rebuild-boot.sh --dry-run` executes nothing, and
 `backup-diag.sh` produces every section with UUIDs redacted (and whole under
 `--no-redact`).
 
+`tests/cmdline-fixture-test.sh` exercises `lib-cmdline.sh` against a synthetic
+restored system: every kernel command-line carrier kind, the restore-time id
+rewrite (mapper names left alone, comments left alone, CRLF and uppercase ids),
+consistency against `fstab`/`crypttab`, stale-id detection with a stubbed
+`blkid`, dry mode and idempotence. No disk, no root.
+
 `tests/deploy-dryrun-test.sh` runs `deploy.sh --dry-run` as root on a machine
 with no backup drive and proves nothing was installed by hashing the install
 directories before and after.
 
-All three run in CI on x86_64 and aarch64 for every push.
+All four run in CI on x86_64 and aarch64 for every push.
 
 ## Security issues
 

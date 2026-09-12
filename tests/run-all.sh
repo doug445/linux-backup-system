@@ -36,6 +36,7 @@ echo "### python";             python3 -B -m py_compile ./*.py || rc=1
 if command -v ruff >/dev/null; then ruff check --isolated --no-cache ./*.py || rc=1; else echo "ruff not installed — skipped"; fi
 echo "### license headers";    for f in ./*.sh ./*.py tests/*.sh; do grep -q 'SPDX-License-Identifier: MIT' "$f" || { echo "missing SPDX: $f"; rc=1; }; done
 echo "### lib-fixture-test";   bash tests/lib-fixture-test.sh || rc=1
+echo "### cmdline-fixture-test"; bash tests/cmdline-fixture-test.sh || rc=1
 echo "### cli-test";           bash tests/cli-test.sh || rc=1
 echo "### deploy-dryrun-test"; bash tests/deploy-dryrun-test.sh || rc=1
 echo; [ $rc -eq 0 ] && echo "ALL GREEN" || echo "FAILURES"

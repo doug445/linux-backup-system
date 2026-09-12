@@ -46,6 +46,10 @@ for _c in "$_self_dir/backup-common.sh" /usr/local/sbin/backup-common.sh /usr/lo
     [ -r "$_c" ] && { . "$_c"; break; }
 done
 declare -f bx_load_config >/dev/null && bx_load_config
+for _c in "$_self_dir/lib-cmdline.sh" /usr/local/sbin/lib-cmdline.sh; do
+    # shellcheck disable=SC1090
+    [ -r "$_c" ] && { . "$_c"; break; }
+done
 [ -n "$_env_mount" ] && BACKUP_MOUNT="$_env_mount"
 [ -n "$_env_repo" ] && BORG_REPO="$_env_repo"
 BACKUP_MOUNT="${BACKUP_MOUNT:-/mnt/backup}"
@@ -340,6 +344,41 @@ if [[ -d "$BORG_REPO" ]]; then
                 ok "archive has a bootloader config ($gcfg grub.cfg, $sdb sd-boot, $uki UKI, $pifw Pi firmware files)"
             else
                 bad "archive has NO bootloader config (no grub.cfg, loader entries, UKI, or Pi config.txt+cmdline.txt)"
+            fi
+
+            # The kernel command line, wherever it lives in the archive, must
+            # name the same devices the archived fstab/crypttab do. A carrier
+            # left behind by an earlier disk change restores to a machine
+            # that stops in the initramfs — with every file present.
+            if declare -f cl_find_carriers >/dev/null; then
+                xdir=$(mktemp -d /tmp/backup-verify-x.XXXXXX)
+                ( cd "$xdir" && borg extract --lock-wait 30 "$BORG_REPO::$arch" \
+                      etc/fstab etc/crypttab etc/kernel/cmdline etc/cmdline.d etc/kernel/cmdline.d \
+                      etc/default/grub etc/default/grub.d etc/default/limine \
+                      boot/loader/entries efi/loader/entries boot/efi/loader/entries \
+                      boot/extlinux boot/syslinux boot/firmware/cmdline.txt boot/cmdline.txt \
+                      boot/refind_linux.conf boot/efi/EFI boot/limine.conf boot/limine efi/EFI \
+                      --pattern '-boot/efi/EFI/**/*.efi' --pattern '-efi/EFI/**/*.efi' >/dev/null 2>&1 ) || true
+                nc=$(cl_find_carriers "$xdir" | wc -l)
+                if (( nc == 0 )); then
+                    note "archive holds no recognisable kernel command-line carrier (UKI-only, or a form this suite does not know)"
+                else
+                    mm=$(cl_carrier_mismatches "$xdir")
+                    if [[ -z "$mm" ]]; then
+                        ok "$nc command-line carrier(s) agree with the archived fstab/crypttab"
+                    else
+                        rootbad=0
+                        while IFS=$'\t' read -r ck cf rk id; do
+                            if grep -qiE "(root=(PART)?UUID=|luks\.uuid=(luks-)?|luks\.name=)$id" "$cf" 2>/dev/null; then rootbad=1
+                                bad "$ck ${cf#"$xdir"}: root/LUKS reference $rk $id is not in the archived fstab/crypttab — restore would stop in the initramfs"
+                            else
+                                note "$ck ${cf#"$xdir"}: references $rk $id, not declared by fstab/crypttab (resume=/other — check)"
+                            fi
+                        done <<<"$mm"
+                        (( rootbad == 0 )) && ok "root and LUKS references in every carrier agree with fstab/crypttab"
+                    fi
+                fi
+                rm -rf "$xdir"
             fi
         else
             bad "could not read archive $arch"

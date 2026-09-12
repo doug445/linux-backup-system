@@ -434,10 +434,12 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
     cat "$CRYPTTAB"
     cp "$CRYPTTAB" "$CRYPTTAB.bak.$(date +%s)"
 
+    LUKS_ID_MAP="$(mktemp /tmp/restore-luksmap.XXXXXX)"
     for mapper_name in "${!LUKS_MAP[@]}"; do
         new_luks_uuid="${LUKS_MAP[$mapper_name]}"
         old_luks_uuid=$(grep -oP "^${mapper_name}\s+UUID=\K[0-9a-fA-F-]+" "$CRYPTTAB" || true)
         if [ -n "$old_luks_uuid" ] && [ "$old_luks_uuid" != "$new_luks_uuid" ]; then
+            echo "$old_luks_uuid $new_luks_uuid" >> "$LUKS_ID_MAP"   # for the command-line rewrite below
             sed -i "s|UUID=$old_luks_uuid|UUID=$new_luks_uuid|g" "$CRYPTTAB"
             log "  Updated $mapper_name LUKS UUID: $old_luks_uuid → $new_luks_uuid"
         fi
@@ -455,6 +457,41 @@ elif [ -f "$CRYPTTAB" ]; then
     log "crypttab exists but no LUKS devices detected — leaving unchanged"
 else
     log "No crypttab found — skipping (no LUKS)"
+fi
+
+###############################################################################
+# Step 5b: Rewrite every kernel command-line carrier to the new ids.
+#
+# The kernel finds the root, and the initramfs the LUKS container, from the
+# command line — which lives in BLS / systemd-boot entries, /etc/kernel/cmdline
+# and cmdline.d, GRUB_CMDLINE_LINUX and its drop-ins, extlinux.conf,
+# cmdline.txt, refind_linux.conf, limine.conf. fstab and crypttab alone are
+# not enough: a carrier still naming the old disk stops in the initramfs.
+# lib-cmdline.sh rewrites reference positions only and never a mapper name.
+###############################################################################
+for _c in "$SCRIPT_DIR/lib-cmdline.sh" /usr/local/sbin/lib-cmdline.sh; do
+    # shellcheck disable=SC1090
+    [ -r "$_c" ] && { . "$_c"; break; }
+done
+declare -f cl_rewrite_ids >/dev/null || fatal "lib-cmdline.sh not found next to this script or in /usr/local/sbin — cannot rewrite kernel command lines; the restored system would not boot"
+ID_MAP="$(mktemp /tmp/restore-idmap.XXXXXX)"
+{
+    [ -n "$OLD_ROOT_UUID" ] && [ -n "$ROOT_UUID" ] && echo "$OLD_ROOT_UUID $ROOT_UUID"
+    [ -n "$OLD_HOME_UUID" ] && [ -n "$HOME_UUID" ] && echo "$OLD_HOME_UUID $HOME_UUID"
+    [ -n "$OLD_BOOT_UUID" ] && [ -n "$BOOT_UUID" ] && echo "$OLD_BOOT_UUID $BOOT_UUID"
+    [ -n "$OLD_EFI_UUID" ]  && [ -n "$EFI_UUID" ]  && echo "$OLD_EFI_UUID $EFI_UUID"
+    [ -n "$OLD_SWAP_UUID" ] && [ -n "$SWAP_UUID" ] && echo "$OLD_SWAP_UUID $SWAP_UUID"
+    [ -n "${LUKS_ID_MAP:-}" ] && [ -s "$LUKS_ID_MAP" ] && cat "$LUKS_ID_MAP"
+} > "$ID_MAP"
+log "Rewriting kernel command-line carriers ($(grep -c . "$ID_MAP") id mappings)..."
+n_carriers=$(cl_find_carriers "$TARGET" | wc -l)
+log "  carriers found under $TARGET: $n_carriers"
+cl_find_carriers "$TARGET" | while IFS=$'\t' read -r k f; do log "    $k: ${f#"$TARGET"}"; done
+while IFS=$'\t' read -r k f; do log "  rewrote $k: ${f#"$TARGET"}"; done < <(cl_rewrite_ids "$TARGET" "$ID_MAP")
+left=$(cl_carrier_mismatches "$TARGET")
+if [ -n "$left" ]; then
+    warn "command-line ids not declared by the restored fstab/crypttab (check before rebooting):"
+    while IFS=$'\t' read -r k f rk id; do warn "    $k ${f#"$TARGET"}: $rk $id"; done <<<"$left"
 fi
 
 ###############################################################################
@@ -537,6 +574,18 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
             fi
         fi
     done < <(grep -v '^\s*#' "$CRYPTTAB" | grep -v '^\s*$')
+fi
+
+# Verify every kernel command-line carrier names a device that exists NOW
+log "Verifying kernel command-line carriers against the new disk..."
+stale=$(cl_stale_ids "$TARGET")
+if [ -n "$stale" ]; then
+    while IFS=$'\t' read -r k f rk id; do
+        error "  FAIL: $k ${f#"$TARGET"} references $rk $id which does not exist — the restored system would not boot"
+        ((ERRORS++))
+    done <<<"$stale"
+else
+    log "  OK: every carrier ($(cl_find_carriers "$TARGET" | wc -l)) references ids present on this disk"
 fi
 
 # Verify GRUB config UUIDs

@@ -76,7 +76,7 @@ when the drive is connected. See [Install](#install).
 | File snapshots | Back In Time format (direct rsync) | every distro | GUI-compatible, hardlinked; bypasses BIT's Qt/DBus internals, which deadlock headless |
 | Local/replica snapshots | btrfs send/receive **or** Timeshift | fs-dependent | btrfs root → snapper snapshots replicated by send/receive (in `borg-backup.sh`); any other root → `timeshift-backup.sh` |
 | LUKS header backup | `luks-header-backup.sh` | encrypted hosts | active keyslots encoded in every filename, stored on two disks |
-| Restore-readiness check | `backup-verify.sh` | every distro | asserts a restore would boot; exit 0 / 1 (warnings) / 2 (a restore would fail) |
+| Restore-readiness check | `backup-verify.sh` | every distro | asserts a restore would boot — kernel, bootloader config, and every kernel command line agreeing with `fstab`/`crypttab`; exit 0 / 1 (warnings) / 2 (a restore would fail) |
 | Troubleshooting report | `backup-diag.sh` | every distro | read-only, redacted; the file a bug or setup report is built from |
 
 ## Tested / untested
@@ -305,6 +305,7 @@ The line that disagrees with reality is the bug. Then:
 | **Which bootloader, and how to rebuild it** | `restore-rebuild-boot.sh` — the detection block (`IS_UKI`, `USES_GRUB`, `USES_SDBOOT`, `IS_PI_FW`) and the per-bootloader steps; an unknown bootloader **warns and continues** | Add a detection test and a rebuild step for rEFInd, Limine, syslinux/extlinux, U-Boot… The Raspberry Pi case (no bootloader, fix `root=PARTUUID` in `cmdline.txt`) is the template for a firmware-reads-the-partition board. | `restore-rebuild-boot.sh --dry-run` on the live system shows the plan; `tests/cli-test.sh` proves the dry run executes nothing |
 | **Whether the archive is bootable** | `backup-common.sh` → `bx_boot_listing_counts`, used by `backup-verify.sh` section 3: patterns over the archive listing for a UKI, a `vmlinuz`/`Image`/`kernel*.img` or a kernel-install `<machine-id>/<version>/linux`, a `grub.cfg`, systemd-boot entries, and Pi `config.txt`+`cmdline.txt`. A bootloader they do not know produces a **false FAIL**: *"archive has NO bootloader config"* | Add a pattern for your bootloader's config file (or kernel name, e.g. `zImage`) and a synthetic listing to `tests/lib-fixture-test.sh`. | The fixture test; then `backup-verify.sh` after one real archive — section 3 must PASS |
 | **Which initramfs tool** | `restore-rebuild-boot.sh` — `update-initramfs` / `dracut` / `mkinitcpio` by `command -v`; otherwise a warning | Add your generator. | `restore-rebuild-boot.sh --dry-run` shows the `would:` line |
+| **Kernel command-line carriers on restore** | `lib-cmdline.sh` → `cl_find_carriers` (BLS/systemd-boot entries, `/etc/kernel/cmdline` + `cmdline.d`, `GRUB_CMDLINE_LINUX` + `grub.d`, `extlinux.conf`, `syslinux.cfg`, `cmdline.txt`, `refind_linux.conf`, `limine.conf`, `/etc/default/limine`) and `cl_rewrite_ids`; called by both restore scripts after the `fstab`/`crypttab` fix-up, checked by `cl_stale_ids` before reboot and by `backup-verify.sh` against the archive | Add your carrier's path to `cl_find_carriers` and, if it uses a new reference syntax, to `CL_REF_PREFIX`. | Add it to `tests/cmdline-fixture-test.sh`; `backup-verify.sh` section 3 reports "carriers agree with fstab/crypttab" |
 | **Encrypted `/boot`** | `restore-rebuild-boot.sh` — `BOOT_ON_LUKS` is inferred from `/boot` (or `/`) being on `/dev/mapper/*` | A LUKS `/boot` opened under another path, or LVM-on-plain-disk, needs a `cryptsetup status` check instead of the prefix test. | The report's boot-layout line `boot_on_luks=` |
 | **Ad-hoc vs scheduled** | `deploy.sh` → `detect_schedule_mode` (removable, hotplug, or USB transport → ad-hoc) | Thunderbolt NVMe, SD readers and LVM stacks can misclassify. Override first: `SCHEDULE_MODE=` in the config or environment. | `sudo ./deploy.sh --dry-run` prints `Schedule mode (…): ` with the evidence |
 
@@ -341,9 +342,16 @@ sudo ./borg-restore.sh --dry-run /mnt/target /mnt/backup/borg-backup  # preview:
 sudo ./backintime-restore.sh /mnt/target /mnt/backup/backintime       # BIT snapshot
 ```
 
-After extracting files and fixing up `fstab`/`crypttab` UUIDs, both method
-scripts chroot in and run **`restore-rebuild-boot.sh`**, which rebuilds the boot
-chain for whatever the restored system uses — detected, not configured:
+After extracting files, both method scripts fix up the new disk's ids in
+`fstab` and `crypttab` **and in every kernel command-line carrier** — BLS and
+systemd-boot entries, `/etc/kernel/cmdline` and `cmdline.d`,
+`GRUB_CMDLINE_LINUX` and its drop-ins, `extlinux.conf`, `syslinux.cfg`, a Pi
+`cmdline.txt`, `refind_linux.conf`, `limine.conf` — rewriting `root=`,
+`resume=`, `rd.luks.uuid=`, `cryptdevice=` and friends while leaving mapper
+*names* alone, then refuse to call the restore complete while any carrier
+still names an id that does not exist on the new disk. Then they chroot in
+and run **`restore-rebuild-boot.sh`**, which rebuilds the boot chain for
+whatever the restored system uses — detected, not configured:
 
 - initramfs via dracut, `update-initramfs`, or mkinitcpio; or a **UKI** rebuilt
   via `kernel-install` / `dracut --uefi`;
@@ -375,6 +383,7 @@ reads `/etc/backup-system.conf`; nothing in it is per-host.
 ```
 deploy.sh                     universal, policy-aware installer + drive set-up (--dry-run)
 backup-common.sh              shared library: version, config load, layout/fs detection, package map, retention helpers
+lib-cmdline.sh                every kernel command-line carrier: find, rewrite ids on restore, check against fstab/crypttab
 backup-system.conf.example    per-host config template (installed to /etc/backup-system.conf)
 borg-backup.sh                borg archive + btrfs replicas (btrfs roots)   --dry-run
 backintime-backup.sh          BIT-format rsync snapshots                    --dry-run
@@ -455,8 +464,10 @@ the equivalent layer.
 
 `backup-verify.sh` does not check that backups ran. It checks that what they
 produced could rebuild the machine: the newest archive lists a kernel and a
-bootloader configuration, the stored LUKS headers match the live devices'
-keyslots, the keyfile opens the backup volume, the replica layer is intact, the
+bootloader configuration, every kernel command line in it names the same
+devices its own `fstab` and `crypttab` do (a stale `rd.luks.uuid=` restores
+to a machine that stops in the initramfs with every file present), the
+stored LUKS headers match the live devices' keyslots, the keyfile opens the backup volume, the replica layer is intact, the
 drive has room, and the boot chain has no known caveat. Exit 0 means a restore
 would boot; 2 means it would not. A check that does not apply is SKIP, never a
 pass.
@@ -517,6 +528,9 @@ says where each decision lives.
   snapshots than `KEEP`, or a drive tight enough to trip `MIN_FREE_*`.
 - **The boot-firmware partition is only recognised at `/boot/efi`, `/efi` or
   `/boot/firmware`** (`BX_ESP_PATHS`). `BACKUP_EXTRA_SOURCES` is the stopgap.
+- **The command-line rewrite on restore is exercised only against synthetic
+  trees** (`tests/cmdline-fixture-test.sh`, every carrier kind). A real
+  restore onto a fresh disk is the ❌ "bare-metal restore" row.
 - **`backup-verify.sh` knows GRUB, systemd-boot, UKIs and Raspberry Pi firmware
   files.** rEFInd, Limine and syslinux archives produce a false "no bootloader
   config" FAIL until a pattern is added.
@@ -581,7 +595,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.3.0
+- **Version:** 3.4.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

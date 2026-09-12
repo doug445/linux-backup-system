@@ -54,9 +54,12 @@ a new disk** — and that is what linux-backup-system automates:
   bootloader config, tests the stored headers against the live devices, and
   tests the keyfile against the backup volume — and exits non-zero when a
   restore would fail, whether or not the backup "ran";
-- a restore that fixes up `fstab` and `crypttab` for the new disk's UUIDs,
-  chroots in, and rebuilds the initramfs, the UKI, GRUB or systemd-boot for
-  whatever it finds there.
+- a restore that fixes up `fstab`, `crypttab` **and every kernel command-line
+  carrier** — BLS and systemd-boot entries, `/etc/kernel/cmdline`, GRUB
+  defaults and drop-ins, `extlinux.conf`, `cmdline.txt`, rEFInd, Limine — for
+  the new disk's ids, refuses to finish while any of them names a device that
+  does not exist, then chroots in and rebuilds the initramfs, the UKI, GRUB or
+  systemd-boot for whatever it finds there.
 
 ## Universal, and why that is a call for contributions
 
