@@ -482,7 +482,9 @@ has: Snapper (btrfs roots), Borg (list, log, run, dry run, verify), Back In
 Time (list, log, run, GUI), Timeshift (non-btrfs roots: list, log, run, GUI),
 LUKS headers (run, log), Restore readiness (run the check, last scheduled
 result), Troubleshooting (generate the report), and the drive's free space. It
-reads `/etc/backup-system.conf`; nothing in it is per-host.
+reads `/etc/backup-system.conf`; nothing in it is per-host. `deploy.sh`
+restarts a running tray with the build it just installed, reusing the old
+process's desktop session, so a redeploy never leaves a stale tray on screen.
 
 ## Files
 
@@ -712,7 +714,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.6.1
+- **Version:** 3.6.2
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

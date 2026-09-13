@@ -343,6 +343,45 @@ detect_backup_mount() {
 }
 
 ###############################################################################
+# Restart a running tray so the deploying user sees the build just installed.
+#
+# The tray is a long-lived desktop process; installing a new file under it
+# changes nothing until it restarts, and a stale build once kept reporting
+# "Back in Time running" for hours after the fix had been deployed. The new
+# instance needs the user's desktop session (DISPLAY, WAYLAND_DISPLAY, the
+# session bus), which root does not have — so it is read from the old
+# process's own environment before that process is stopped. Exact pids only:
+# a pattern match would also hit any shell whose command line names the tray.
+###############################################################################
+restart_tray() {
+    local pids pid envs
+    pids=$(pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+        log "  no tray running for $SUDO_USER — it starts at the next login (autostart)"
+        return 0
+    fi
+    for pid in $pids; do
+        envs=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+               | grep -E '^(DISPLAY|WAYLAND_DISPLAY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|XDG_SESSION_TYPE|XAUTHORITY)=' \
+               | tr '\n' ' ' || true)
+        kill "$pid" 2>/dev/null || true
+    done
+    sleep 1
+    if [ -z "$envs" ]; then
+        warn "  tray stopped but its session environment could not be read — start it from the desktop: /usr/local/bin/backup-tray &"
+        return 0
+    fi
+    # shellcheck disable=SC2086  # envs is a list of KEY=VALUE words by construction
+    runuser -u "$SUDO_USER" -- env $envs setsid /usr/local/bin/backup-tray >/dev/null 2>&1 </dev/null &
+    sleep 2
+    if pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' >/dev/null 2>&1; then
+        log "  tray restarted with the new build"
+    else
+        warn "  tray did not come back — start it from the desktop: /usr/local/bin/backup-tray &"
+    fi
+}
+
+###############################################################################
 # Backup drive set-up: connect, identify, (optionally) encrypt, format, mount.
 #
 # Every step here is interactive. The one destructive step — formatting — is
@@ -1172,6 +1211,7 @@ if (( DRY )); then
     log "  config  -> /etc/backup-system.conf (mount=$BACKUP_MOUNT, schedule=$SCHEDULE_MODE)$([ -f /etc/backup-system.conf ] && echo ' [exists, kept]')"
     [ "$HAS_BTRFS" = false ] && log "  timeshift -> /etc/timeshift/timeshift.json: built-in schedule OFF (fleet retention is never time-based), rsync mode, pinned to $BACKUP_MOUNT; cron.d/timeshift-* removed"
     log "  units   -> borg/BIT/backup-verify/luks-header$([ "$HAS_BTRFS" = false ] && echo '/timeshift') + drive-attach/detach + udev rule"
+    log "  tray    -> /usr/local/bin/backup-tray$(pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' >/dev/null 2>&1 && echo ' (running: would be restarted with the new build)' || echo ' (not running: starts at next login)')"
     if [ "$SCHEDULE_MODE" = scheduled ]; then
         log "  timers  -> borg + BIT$([ "$HAS_BTRFS" = false ] && echo ' + Timeshift') ENABLED (internal drive)"
     else
@@ -1237,6 +1277,7 @@ chmod +x /usr/local/bin/backup-tray
 mkdir -p "$USER_HOME/.config/autostart"
 cp "$SCRIPT_DIR/backup-tray.desktop" "$USER_HOME/.config/autostart/"
 chown "$SUDO_USER:$SUDO_USER" "$USER_HOME/.config/autostart/backup-tray.desktop"
+restart_tray
 log "Tray indicator deployed."
 
 # Step 4: Generate BIT config
@@ -1380,7 +1421,7 @@ if [ "$BORG_ALREADY_DEPLOYED" = false ]; then
     echo "  3. First Borg backup:       sudo /usr/local/sbin/borg-backup.sh"
 fi
 echo "  4. First BIT backup:        sudo /usr/local/sbin/backintime-backup.sh"
-echo "  5. Log out/in for tray icon (or run: /usr/local/bin/backup-tray &)"
+echo "  5. Tray: restarted if it was running; otherwise it starts at the next login"
 echo ""
 echo "Shell commands:"
 echo "  timeback [list|info|log]     — Borg operations"
