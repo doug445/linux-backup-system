@@ -182,7 +182,7 @@ System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
 | Plain `/boot` (unencrypted /boot) | ⚠️ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
 | Bare-metal restore **executing** the boot rebuild (not just its dry run) — x86_64 and non-Apple aarch64 | ⚠️ |
-| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ❌ |
+| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ MacBook Pro M1 Pro, September 2026, with an earlier 3.x |
 
 A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware,
 and ✅ when it has produced one real backup on each layer and has passed
@@ -636,7 +636,9 @@ and cannot be backed up or recreated by it. If the disk or the Linux install
 is gone, the order is: run the Asahi installer from macOS to get a fresh
 Fedora Asahi Remix booting, then restore this backup over it (the files, the
 `fstab`/`crypttab` and command-line fix-ups, the initramfs). The verify pass
-says so on every Asahi host, and the status table carries it as its own row.
+says so on every Asahi host, and the status table carries it as its own row —
+verified in September 2026 on a MacBook Pro (M1 Pro): Asahi installer from
+macOS, then this suite's restore over the fresh install, and it boots.
 
 ### Something is wrong on my distro — what do you need from me?
 
@@ -751,7 +753,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.6.3
+- **Version:** 3.6.4
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system
