@@ -528,9 +528,10 @@ if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
         echo "        rebuild does this) — UNTESTED ON METAL, see the README status table."
     fi
     if is_asahi; then
-        note "m1n1/U-Boot live in Apple-managed partitions that Linux cannot back up."
-        echo "        A bare-metal restore needs the Asahi installer to rebuild the boot"
-        echo "        chain first; only then can this backup be restored onto it."
+        note "Apple Silicon: a restore here is never bare metal. m1n1/U-Boot and the"
+        echo "        partitions the firmware boots from are Apple-managed and cannot be"
+        echo "        backed up or recreated by Linux. Reinstall with the Asahi installer"
+        echo "        from macOS first, then restore this backup OVER the fresh install."
     fi
     if is_bios_boot; then
         note "Legacy BIOS boot: GRUB stage1/core.img sit in the MBR gap or a"
