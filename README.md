@@ -223,6 +223,8 @@ layer (borg archives, btrfs/Timeshift replicas, BIT snapshots):
 | `MIN_KEEP` | 3 | hard floor: never prune below this, even when full |
 | `MIN_FREE_PCT` | 10 | keep at least this % of the drive free |
 | `MIN_FREE_GIB` | 0 | and at least this many GiB free (0 = ignore) |
+| `CAPACITY_HEADROOM_PCT` | 20 | the drive must hold the sources' used bytes plus this much, or it is **refused** |
+| `CAPACITY_RECOMMEND_X` | 2 | the drive should be this many times the system disk; below it, a warning |
 
 Normal runs keep `KEEP`. Only when the drive is genuinely tight does it drop the
 oldest, one at a time, down to `MIN_KEEP`.
@@ -288,6 +290,18 @@ from a udev `RUN` program never reaches the host): the dead mount is lazily
 unmounted and the orphaned LUKS mapping closed, so the next plug-in attaches
 cleanly instead of failing on "already mounted" or "device already exists". The attach script also clears a stale mount or mapping it finds on
 the way in. Neither ever starts a backup.
+
+**How big the drive must be.** Before a drive is formatted or adopted — and
+before every backup — the suite sizes it against this machine. The **floor**
+is one full copy of everything in the backup sources plus 20% spare room,
+measured against actual filesystem usage, not disk size: a drive below it
+cannot hold even one backup and is **refused**, by `deploy.sh` in the picker
+and by every backup script before it writes. The **recommendation** is twice
+the system disk, so there is room for many generations of every layer; below
+that the drive is accepted and the recommendation is stated. `deploy.sh`
+prints the numbers for this machine on every run, and `backup-verify.sh`
+section 5 checks the mounted drive the same way. Knobs: `CAPACITY_HEADROOM_PCT`
+(20) and `CAPACITY_RECOMMEND_X` (2) in the config.
 
 Encryption is never done by `deploy.sh`. Choose *encrypt first* and it prints
 the exact GNOME Disks, GParted and `cryptsetup` steps, then adopts the result
@@ -512,6 +526,15 @@ borg repository is initialised with `--encryption=none` because the drive
 provides the encryption at rest, and a LUKS header backup of every encrypted
 device on the machine is kept on two disks.
 
+### How big does the backup drive have to be?
+
+At least one full copy of what is on the machine plus 20% — measured
+against what the backup sources actually use, not the size of the system
+disk — or the suite refuses to format, adopt or write to it. Recommended:
+twice the system disk, so borg archives, Back In Time snapshots and
+btrfs/Timeshift replicas each have room for many generations. `deploy.sh`
+prints both numbers for your machine; both are knobs in the config.
+
 ### Can I use it with an unencrypted backup drive?
 
 Yes, after typing `PLAIN` to accept, in one paragraph, what that means: the
@@ -684,7 +707,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.5.2
+- **Version:** 3.6.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

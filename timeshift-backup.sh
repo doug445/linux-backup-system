@@ -94,6 +94,12 @@ if ! guard_msg=$(bx_check_backup_drive); then
     log "ERROR: $guard_msg — aborting."
     exit 1
 fi
+
+# Capacity: the drive must hold one full copy of the sources plus spare room.
+if cap_msg=$(bx_check_backup_capacity); then log "$cap_msg"; else
+    log "ERROR: $cap_msg — aborting."
+    exit 1
+fi
 log "free space now: $(bx_free_gib)G / $(bx_free_pct)% on $BACKUP_MOUNT"
 
 # Pin every Timeshift call to THIS drive, never to whatever device Timeshift's

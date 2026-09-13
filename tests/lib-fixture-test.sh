@@ -215,6 +215,34 @@ else BX_PI_FW="$T/pifw" bx_pi_firmware_boot; expect "EFI machine is never Pi fir
 BX_PI_FW="$T/nope" bx_pi_firmware_boot; r=$?; [ -f /boot/config.txt ] || expect "no config.txt -> not Pi" 1 "$r"
 expect "esp path list carries /boot/firmware" 0 "$(grep -qx '/boot/firmware' <<<"$(tr '|' '\n' <<<"$BX_ESP_PATHS")"; echo $?)"
 
+echo "== capacity policy (pure arithmetic)"
+CAPACITY_HEADROOM_PCT=20; CAPACITY_RECOMMEND_X=2
+expect "below floor -> refuse"        "refuse 120 400" "$(bx_capacity_verdict 119 100 200)"
+expect "exactly floor -> not refused" "warn 120 400"   "$(bx_capacity_verdict 120 100 200)"
+expect "below 2x system disk -> warn" "warn 120 400"   "$(bx_capacity_verdict 399 100 200)"
+expect "at 2x system disk -> ok"      "ok 120 400"     "$(bx_capacity_verdict 400 100 200)"
+expect "unknown system disk: floor only" "ok 120 0"    "$(bx_capacity_verdict 121 100 0)"
+CAPACITY_HEADROOM_PCT=50; CAPACITY_RECOMMEND_X=3
+expect "knobs honoured"               "refuse 150 600" "$(bx_capacity_verdict 149 100 200)"
+CAPACITY_HEADROOM_PCT=20; CAPACITY_RECOMMEND_X=2
+expect "human 0"        "0 B"      "$(bx_human_bytes 0)"
+expect "human 1536"     "1.5 KiB"  "$(bx_human_bytes 1536)"
+expect "human 4 TB"     "3.6 TiB"  "$(bx_human_bytes 4000000000000)"
+u=$(bx_sources_used_bytes); [ "$u" -gt 0 ] 2>/dev/null && ok "sources used bytes > 0 ($(bx_human_bytes "$u"))" || bad "sources used bytes: '$u'"
+d=$(bx_system_disk_bytes); case "$d" in ''|*[!0-9]*) bad "system disk bytes not numeric: '$d'" ;; *) ok "system disk bytes numeric ($(bx_human_bytes "$d"))" ;; esac
+rootsrc=$(findmnt -no SOURCE --target / 2>/dev/null | sed 's/\[.*//')
+disk=$(bx_disk_of "$rootsrc" 2>/dev/null); if [ -n "$disk" ]; then
+    [ "$(lsblk -dno TYPE "$disk" 2>/dev/null)" = disk ] && ok "bx_disk_of resolves / to a whole disk ($disk)" || bad "bx_disk_of gave $disk"
+else ok "bx_disk_of: / not on a resolvable disk here (container?) — skipped"; fi
+BACKUP_MOUNT="$T/absent"; out=$(bx_check_backup_capacity); rc=$?
+expect "unmounted drive cannot be sized -> 1" 1 "$rc"
+out=$(bx_check_backup_capacity 1); rc=$?
+expect "1-byte drive -> refuse" 1 "$rc"
+case "$out" in "capacity: REFUSED"*) ok "refusal message" ;; *) bad "unexpected: $out" ;; esac
+out=$(bx_check_backup_capacity 99999999999999999); rc=$?
+expect "absurdly large drive -> 0" 0 "$rc"
+case "$out" in "capacity: OK — "*) ok "ok message" ;; *) bad "unexpected: $out" ;; esac
+
 echo "== snapshot engine"
 e=$(bx_snapshot_engine)
 case "$e" in btrfs|timeshift|none) ok "engine is one of btrfs/timeshift/none ($e)" ;; *) bad "engine '$e'" ;; esac

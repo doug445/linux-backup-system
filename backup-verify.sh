@@ -465,6 +465,13 @@ if mountpoint -q "$BACKUP_MOUNT"; then
     if   (( use > 90 )); then bad  "backup volume ${use}% full (${avail} free)"
     elif (( use > 80 )); then note "backup volume ${use}% full (${avail} free)"
     else ok "backup volume ${use}% full (${avail} free)"; fi
+    if declare -f bx_check_backup_capacity >/dev/null; then
+        if capmsg=$(bx_check_backup_capacity); then
+            case "$capmsg" in *"OK but small"*) note "${capmsg#capacity: }" ;; *) ok "${capmsg#capacity: }" ;; esac
+        else
+            bad "${capmsg#capacity: } — the drive cannot hold one full backup"
+        fi
+    fi
 else
     bad "$BACKUP_MOUNT is not mounted"
 fi

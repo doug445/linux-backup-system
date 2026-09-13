@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.5.2"
+BX_VERSION="3.6.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -71,6 +71,12 @@ bx_load_config() {
     MIN_KEEP="${MIN_KEEP:-3}"           # hard floor, never prune below this
     MIN_FREE_PCT="${MIN_FREE_PCT:-10}"  # keep at least this % of the drive free
     MIN_FREE_GIB="${MIN_FREE_GIB:-0}"   # and at least this many GiB free (0 = ignore)
+
+    # Capacity: the drive must hold one full copy of everything in the backup
+    # sources plus this much spare room, or the suite refuses to use it; and
+    # it should be at least CAPACITY_RECOMMEND_X times the system disk.
+    CAPACITY_HEADROOM_PCT="${CAPACITY_HEADROOM_PCT:-20}"
+    CAPACITY_RECOMMEND_X="${CAPACITY_RECOMMEND_X:-2}"
 }
 
 # ---------------------------------------------------------------------------
@@ -79,6 +85,96 @@ bx_load_config() {
 bx_free_pct() { local u; u=$(df --output=pcent "$BACKUP_MOUNT" 2>/dev/null | tail -1 | tr -dc '0-9'); echo $(( 100 - ${u:-100} )); }
 bx_free_gib() { local a; a=$(df --output=avail "$BACKUP_MOUNT" 2>/dev/null | tail -1 | tr -dc '0-9'); echo $(( ${a:-0} / 1024 / 1024 )); }
 bx_space_low() { [ "$(bx_free_pct)" -lt "$MIN_FREE_PCT" ] || [ "$(bx_free_gib)" -lt "$MIN_FREE_GIB" ]; }
+
+# ---------------------------------------------------------------------------
+# Capacity: is the backup drive big enough for this machine?
+#
+# Two thresholds. The FLOOR is measured against what is actually on the
+# machine: the used bytes of every filesystem in the backup sources, plus
+# CAPACITY_HEADROOM_PCT spare room. A drive below the floor cannot hold even
+# one full copy and is refused — by deploy.sh before it formats or adopts one,
+# and by every backup script before it writes. The RECOMMENDATION is measured
+# against the system disk: CAPACITY_RECOMMEND_X times its size, so the drive
+# has room for many generations of every layer (borg archives, Back In Time
+# snapshots, btrfs/Timeshift replicas). Below that is a warning, not a stop.
+# ---------------------------------------------------------------------------
+bx_human_bytes() { # bx_human_bytes BYTES -> "1.8 TiB"
+    local b="${1:-0}"
+    awk -v b="$b" 'BEGIN{ split("B KiB MiB GiB TiB PiB",u," "); i=1; v=b+0;
+        while (v>=1024 && i<6) { v/=1024; i++ }
+        if (i==1) printf "%d %s", v, u[i]; else printf "%.1f %s", v, u[i] }'
+}
+
+# The whole disk a block device (partition, LUKS mapper, LV) ultimately sits on.
+bx_disk_of() { # bx_disk_of /dev/xxx -> /dev/nvme0n1
+    local d kn pk sl
+    d=$(readlink -f "$1" 2>/dev/null) || return 1; kn=$(basename "$d")
+    while :; do
+        # device-mapper (LUKS, LVM): the parent is a sysfs slave, not PKNAME
+        sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1 || true)
+        if [ -n "$sl" ]; then kn="$sl"; continue; fi
+        # partition -> its disk
+        pk=$(lsblk -dno PKNAME "/dev/$kn" 2>/dev/null | head -1 || true)
+        if [ -n "$pk" ]; then kn="$pk"; continue; fi
+        break
+    done
+    [ -b "/dev/$kn" ] && echo "/dev/$kn"
+}
+
+# Size in bytes of the disk the root filesystem lives on (0 if unresolvable).
+bx_system_disk_bytes() {
+    local src disk
+    src=$(findmnt -no SOURCE --target / 2>/dev/null | sed 's/\[.*//' || true)
+    disk=$(bx_disk_of "${src:-/dev/null}" 2>/dev/null || true)
+    [ -n "$disk" ] && lsblk -dnbo SIZE "$disk" 2>/dev/null | head -1 || echo 0
+}
+
+# Used bytes across every filesystem in the backup sources, each counted once
+# (btrfs subvolumes of one filesystem share one figure).
+bx_sources_used_bytes() {
+    local m src seen=" " total=0 used
+    while read -r m; do
+        [ -n "$m" ] || continue
+        src=$(findmnt -no SOURCE --target "$m" 2>/dev/null | sed 's/\[.*//' || true)
+        [ -n "$src" ] || continue
+        case "$seen" in *" $src "*) continue ;; esac
+        seen="$seen$src "
+        used=$(df -B1 --output=used "$m" 2>/dev/null | tail -1 | tr -dc '0-9')
+        total=$(( total + ${used:-0} ))
+    done < <(bx_backup_sources)
+    echo "$total"
+}
+
+# bx_capacity_verdict DRIVE_BYTES USED_BYTES SYSDISK_BYTES
+#   -> "refuse|warn|ok FLOOR RECOMMENDED"  (pure arithmetic; fixture-tested)
+bx_capacity_verdict() {
+    local drive="${1:-0}" used="${2:-0}" sysd="${3:-0}" floor rec v
+    floor=$(( used + used * ${CAPACITY_HEADROOM_PCT:-20} / 100 ))
+    rec=$(( sysd * ${CAPACITY_RECOMMEND_X:-2} ))
+    if   [ "$drive" -lt "$floor" ]; then v=refuse
+    elif [ "$sysd" -gt 0 ] && [ "$drive" -lt "$rec" ]; then v=warn
+    else v=ok; fi
+    echo "$v $floor $rec"
+}
+
+# bx_check_backup_capacity [DRIVE_BYTES] — one line of verdict for the drive
+# mounted at BACKUP_MOUNT (or a candidate disk's size in bytes). Returns 1 on
+# refuse, 0 otherwise; the line explains either way.
+bx_check_backup_capacity() {
+    local drive="${1:-}" used sysd v floor rec
+    if [ -z "$drive" ]; then
+        drive=$(df -B1 --output=size "$BACKUP_MOUNT" 2>/dev/null | tail -1 | tr -dc '0-9')
+        [ -n "$drive" ] || { echo "capacity: $BACKUP_MOUNT is not mounted — cannot size it"; return 1; }
+    fi
+    used=$(bx_sources_used_bytes); sysd=$(bx_system_disk_bytes)
+    read -r v floor rec < <(bx_capacity_verdict "$drive" "$used" "$sysd")
+    case "$v" in
+        refuse) echo "capacity: REFUSED — drive holds $(bx_human_bytes "$drive"), but a full backup of $(bx_human_bytes "$used") plus ${CAPACITY_HEADROOM_PCT}% spare needs $(bx_human_bytes "$floor")$([ "$sysd" -gt 0 ] && echo "; recommended: ${CAPACITY_RECOMMEND_X}x the $(bx_human_bytes "$sysd") system disk = $(bx_human_bytes "$rec")")"; return 1 ;;
+        warn)   echo "capacity: OK but small — drive $(bx_human_bytes "$drive") holds the $(bx_human_bytes "$used") of data (floor $(bx_human_bytes "$floor")); recommended ${CAPACITY_RECOMMEND_X}x the $(bx_human_bytes "$sysd") system disk = $(bx_human_bytes "$rec")" ;;
+        *)      echo "capacity: OK — drive $(bx_human_bytes "$drive") for $(bx_human_bytes "$used") of data (floor $(bx_human_bytes "$floor")$([ "$sysd" -gt 0 ] && echo ", recommended $(bx_human_bytes "$rec")"))" ;;
+    esac
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Filesystem / layout detection.

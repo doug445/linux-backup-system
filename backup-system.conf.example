@@ -35,3 +35,11 @@ KEEP=10             # normal: keep the newest KEEP of each set, any age
 MIN_KEEP=3          # hard floor: never prune below this, even when the drive is full
 MIN_FREE_PCT=10     # keep at least this % of the drive free
 MIN_FREE_GIB=0      # and at least this many GiB free (0 = ignore)
+
+# Capacity — checked before a drive is formatted or adopted, and before every
+# backup. The drive must hold one full copy of everything in the backup sources
+# plus CAPACITY_HEADROOM_PCT spare room (measured against actual usage) or it
+# is refused; it should be CAPACITY_RECOMMEND_X times the system disk, or the
+# suite says so (a warning, not a stop).
+CAPACITY_HEADROOM_PCT=20
+CAPACITY_RECOMMEND_X=2

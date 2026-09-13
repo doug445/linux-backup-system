@@ -251,6 +251,8 @@ if [ -n "$LIB" ]; then
         else
             echo "drive guard:      $msg"
         fi
+        echo "system disk:      $(bx_human_bytes "$(bx_system_disk_bytes)")   data in sources: $(bx_human_bytes "$(bx_sources_used_bytes)")"
+        echo "$(bx_check_backup_capacity 2>&1 || true)"
     } >&3 2>&1
     out '```'; out ""
 else

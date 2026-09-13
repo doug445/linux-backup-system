@@ -69,6 +69,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # every script it deploys, so what deploy.sh installs is what the scripts check.
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/backup-common.sh" || { echo "FATAL: backup-common.sh missing next to deploy.sh" >&2; exit 1; }
+CAPACITY_HEADROOM_PCT="${CAPACITY_HEADROOM_PCT:-20}"; CAPACITY_RECOMMEND_X="${CAPACITY_RECOMMEND_X:-2}"
 SUDO_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 USER_HOME=$(eval echo "~$SUDO_USER")
 
@@ -262,6 +263,12 @@ detect_backup_mount() {
         if [ -n "$existing_mount" ] && bx_mount_is_live "$existing_mount"; then
             BACKUP_MOUNT="$existing_mount"
             log "Detected backup mount from /etc/backup-system.conf: $BACKUP_MOUNT"
+            if cap_msg=$(bx_check_backup_capacity); then
+                case "$cap_msg" in *"OK but small"*) warn "$cap_msg" ;; *) log "$cap_msg" ;; esac
+            else
+                err "$cap_msg"
+                err "The configured drive cannot hold one full backup; every backup script will refuse to write to it. Replace it (a blank drive is offered below when connected)."
+            fi
             offer_blank_drive
             return
         fi
@@ -588,6 +595,17 @@ prepare_backup_drive() { # prepare_backup_drive [PRESELECTED_DEV]
         [ -b "$dev" ] || { warn "$dev is not a block device"; continue; }
         if disk_in_use "$dev"; then
             warn "$dev holds a mounted filesystem, active swap, or an fstab/crypttab entry — refusing to touch it."
+            continue
+        fi
+        # Big enough? The floor is one full copy of the sources plus spare
+        # room; below it the drive is refused outright. Below twice the system
+        # disk it is accepted with the recommendation stated.
+        dev_bytes=$(lsblk -dnbo SIZE "$dev" 2>/dev/null | head -1 || true)
+        if cap_msg=$(bx_check_backup_capacity "${dev_bytes:-0}"); then
+            case "$cap_msg" in *"OK but small"*) warn "$cap_msg" ;; *) log "$cap_msg" ;; esac
+        else
+            err "$cap_msg"
+            err "$dev is too small to be this machine's backup drive — pick another."
             continue
         fi
         break
@@ -1011,6 +1029,8 @@ KEEP=10
 MIN_KEEP=3
 MIN_FREE_PCT=10
 MIN_FREE_GIB=0
+CAPACITY_HEADROOM_PCT=20
+CAPACITY_RECOMMEND_X=2
 EOF
     log "  wrote /etc/backup-system.conf (mount=$BACKUP_MOUNT fs_uuid=$fs_uuid schedule=$SCHEDULE_MODE)"
 }
@@ -1138,6 +1158,7 @@ log "btrfs:     $HAS_BTRFS"
 log "snapper:   $HAS_SNAPPER"
 log "ecryptfs:  $HAS_ECRYPTFS"
 log "Backup:    $BACKUP_MOUNT"
+log "Capacity:  system disk $(bx_human_bytes "$(bx_system_disk_bytes)"), data in backup sources $(bx_human_bytes "$(bx_sources_used_bytes)") -> floor $(bx_human_bytes "$(( $(bx_sources_used_bytes) * (100 + ${CAPACITY_HEADROOM_PCT:-20}) / 100 ))"), recommended $(bx_human_bytes "$(( $(bx_system_disk_bytes) * ${CAPACITY_RECOMMEND_X:-2} ))")"
 log "Borg exists: $BORG_ALREADY_DEPLOYED"
 log "Schedule:  $SCHEDULE_MODE"
 echo ""
