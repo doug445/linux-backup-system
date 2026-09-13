@@ -22,7 +22,7 @@ everything else), keyslot-tagged **LUKS header backups**, and a
 drive that a bare-metal restore would boot. On restore it rebuilds the boot
 chain for whatever it finds: **GRUB** (EFI or legacy BIOS), **systemd-boot**,
 **Unified Kernel Images**, an encrypted argon2id `/boot`. Fedora, Fedora Asahi
-Remix on Apple Silicon, Debian, Ubuntu, Linux Mint, Arch, Manjaro, openSUSE;
+Remix on Apple Silicon, Debian, Ubuntu, Linux Mint, Arch, Manjaro, EndeavourOS, openSUSE;
 x86_64 and aarch64.
 
 Nothing here is pinned to a machine: the backup drive, its guard UUID, the
