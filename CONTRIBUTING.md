@@ -47,6 +47,7 @@ have.
 | **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
 | **Bare-metal restore executing the boot rebuild** | ⚠️ under test | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
+| **Apple Silicon restore over a fresh Asahi install** — never bare metal: Asahi installer from macOS first, then this backup restored over it | ❌ | a Mac reinstalled from macOS, this backup restored onto it, and it boots |
 
 ### How to file a setup report
 

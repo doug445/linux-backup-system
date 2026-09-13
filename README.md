@@ -181,7 +181,8 @@ System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
 | Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ |
 | Plain `/boot` (unencrypted /boot) | ⚠️ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
-| Bare-metal restore **executing** the boot rebuild (not just its dry run) | ⚠️ |
+| Bare-metal restore **executing** the boot rebuild (not just its dry run) — x86_64 and non-Apple aarch64 | ⚠️ |
+| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ❌ |
 
 A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware,
 and ✅ when it has produced one real backup on each layer and has passed
@@ -440,7 +441,12 @@ has the terms.
 
 Restore is universal across boot layouts. Boot from a live USB, unlock and mount
 the backup drive and the target partitions, then run the launcher or a method
-script directly:
+script directly. **Apple Silicon is the exception to "bare metal":** m1n1,
+U-Boot and the partitions the firmware boots from are Apple-managed and cannot
+be recreated from Linux, so a dead Mac is first reinstalled with the Asahi
+installer from macOS, and the backup is then restored *over* that fresh
+install — the boot rebuild adapts an existing chain there, it never creates
+one.
 
 ```bash
 sudo ./restore.sh                                   # interactive: snapper / btrfs / borg / BIT / combined
@@ -623,6 +629,14 @@ Pi** — it is a ❌ row, and a setup report from one is what turns it green.
 Yes — Fedora Asahi Remix (aarch64) is the development platform. GRUB on
 `arm64-efi`, m1n1/U-Boot in front of it, and a 16k-page kernel are all
 handled; the verify pass notes the Asahi-specific caveats.
+
+With one boundary: **a restore on Apple Silicon is never bare metal.** m1n1,
+U-Boot and the partitions the Mac's firmware boots from live outside Linux
+and cannot be backed up or recreated by it. If the disk or the Linux install
+is gone, the order is: run the Asahi installer from macOS to get a fresh
+Fedora Asahi Remix booting, then restore this backup over it (the files, the
+`fstab`/`crypttab` and command-line fix-ups, the initramfs). The verify pass
+says so on every Asahi host, and the status table carries it as its own row.
 
 ### Something is wrong on my distro — what do you need from me?
 

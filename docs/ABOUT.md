@@ -147,6 +147,10 @@ visible as a disagreement between two sections of one file.
 - **It does not configure the boot layout.** Nothing about the machine goes in
   the config file. If detection is wrong for your setup, the fix is a detection
   fix, and the README says how to hand-roll one.
+- **It cannot make a Mac boot from nothing.** On Apple Silicon the firmware's
+  own partitions, m1n1 and U-Boot are Apple-managed; a dead Mac is reinstalled
+  with the Asahi installer from macOS, and this backup is restored over the
+  fresh install. Bare metal, on that hardware, means "after the installer".
 - **It has no backdoor.** A lost keyfile and a forgotten drive passphrase mean
   the drive is gone. That is the drive working.
 
