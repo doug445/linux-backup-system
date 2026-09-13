@@ -23,7 +23,7 @@ body:
     id: setup
     attributes:
       label: The setup
-      placeholder: "Void Linux, xfs root, rEFInd on the ESP at /boot/efi, x86_64"
+      placeholder: "Slackware 15.0, ext4 root, GRUB EFI, x86_64 — slackpkg; borgbackup from SlackBuilds"
     validations:
       required: true
 
@@ -33,7 +33,7 @@ body:
       label: What is new about it
       multiple: true
       options:
-        - A distro family the package map does not know
+        - A distro family the package map does not know (Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus, …) — most wanted
         - A root filesystem other than btrfs / ext4
         - A bootloader other than GRUB / systemd-boot
         - An ESP somewhere other than /boot/efi or /efi

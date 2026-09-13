@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.6.2**
+**linux-backup-system 3.6.3**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -37,6 +37,7 @@ have.
 | Fedora (44 on a 2019 System76 laptop, two NVMe), Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint | ✅ | still worth a report on a different boot layout |
 | **Arch / Manjaro / EndeavourOS** | ⚠️ under test | packages resolve; `backintime` from AUR; a real backup + verify pass |
 | **openSUSE** | ❌ | `zypper` package names; a real backup + verify pass |
+| **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — a package manager the map does not know | ❌ **most wanted** | the family token, its non-interactive install command, the package names for borg / Back In Time / Timeshift / the tray, a synthetic `os-release` fixture, and a real backup + verify pass |
 | btrfs root → snapper + send/receive replicas | ✅ | |
 | ext4 root → Timeshift layer | ✅ | |
 | **xfs / f2fs / any other root** | ❌ | that the Timeshift layer engages and verifies |
@@ -125,7 +126,15 @@ The report already excludes these, and you should not add them by hand:
 ## Adding a Linux setup — and getting onto the license
 
 A new distro family, root filesystem or boot layout is the one kind of code
-change this project wants. The README's *Hand-rolling a fix* section says
+change this project wants — and **a distro family with a package manager the
+map does not know is the one most wanted**: Slackware (`slackpkg`), Gentoo
+(`emerge`), Turbolinux and other RPM distros outside the Fedora and SUSE
+families, Alpine (`apk`), Void (`xbps`), NixOS (`nix`), Solus (`eopkg`). Every
+layer of this suite is generic; the package map is the only thing standing
+between one of those systems and a working deploy. A family patch touches
+four places — `bx_distro_family`, `bx_pkg_install_cmd` and `bx_pkg_for` in
+`backup-common.sh`, and `detect_distro` plus the tray packages in `deploy.sh`
+— and one fixture leg. The README's *Hand-rolling a fix* section says
 where each decision lives and how to change it. A pull request that adds one
 has to:
 

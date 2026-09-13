@@ -1,6 +1,6 @@
 # Security Policy
 
-**linux-backup-system 3.6.2**
+**linux-backup-system 3.6.3**
 
 ## Supported Versions
 

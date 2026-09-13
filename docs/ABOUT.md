@@ -75,7 +75,11 @@ function to fix, one fixture to add.
 
 One maintainer cannot own every distro, filesystem and boot layout, which is
 why the README's status tables are honest about what has been confirmed on
-metal and why the project asks for setup reports and patches. A working patch
+metal and why the project asks for setup reports and patches. The gap that
+most needs other hands is the package map: the suite knows `apt`, `dnf`,
+`pacman` and `zypper`, and a Slackware, Gentoo, Turbolinux, Alpine, Void,
+NixOS or Solus system needs someone who runs one to add its package manager
+and package names — a small patch, and the one the project asks for first. A working patch
 for a setup that passes the tests puts the contributor's name on the license.
 That is the mechanism by which "universal" becomes true.
 
