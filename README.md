@@ -158,6 +158,7 @@ System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
 | Debian / Ubuntu / Linux Mint | ✅ |
 | Arch / Manjaro / EndeavourOS | ⚠️ |
 | openSUSE (Leap / Tumbleweed) | ❌ |
+| **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) |
 
 **Root filesystems** (this picks the local-snapshot engine — see Layers)
 
@@ -677,6 +678,28 @@ not just in design — and one person cannot own every distro, filesystem and
 boot layout. That is what contributions are for. This project takes **setup
 reports**, **new Linux setups** (a report, or a patch that passes the tests)
 and **serious bugs** and qualified unique patches.
+
+**Most wanted: the distro families the package map does not know.** The
+detection and the layers are generic, but a family is only usable once its
+package manager is in `backup-common.sh` (`bx_distro_family`,
+`bx_pkg_install_cmd`, `bx_pkg_for`) and `deploy.sh` (`detect_distro`, the
+tray packages). Today that is `apt`, `dnf`, `pacman` and `zypper`. Not yet:
+
+| Family | Package manager | What a patch needs |
+|---|---|---|
+| **Slackware** | `slackpkg` / `sbopkg` | install command; where `borgbackup`, `backintime`, `timeshift` come from (SlackBuilds) |
+| **Gentoo** | `emerge` (Portage) | non-interactive install command; atom names (`app-backup/borgbackup`, …) |
+| **Turbolinux** and other RPM distros outside the Fedora/SUSE families | `rpm` + their own front end | the front end's install command and package names |
+| **Alpine** | `apk` | musl caveats for borg; package names |
+| **Void** | `xbps-install` | package names |
+| **NixOS** | `nix` | whether package installation is even the right model there, or the scripts should assume a declared environment |
+| **Solus** | `eopkg` | package names |
+
+A working patch for any of these — a family token, an install command, the
+package names, a synthetic `os-release` case in `tests/lib-fixture-test.sh`,
+and the troubleshooting report from a real machine — puts your name on the
+copyright line of `LICENSE` and a row in [Contributors](#contributors). A setup
+report alone, without a patch, is still the thing the fix gets built from.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the table of what is still unconfirmed;
 a report that a setup *worked* is the only way a row gets ticked. Run what CI
 runs before opening a pull request:
@@ -714,7 +737,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.6.2
+- **Version:** 3.6.3
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system
