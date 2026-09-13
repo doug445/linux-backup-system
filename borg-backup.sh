@@ -130,6 +130,12 @@ if ! guard_msg=$(bx_check_backup_drive); then
     exit 1
 fi
 log "free space now: $(bx_free_gib)G / $(bx_free_pct)% on $BACKUP_MOUNT"
+# Capacity: the drive must hold one full copy of the sources plus spare room.
+if cap_msg=$(bx_check_backup_capacity); then log "$cap_msg"; else
+    log "ERROR: $cap_msg — aborting."
+    exit 1
+fi
+
 
 # Initialize repo if it doesn't exist
 if [ ! -d "$BORG_REPO/data" ]; then

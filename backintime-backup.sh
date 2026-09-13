@@ -87,6 +87,12 @@ if ! guard_msg=$(bx_check_backup_drive); then
     exit 1
 fi
 
+# Capacity: the drive must hold one full copy of the sources plus spare room.
+if cap_msg=$(bx_check_backup_capacity); then log "$cap_msg"; else
+    log "ERROR: $cap_msg — aborting."
+    exit 1
+fi
+
 AVAIL_KB=$(df --output=avail "$BACKUP_MOUNT" 2>/dev/null | tail -1 | tr -dc '0-9')
 log "Backup drive: $(df -h "$BACKUP_MOUNT" | tail -1)"
 [ "${AVAIL_KB:-0}" -lt 5242880 ] && log "WARNING: less than 5GB available!"
