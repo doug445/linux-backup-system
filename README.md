@@ -224,7 +224,7 @@ layer (borg archives, btrfs/Timeshift replicas, BIT snapshots):
 | `MIN_FREE_PCT` | 10 | keep at least this % of the drive free |
 | `MIN_FREE_GIB` | 0 | and at least this many GiB free (0 = ignore) |
 | `CAPACITY_HEADROOM_PCT` | 20 | the drive must hold the sources' used bytes plus this much, or it is **refused** |
-| `CAPACITY_RECOMMEND_X` | 2 | the drive should be this many times the system disk; below it, a warning |
+| `CAPACITY_RECOMMEND_X` | 2 | the drive should be this many times the Linux filesystems it backs up; below it, a warning |
 
 Normal runs keep `KEEP`. Only when the drive is genuinely tight does it drop the
 oldest, one at a time, down to `MIN_KEEP`.
@@ -297,8 +297,11 @@ is one full copy of everything in the backup sources plus 20% spare room,
 measured against actual filesystem usage, not disk size: a drive below it
 cannot hold even one backup and is **refused**, by `deploy.sh` in the picker
 and by every backup script before it writes. The **recommendation** is twice
-the system disk, so there is room for many generations of every layer; below
-that the drive is accepted and the recommendation is stated. `deploy.sh`
+the total size of the Linux filesystems in the backup sources — root, `/home`,
+`/boot`, the ESP, each counted once — so there is room for many generations of
+every layer; below that the drive is accepted and the recommendation is
+stated. It is deliberately not the whole disk: on a dual-boot or Apple Silicon
+machine most of the disk belongs to another OS and is never backed up. `deploy.sh`
 prints the numbers for this machine on every run, and `backup-verify.sh`
 section 5 checks the mounted drive the same way. Knobs: `CAPACITY_HEADROOM_PCT`
 (20) and `CAPACITY_RECOMMEND_X` (2) in the config.
@@ -529,11 +532,13 @@ device on the machine is kept on two disks.
 ### How big does the backup drive have to be?
 
 At least one full copy of what is on the machine plus 20% — measured
-against what the backup sources actually use, not the size of the system
-disk — or the suite refuses to format, adopt or write to it. Recommended:
-twice the system disk, so borg archives, Back In Time snapshots and
-btrfs/Timeshift replicas each have room for many generations. `deploy.sh`
-prints both numbers for your machine; both are knobs in the config.
+against what the backup sources actually use, not the size of any disk — or
+the suite refuses to format, adopt or write to it. Recommended: twice the
+total size of the Linux filesystems being backed up (not the whole disk; a
+Windows or macOS partition on the same disk is never copied), so borg
+archives, Back In Time snapshots and btrfs/Timeshift replicas each have room
+for many generations. `deploy.sh` prints both numbers for your machine; both
+are knobs in the config.
 
 ### Can I use it with an unencrypted backup drive?
 
@@ -707,7 +712,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.6.0
+- **Version:** 3.6.1
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

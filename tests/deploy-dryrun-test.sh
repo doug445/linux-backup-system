@@ -48,7 +48,7 @@ grep -q 'Dry run complete' <<<"$out" && ok "reached the end of the plan" || bad 
 grep -q 'Distro:' <<<"$out" && ok "detected the distro" || bad "no distro line"
 grep -q 'Suite:' <<<"$out" && ok "printed the suite version" || bad "no suite version line"
 grep -q 'Schedule mode' <<<"$out" && ok "decided a schedule mode" || bad "no schedule decision"
-grep -qE 'Capacity:.*floor.*recommended' <<<"$out" && ok "printed the capacity floor and recommendation" || bad "no capacity line"
+grep -qE 'Capacity:.*Linux filesystems.*floor.*recommended' <<<"$out" && ok "printed the capacity floor and recommendation" || bad "no capacity line"
 grep -q 'backup-diag.sh' <<<"$out" && ok "plan lists backup-diag.sh" || bad "plan omits backup-diag.sh"
 grep -q 'borg-backup-drive-detach.sh' <<<"$out" && ok "plan lists the detach script" || bad "plan omits borg-backup-drive-detach.sh"
 grep -q '\[deps\]' <<<"$out" && ok "dependency step ran (reported, not installed)" || bad "no [deps] line — dependencies were not checked"
