@@ -323,6 +323,16 @@ BACKUP_MOUNT="$T/absent"; CAPACITY_CHECK=off
 m=$(bx_check_backup_capacity); rc=$?; expect "CAPACITY_CHECK=off passes" 0 "$rc"; grep -q disabled <<<"$m" && ok "…and says so" || bad "no 'disabled' message: $m"
 CAPACITY_CHECK=refuse
 
+echo "== USB authorization: blocked devices are named"
+mkdir -p "$T/usb/2-1" "$T/usb/1-3" "$T/usb/usb1"
+printf 0 > "$T/usb/2-1/authorized"; printf 0bda > "$T/usb/2-1/idVendor"; printf 9201 > "$T/usb/2-1/idProduct"; printf RTL9201 > "$T/usb/2-1/product"
+printf 1 > "$T/usb/1-3/authorized"; printf 046d > "$T/usb/1-3/idVendor"; printf c52b > "$T/usb/1-3/idProduct"
+printf 1 > "$T/usb/usb1/authorized"
+expect "only the unauthorized device, with port, id and name" "2-1 0bda:9201 RTL9201" "$(BX_SYSFS_USB="$T/usb" bx_usb_blocked_devices)"
+BX_SYSFS_USB="$T/usb" bx_drive_gone_hint | grep -q 'NOT AUTHORIZED.*0bda:9201' && ok "the drive-gone hint names it" || bad "hint does not name the blocked device"
+printf 1 > "$T/usb/2-1/authorized"
+expect "nothing blocked: no hint about authorization" "" "$(BX_SYSFS_USB="$T/usb" bx_drive_gone_hint | grep AUTHORIZED)"
+
 echo "== snapshot engine"
 e=$(bx_snapshot_engine)
 case "$e" in btrfs|timeshift|none) ok "engine is one of btrfs/timeshift/none ($e)" ;; *) bad "engine '$e'" ;; esac

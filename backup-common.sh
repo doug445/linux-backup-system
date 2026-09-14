@@ -578,6 +578,49 @@ bx_check_backup_drive() {
 }
 
 # ---------------------------------------------------------------------------
+# Why did the drive go away? Two causes look identical from a backup script —
+# "not mounted", "repository does not exist" — and neither is dead hardware:
+#   1. a USB-SATA/NVMe bridge (Realtek RTL9201/9210, some JMicron/ASMedia)
+#      resets its UAS link under a long sustained write; the drive drops for a
+#      second and re-enumerates;
+#   2. USB authorization then keeps it out. USBGuard with a lock hook
+#      (InsertedDevicePolicy=block while the session is locked) blocks every
+#      re-plugged device — the backup drive, and the mouse receiver the user
+#      moves to "test the port" — until the session is unlocked. It looks like
+#      every USB port died; unlocking, not rebooting, brings them back.
+# Read-only; sysfs and (as root) the kernel log. BX_SYSFS_USB: fixture root.
+# ---------------------------------------------------------------------------
+# bx_usb_blocked_devices — "port vid:pid product" for every USB device the
+# kernel holds unauthorized (authorized=0), one per line.
+bx_usb_blocked_devices() {
+    local d base="${BX_SYSFS_USB:-/sys/bus/usb/devices}"
+    for d in "$base"/*; do
+        [ -f "$d/authorized" ] && [ -f "$d/idVendor" ] || continue
+        [ "$(cat "$d/authorized" 2>/dev/null)" = 0 ] || continue
+        printf '%s %s:%s %s\n' "$(basename "$d")" "$(cat "$d/idVendor")" "$(cat "$d/idProduct" 2>/dev/null)" "$(cat "$d/product" 2>/dev/null || echo '?')"
+    done
+    return 0
+}
+
+# bx_drive_gone_hint — explanation lines when the drive is missing; nothing
+# when there is nothing to say.
+bx_drive_gone_hint() {
+    local blocked resets
+    blocked=$(bx_usb_blocked_devices)
+    if [ -n "$blocked" ]; then
+        echo "USB devices present but NOT AUTHORIZED (the drive may be one of them): $(tr '\n' ';' <<<"$blocked" | sed 's/;$//; s/;/; /g')"
+        if command -v usbguard >/dev/null 2>&1; then
+            echo "USBGuard is installed: a device re-plugged (or re-enumerated after a bridge reset) while the session is locked stays blocked — unlock the session, or: usbguard list-devices | grep block ; usbguard allow-device <id>"
+        fi
+    fi
+    if [ "$(id -u)" -eq 0 ] && command -v journalctl >/dev/null 2>&1; then
+        resets=$(journalctl -k -b --since "-6h" --no-pager -o cat 2>/dev/null | grep -cE 'uas_zap_pending|USB disconnect.*|reset (Super|high)Speed USB device' || true)
+        [ "${resets:-0}" -gt 0 ] && echo "kernel log: $resets USB disconnect/reset line(s) in the last 6 h — if the bridge resets under sustained writes, see README 'The drive dropped in the middle of a backup'"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Dependencies: identify missing commands up front and install them, rather
 # than letting a tool fail silently mid-run. Distro-family aware.
 # ---------------------------------------------------------------------------

@@ -125,6 +125,7 @@ log "backup sources: ${SOURCES[*]}"
 # Backup drive mounted, and the RIGHT drive (fs-UUID guard from config).
 if ! guard_msg=$(bx_check_backup_drive); then
     log "ERROR: $guard_msg — aborting."
+    while IFS= read -r _h; do [ -n "$_h" ] && log "  hint: $_h"; done < <(bx_drive_gone_hint)
     exit 1
 fi
 log "free space now: $(bx_free_gib)G / $(bx_free_pct)% on $BACKUP_MOUNT"
@@ -287,6 +288,13 @@ else
 fi
 
 ## --- Borg archive ------------------------------------------------------------
+# The replicas can take an hour; the drive can drop in that time (a USB bridge
+# reset). Say so, instead of letting borg report "Repository does not exist".
+if (( ! DRY )) && ! guard_msg=$(bx_check_backup_drive); then
+    log "ERROR: the backup drive went away during the replica step: $guard_msg — aborting before borg."
+    while IFS= read -r _h; do [ -n "$_h" ] && log "  hint: $_h"; done < <(bx_drive_gone_hint)
+    exit 1
+fi
 log "Starting Borg backup: $ARCHIVE_NAME"
 
 BORG_OPTS=(--verbose --filter AME --list --show-rc --compression lz4

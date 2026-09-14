@@ -386,6 +386,31 @@ complete snapshots, then frees space oldest-first down to `MIN_KEEP`. Every
 to whatever device Timeshift's own config remembers. `backup-verify.sh` applies
 the same completeness rule.
 
+**The drive dropped in the middle of a backup — and every USB port seems
+dead.** Usually neither the drive nor the ports. Two things combine:
+
+1. Some USB bridges (Realtek RTL9201/RTL9210, some JMicron and ASMedia) reset
+   their UAS link under a long sustained write — an hour-long `btrfs send` is
+   the classic trigger. The kernel log shows `uas_zap_pending … inflight`,
+   `USB disconnect`, and the drive re-enumerating a second later. The backup
+   in progress fails; the btrfs drive goes read-only for that mount and is
+   consistent on the next one (copy-on-write, the transaction is aborted).
+2. USB authorization then keeps it out. With USBGuard and a lock hook that
+   blocks inserted devices while the session is locked, the re-enumerated
+   drive — and anything re-plugged to "test the port", a mouse receiver
+   included — stays blocked. It looks like dead hardware; **unlocking the
+   session brings the ports back, no reboot needed** (or `usbguard list-devices
+   | grep block` then `usbguard allow-device <id>`).
+
+The backup scripts now say this in their log when the drive is missing, and the
+troubleshooting report has a *USB: drops, bridge resets and authorization*
+section. To make the bridge itself stable: smaller UAS transfers for this run
+(`echo 128 | sudo tee /sys/block/sdX/queue/max_sectors_kb`, lost at the next
+plug-in), or, permanently, force the slower BOT transport for that bridge
+(`options usb-storage quirks=<vid>:<pid>:u` in `/etc/modprobe.d/`) — which on
+most bridges also loses TRIM. Keep the session unlocked for a long first
+backup either way.
+
 Logs: `/var/log/borg-backup.log`, `/var/log/backintime-backup.log`,
 `/var/log/timeshift-backup.log`, `/var/log/luks-header-backup.log`. The verify
 and drive-attach units log to the journal only (`journalctl -u backup-verify.service`).
