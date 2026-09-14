@@ -34,7 +34,8 @@
 #   fingerprint before|after|diff
 #                 this machine's own disks: partition tables, exact LUKS headers,
 #                 every file on /boot and the ESP, firmware boot entries
-#   prepare       WIPE the test drive, partition it like this host      (TB_WIPE=<serial>)
+#   prepare       WIPE the test drive, partition its first TB_TARGET_GIB (100) like this host
+#                 (TB_WIPE=<serial>); the rest of the drive stays unpartitioned
 #   format        LUKS (passphrase "test") + filesystems + btrfs subvolumes
 #   mount         the target tree at $TB_MNT, laid out like this host's fstab
 #   backup [functional|minimal]
@@ -51,8 +52,10 @@
 #   all           fingerprint before → prepare → format → mount → backup → restore → finish
 #
 # Test drives only ever get the passphrase "test": they hold a copy of this machine
-# and are wiped again on the next run. The suite's real restore scripts never carry
-# a passphrase.
+# and are wiped again on the next run. They boot unattended: the host's crypttab
+# keyfile is a second key on each container that crypttab opens with it, and an
+# encrypted /boot is opened by a test-only GRUB fallback loader with "test" built in.
+# The suite's real restore scripts never carry a passphrase.
 #
 # Configuration (testbed.conf, see testbed.conf.example): $TESTBED_CONF, then
 # <backup drive>/testbed/testbed.conf, then ~/.config/linux-backup-system/testbed.conf,
@@ -84,12 +87,14 @@ for _c in "${TESTBED_CONF:-}" "$BACKUP_MOUNT/testbed/testbed.conf" \
         . "$_c"; break; fi
 done
 TB_PASSPHRASE="test"                       # test drives only — see the header
+export LVM_SUPPRESS_FD_WARNINGS=1          # lvm run inside read loops: no "file descriptor leaked" noise
 TB_MNT="${TB_MNT:-/mnt/tb-target}"
 TB_HOST="$BACKUP_HOST_ID"
 TB_REPO="${TB_REPO:-$BACKUP_MOUNT/borg-testbed-$TB_HOST}"
 TB_BIG_EXCLUDES="${TB_BIG_EXCLUDES:-/var/lib/ollama/* /usr/lib/ollama/* /var/lib/docker/* /var/lib/containers/* /var/lib/libvirt/images/* /var/lib/plocate/* /var/lib/mlocate/* /var/lib/chrootbuild/* /opt/cuda/* /usr/share/doc/* /usr/lib/jvm/*}"
 TB_EXTRA_EXCLUDES="${TB_EXTRA_EXCLUDES:-}"
 TB_HOME_KEEP="${TB_HOME_KEEP:-.config .local/bin .local/share/keyrings .local/share/applications .local/share/fonts .ssh .gnupg .pki .claude .claude.json .bashrc .bash_profile .bash_logout .profile .zshrc .zprofile .zshenv .zlogin .oh-my-zsh .xinitrc .xprofile .xsession .Xresources .tmux.conf .tmux .gitconfig .dotfiles .vimrc .nanorc}"
+TB_TARGET_GIB="${TB_TARGET_GIB:-100}"     # the test bed's part of the test drive, from its start; the rest stays unpartitioned (0 = whole drive)
 TB_SECTORS_KB="${TB_SECTORS_KB:-128}"     # smaller USB transfers for bridges that reset under load; 0 = leave alone
 
 # --- state + ledger ---------------------------------------------------------------
@@ -133,28 +138,68 @@ part() { case "$1" in *[0-9]) echo "${1}p$2" ;; *) echo "$1$2" ;; esac; }
 set_sectors() { # set_sectors DISK — remember the kernel's value, lower it
     local d kn f; d="$1"; kn=$(basename "$d"); f="/sys/block/$kn/queue/max_sectors_kb"
     [ "$TB_SECTORS_KB" -gt 0 ] 2>/dev/null && [ -w "$f" ] || return 0
+    # lower only: a bridge already below the test value keeps its own (raising 120 → 128 is not "smaller")
+    [ "$(cat "$f")" -gt "$TB_SECTORS_KB" ] 2>/dev/null || return 0
     [ -f "$TB_STATE/sectors.$kn" ] || cat "$f" > "$TB_STATE/sectors.$kn"
     echo "$TB_SECTORS_KB" > "$f" && ledger test "max_sectors_kb $(cat "$TB_STATE/sectors.$kn") → $TB_SECTORS_KB on $d (runtime)" "restored by revert (also lost at re-plug)"
 }
 
 # --- this host's layout ---------------------------------------------------------------
 # Every fact the target layout mirrors, as KEY=VALUE lines in $TB_STATE/host-layout.
-detect_layout() {
-    local root_src root_fs esp boot_fs boot_dev boot_is_esp=0 crypt="" luks_dev="" luks_ver="" luks_kdf=""
-    local home_src home_fs swap_dev sv
-    root_src=$(findmnt -no SOURCE / | sed 's/\[.*//'); root_fs=$(findmnt -no FSTYPE /)
-    if [ "$(lsblk -dno TYPE "$root_src" 2>/dev/null)" = crypt ]; then
-        crypt=1; luks_dev=$(cryptsetup status "$(basename "$root_src")" 2>/dev/null | awk '/device:/{print $2}')
-        luks_ver=$(cryptsetup luksDump "$luks_dev" 2>/dev/null | awk '/^Version:/{print $2; exit}')
-        luks_kdf=$(cryptsetup luksDump "$luks_dev" 2>/dev/null | awk '/PBKDF:/{print $2; exit}')
-        [ "$luks_ver" = 1 ] && luks_kdf=pbkdf2
+# luks_facts PREFIX MAPPER — the container behind an open mapper, as the KEY=VALUE
+# lines format needs to make the test container open the same way: LUKS version,
+# and the KDF of the host's cheapest keyslot (the one its bootloader or initramfs
+# demonstrably opens), plus the keyfile crypttab gives that mapper, if any.
+luks_facts() {
+    local pre="$1" name="$2" dev dump ver kf
+    dev=$(cryptsetup status "$name" 2>/dev/null | awk '/device:/{print $2}')
+    dump=$(cryptsetup luksDump "$dev" 2>/dev/null); ver=$(awk '/^Version:/{print $2; exit}' <<<"$dump")
+    echo "${pre}_MAPPER=$name"; echo "${pre}_LUKS_VERSION=${ver:-2}"
+    if [ "$ver" = 1 ]; then echo "${pre}_LUKS_PBKDF=pbkdf2"
+    else
+        # keyslot blocks: PBKDF, Time cost, Memory, Threads — the lowest time cost wins
+        awk '$1=="PBKDF:"{k=$2; t=m=p=""} $1=="Time"{t=$3} $1=="Memory:"{m=$2} $1=="Threads:"{p=$2; print t+0, k, m, p}' <<<"$dump" \
+            | sort -n | head -1 | while read -r t k m p; do
+                echo "${pre}_LUKS_PBKDF=${k:-argon2id}"; [ -n "$m" ] && echo "${pre}_LUKS_MEMORY=$m"
+                [ -n "$p" ] && echo "${pre}_LUKS_THREADS=$p"; echo "${pre}_LUKS_TIME=$t"
+            done
     fi
-    case "$(lsblk -dno TYPE "$root_src" 2>/dev/null)" in lvm) echo "UNSUPPORTED=root on LVM ($root_src): not mirrored yet — restore by hand onto an LV" ;; esac
-    lsblk -rno TYPE "$(bx_disk_of "$root_src")" 2>/dev/null | grep -qE '^raid' && echo "UNSUPPORTED=root on mdadm RAID: not mirrored yet"
-    case "$root_fs" in btrfs|ext4|xfs|f2fs) ;; *) echo "UNSUPPORTED=root filesystem $root_fs: not mirrored yet" ;; esac
+    kf=$(awk -v n="$name" '$1 !~ /^#/ && $1==n && $3!="none" && $3!="-" {print $3; exit}' /etc/crypttab 2>/dev/null)
+    [ -n "$kf" ] && [ -f "$kf" ] && echo "${pre}_KEYFILE=$kf"
+    return 0
+}
+detect_layout() {
+    local root_src root_fs esp boot_fs boot_dev boot_is_esp=0 crypt=""
+    local home_src home_fs swap_dev sv pv vg="" lv size dmp role n
+    root_src=$(findmnt -no SOURCE / | sed 's/\[.*//'); root_fs=$(findmnt -no FSTYPE /)
+    # Root on LVM: what the volume group sits on (a partition or a LUKS container)
+    # is what gets mirrored; the logical volumes are laid out again inside it.
+    pv=$root_src
+    if [ "$(lsblk -dno TYPE "$root_src" 2>/dev/null)" = lvm ]; then
+        vg=$(lvs --noheadings -o vg_name "$root_src" 2>/dev/null | tr -d ' ')
+        pv=$(pvs --noheadings -o pv_name -S "vg_name=$vg" 2>/dev/null | tr -d ' ')
+        n=$(printf '%s\n' "$pv" | grep -c .)
+        if [ -z "$vg" ] || [ "$n" != 1 ]; then
+            echo "NOT_MIRRORED=root on LVM volume group ${vg:-?} over $n physical volumes (the test bed lays out one)"; pv=$root_src; vg=""
+        else
+            echo "ROOT_VG=$vg"
+            while read -r lv size dmp; do
+                role=other
+                [ "$(readlink -f "$dmp")" = "$(readlink -f "$root_src")" ] && role=root
+                awk 'NR>1{print $1}' /proc/swaps | while read -r s; do [ "$(readlink -f "$s")" = "$(readlink -f "$dmp")" ] && echo x; done | grep -q x && role=swap
+                [ "$role" = other ] && echo "NOT_MIRRORED=logical volume $vg/$lv is neither the root nor swap (the test bed lays out those two)"
+                echo "LV=$lv:${size%%.*}:$role"
+            done < <(lvs --noheadings --units m --nosuffix -o lv_name,lv_size,lv_dm_path -S "vg_name=$vg" 2>/dev/null)
+        fi
+    fi
+    if [ "$(lsblk -dno TYPE "$pv" 2>/dev/null)" = crypt ]; then
+        crypt=1
+        luks_facts ROOT "$(basename "$pv")"
+    fi
+    lsblk -rno TYPE "$(bx_disk_of "$root_src")" 2>/dev/null | grep -qE '^raid' && echo "NOT_MIRRORED=root on mdadm RAID (the test bed cannot lay it out yet)"
+    case "$root_fs" in btrfs|ext4|xfs|f2fs) ;; *) echo "NOT_MIRRORED=root filesystem $root_fs (the test bed cannot format it yet)" ;; esac
     esp=$(bx_esp_mount 2>/dev/null || true)
     echo "ROOT_FS=$root_fs"; echo "ROOT_CRYPT=${crypt:-0}"
-    [ -n "$crypt" ] && { echo "LUKS_VERSION=${luks_ver:-2}"; echo "LUKS_PBKDF=${luks_kdf:-argon2id}"; echo "MAPPER_NAME=$(basename "$root_src")"; }
     [ -d /sys/firmware/efi ] && echo "FIRMWARE=uefi" || echo "FIRMWARE=bios"
     if [ -n "$esp" ]; then
         echo "ESP_MOUNT=$esp"; echo "ESP_MIB=$(( $(lsblk -bdno SIZE "$(findmnt -no SOURCE "$esp")") / 1048576 ))"
@@ -162,9 +207,16 @@ detect_layout() {
     fi
     if mountpoint -q /boot && [ "$boot_is_esp" = 0 ]; then
         boot_dev=$(findmnt -no SOURCE /boot | sed 's/\[.*//'); boot_fs=$(findmnt -no FSTYPE /boot)
-        if [ "$(lsblk -dno TYPE "$boot_dev")" = crypt ]; then echo "UNSUPPORTED=separate encrypted /boot partition: not mirrored yet"; fi
-        echo "BOOT_FS=$boot_fs"; echo "BOOT_MIB=$(( $(lsblk -bdno SIZE "$boot_dev") / 1048576 ))"
-        echo "BOOT_PARTTYPE=$( [ "$boot_fs" = vfat ] && echo ea00 || echo 8300 )"
+        echo "BOOT_FS=$boot_fs"
+        if [ "$(lsblk -dno TYPE "$boot_dev")" = crypt ]; then
+            # an encrypted /boot, opened by GRUB: the partition is the container
+            echo "BOOT_CRYPT=1"; luks_facts BOOT "$(basename "$boot_dev")"
+            echo "BOOT_MIB=$(( $(lsblk -bdno SIZE "$(cryptsetup status "$(basename "$boot_dev")" | awk '/device:/{print $2}')") / 1048576 ))"
+            echo "BOOT_PARTTYPE=8309"
+        else
+            echo "BOOT_CRYPT=0"; echo "BOOT_MIB=$(( $(lsblk -bdno SIZE "$boot_dev") / 1048576 ))"
+            echo "BOOT_PARTTYPE=$( [ "$boot_fs" = vfat ] && echo ea00 || echo 8300 )"
+        fi
     fi
     if [ "$root_fs" = btrfs ]; then
         # subvolumes the host's fstab mounts from the root filesystem: MOUNT=SUBVOL
@@ -174,8 +226,9 @@ detect_layout() {
     if [ -n "$home_src" ] && [ "$home_src" != "$root_src" ]; then
         echo "HOME_FS=$home_fs"; echo "HOME_CRYPT=$( [ "$(lsblk -dno TYPE "$home_src")" = crypt ] && echo 1 || echo 0)"
     fi
+    # a swap partition of its own; swap on a logical volume is an LV line above
     swap_dev=$(awk 'NR>1 && $2=="partition"{print $1; exit}' /proc/swaps)
-    [ -n "$swap_dev" ] && echo "SWAP_MIB=$(( $(lsblk -bdno SIZE "$swap_dev") / 1048576 ))"
+    [ -n "$swap_dev" ] && [ "$(lsblk -dno TYPE "$swap_dev" 2>/dev/null)" = part ] && echo "SWAP_MIB=$(( $(lsblk -bdno SIZE "$swap_dev") / 1048576 ))"
     # Where the booted test drive leaves its report: an UNENCRYPTED boot
     # partition of this machine (it cannot unlock the others).
     local rp=""; for m in /boot /efi /boot/efi; do
@@ -196,11 +249,33 @@ cmd_fingerprint() {
         diff)
             [ -f "$TB_STATE/fingerprint-before.txt" ] && [ -f "$TB_STATE/fingerprint-after.txt" ] || die "need fingerprint before and after first"
             # Expected on any boot of this machine: systemd-boot refreshes its random seed;
-            # firmware boot menus reorder BootOrder; the test report directory.
-            if diff <(grep -vE 'restore-test|loader/random-seed|^BootOrder:' "$TB_STATE/fingerprint-before.txt") \
-                    <(grep -vE 'restore-test|loader/random-seed|^BootOrder:' "$TB_STATE/fingerprint-after.txt") > "$TB_STATE/fingerprint.diff"; then
+            # firmware boot menus reorder BootOrder and keep their own entries for the
+            # removable media present at power-on (legacy "BBS(" entries, "UEFI: <drive>"
+            # entries on a /USB( path) — firmware-made, the suite never writes NVRAM; the
+            # test report directory. Disks are compared when present in both: a disk
+            # plugged in or pulled out between the two (a USB stick) is a note, not a change.
+            local both
+            both=$(comm -12 <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-before.txt" | sort -u) \
+                            <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-after.txt" | sort -u))
+            fp_norm() { # the fingerprint without the expected noise and without disks absent from the other side
+                awk -v both="$both" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1}
+                    /^## disk / {sub(/^## disk [^ ]* serial /, "", $0); skip = !($0 in keep); if (!skip) print "## disk serial " $0; next}
+                    /^## / {skip=0}
+                    skip {next}
+                    /restore-test|loader\/random-seed|^BootOrder:/ {next}
+                    /^Boot[0-9A-Fa-f]{4}/ && /BBS\(|\/USB\(/ {next}
+                    {print}' "$1"
+            }
+            if diff <(fp_norm "$TB_STATE/fingerprint-before.txt") <(fp_norm "$TB_STATE/fingerprint-after.txt") > "$TB_STATE/fingerprint.diff"; then
                 say "this machine's disks: IDENTICAL (partition tables, LUKS headers, boot files, boot entries)"
-                grep -h '^BootOrder:' "$TB_STATE/fingerprint-before.txt" "$TB_STATE/fingerprint-after.txt" | uniq | sed -n '2p' | grep -q . && say "  note: BootOrder changed — firmware boot menus do that; no entry was added or removed"
+                grep -h '^BootOrder:' "$TB_STATE/fingerprint-before.txt" "$TB_STATE/fingerprint-after.txt" | uniq | sed -n '2p' | grep -q . && say "  note: BootOrder changed — firmware boot menus do that"
+                diff <(grep -E '^Boot[0-9A-Fa-f]{4}' "$TB_STATE/fingerprint-before.txt" | grep -E 'BBS\(|/USB\(') \
+                     <(grep -E '^Boot[0-9A-Fa-f]{4}' "$TB_STATE/fingerprint-after.txt" | grep -E 'BBS\(|/USB\(') >/dev/null \
+                    || say "  note: the firmware's own removable-media boot entries changed (BBS / USB device paths) — made by the firmware at power-on"
+                local gone
+                gone=$(comm -3 <(sed -n 's/^## disk \([^ ]*\) serial \(.*\)/\2 \1/p' "$TB_STATE/fingerprint-before.txt" | sort -u) \
+                               <(sed -n 's/^## disk \([^ ]*\) serial \(.*\)/\2 \1/p' "$TB_STATE/fingerprint-after.txt" | sort -u) | sed 's/^\t/after only: /; s/^\([^a]\)/before only: \1/' | tr '\n' ';')
+                [ -n "$gone" ] && say "  note: disks present in only one fingerprint (plugged in or pulled out, not compared): $gone"
                 return 0
             fi
             warn "this machine's disks CHANGED:"; cat "$TB_STATE/fingerprint.diff" >&2; return 1 ;;
@@ -235,27 +310,37 @@ cmd_plan() {
     local t size_mib esp boot swap home_fs n=1 uns
     rm -f "$TB_STATE/host-layout"; layout ROOT_FS >/dev/null
     say "this host ($TB_HOST):"; sed 's/^/    /' "$TB_STATE/host-layout"
-    uns=$(layout_all UNSUPPORTED); [ -n "$uns" ] && { printf '%s\n' "$uns" | sed 's/^/[testbed] UNSUPPORTED: /' >&2; return 1; }
+    # The suite restores these; the test bed cannot lay them out on a test drive yet.
+    uns=$(layout_all NOT_MIRRORED); [ -n "$uns" ] && { printf '%s\n' "$uns" | sed 's/^/[testbed] test bed cannot mirror this host yet: /' >&2; return 1; }
     t=$(target_disk); size_mib=$(( $(lsblk -bdno SIZE "$t") / 1048576 ))
+    local disk_mib=$size_mib
+    [ "$TB_TARGET_GIB" -gt 0 ] 2>/dev/null && [ $(( TB_TARGET_GIB * 1024 )) -lt "$size_mib" ] && size_mib=$(( TB_TARGET_GIB * 1024 ))
     esp=$(layout ESP_MIB); boot=$(layout BOOT_MIB); swap=$(layout SWAP_MIB); home_fs=$(layout HOME_FS)
     : > "$TB_STATE/plan"
-    say "test drive: $t ($(lsblk -dno MODEL,SERIAL "$t" | xargs), ${size_mib} MiB) — laid out like this host:"
+    say "test drive: $t ($(lsblk -dno MODEL,SERIAL "$t" | xargs), ${disk_mib} MiB) — the test bed's part: the first ${size_mib} MiB$( [ "$size_mib" -lt "$disk_mib" ] && echo ", the rest left unpartitioned (TB_TARGET_GIB=$TB_TARGET_GIB)"), laid out like this host:"
     if [ "$(layout FIRMWARE)" = bios ]; then echo "PART=$n:bios_grub:1:ef02:-" >> "$TB_STATE/plan"; n=$((n+1)); fi
     [ -n "$esp" ] && { echo "PART=$n:esp:$(( esp < 300 ? 300 : esp )):ef00:$(layout ESP_MOUNT)" >> "$TB_STATE/plan"; n=$((n+1)); }
     [ -n "$boot" ] && { echo "PART=$n:boot:$boot:$(layout BOOT_PARTTYPE):/boot" >> "$TB_STATE/plan"; n=$((n+1)); }
     [ -n "$swap" ] && { echo "PART=$n:swap:$swap:8200:swap" >> "$TB_STATE/plan"; n=$((n+1)); }
     local used=0 v; while IFS=: read -r _ _ v _ _; do used=$((used + v)); done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
     local rest=$(( size_mib - used - 16 ))
+    [ "$rest" -ge 20480 ] || die "only $rest MiB left for the root in the test bed's ${size_mib} MiB — raise TB_TARGET_GIB"
+    local rtype=8304; [ -n "$(layout ROOT_VG)" ] && rtype=8e00; [ "$(layout ROOT_CRYPT)" = 1 ] && rtype=8309
     if [ -n "$home_fs" ]; then
-        echo "PART=$n:root:$(( rest * 7 / 10 )):$( [ "$(layout ROOT_CRYPT)" = 1 ] && echo 8309 || echo 8304 ):/" >> "$TB_STATE/plan"; n=$((n+1))
-        echo "PART=$n:home:0:$( [ "$(layout HOME_CRYPT)" = 1 ] && echo 8309 || echo 8302 ):/home" >> "$TB_STATE/plan"
+        echo "PART=$n:root:$(( rest * 7 / 10 )):$rtype:/" >> "$TB_STATE/plan"; n=$((n+1))
+        echo "PART=$n:home:$(( rest - rest * 7 / 10 )):$( [ "$(layout HOME_CRYPT)" = 1 ] && echo 8309 || echo 8302 ):/home" >> "$TB_STATE/plan"
     else
-        echo "PART=$n:root:0:$( [ "$(layout ROOT_CRYPT)" = 1 ] && echo 8309 || echo 8304 ):/" >> "$TB_STATE/plan"
+        echo "PART=$n:root:$rest:$rtype:/" >> "$TB_STATE/plan"
     fi
     while IFS=: read -r num role mib type mnt; do
         printf '    p%-2s %-9s %8s  type %s  %s\n' "$num" "$role" "$( [ "$mib" = 0 ] && echo rest || echo "${mib}M")" "$type" "$mnt"
     done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
-    [ "$(layout ROOT_CRYPT)" = 1 ] && say "    root: LUKS$(layout LUKS_VERSION) $(layout LUKS_PBKDF) (the host's own KDF, so its bootloader can open it), passphrase \"test\""
+    [ "$(layout ROOT_CRYPT)" = 1 ] && say "    root: LUKS$(layout ROOT_LUKS_VERSION) $(layout ROOT_LUKS_PBKDF) (the host's own KDF parameters), passphrase \"test\"$( [ -n "$(layout ROOT_KEYFILE)" ] && echo " + the keyfile $(layout ROOT_KEYFILE) (its crypttab opens it with that)")"
+    [ "$(layout BOOT_CRYPT)" = 1 ] && say "    /boot: LUKS$(layout BOOT_LUKS_VERSION) $(layout BOOT_LUKS_PBKDF) (the host's own KDF parameters, so its GRUB can open it), passphrase \"test\"$( [ -n "$(layout BOOT_KEYFILE)" ] && echo " + the keyfile $(layout BOOT_KEYFILE)")"
+    if [ -n "$(layout ROOT_VG)" ]; then
+        say "    LVM: volume group $(tb_vg) (renamed $(layout ROOT_VG) by finish — this host holds that name while the test runs):"
+        layout_all LV | while IFS=: read -r lv mib role; do say "      $lv  $( [ "$role" = root ] && echo rest || echo "${mib}M")  $role"; done
+    fi
     [ "$(layout ROOT_FS)" = btrfs ] && say "    btrfs subvolumes: $(layout_all SUBVOL | tr '\n' ' ')"
     say "    report partition on THIS host for the booted test drive: $(layout REPORT_MOUNT) (PARTUUID $(layout REPORT_PARTUUID))"
     return 0
@@ -266,6 +351,7 @@ cmd_prepare() {
     local t; t=$(target_disk)
     cmd_plan >/dev/null || die "plan failed — run: testbed.sh plan"
     [ "${TB_WIPE:-}" = "$TB_TARGET_SERIAL" ] || die "this ERASES $t ($(lsblk -dno MODEL,SIZE "$t" | xargs)). Confirm with TB_WIPE=$TB_TARGET_SERIAL"
+    unmount_target    # a previous run's mounts, volume group and containers on the test drive
     local m; for m in $(lsblk -rnpo MOUNTPOINTS "$t" 2>/dev/null | grep .); do umount "$m" || die "cannot unmount $m on the test drive (a shell inside it?)"; done
     for m in $(lsblk -rnpo NAME,TYPE "$t" | awk '$2=="crypt"{print $1}'); do cryptsetup close "$(basename "$m")" 2>/dev/null; done
     set_sectors "$t"
@@ -287,25 +373,74 @@ partdev() { # partdev ROLE — the test drive's partition for a plan role
     part "$t" "$(sed -n 's/^PART=//p' "$TB_STATE/plan" | awk -F: -v r="$1" '$2==r{print $1}')"
 }
 has_role() { sed -n 's/^PART=//p' "$TB_STATE/plan" 2>/dev/null | awk -F: -v r="$1" '$2==r{f=1} END{exit !f}'; }
+# The test drive's LVM volume group while the test runs: this host holds its real
+# name (and the device-mapper names of its volumes), so it is created as tb-<name>
+# and renamed by finish, once it is inactive.
+tb_vg() { echo "tb-$(layout ROOT_VG)"; }
+root_lv() { layout_all LV | awk -F: '$3=="root"{print $1; exit}'; }
+root_pv() { if [ "$(layout ROOT_CRYPT)" = 1 ]; then echo /dev/mapper/tb-root; else partdev root; fi; }
+root_blk() { if [ -n "$(layout ROOT_VG)" ]; then echo "/dev/$(tb_vg)/$(root_lv)"; else root_pv; fi; }
+boot_blk() { if [ "$(layout BOOT_CRYPT)" = 1 ]; then echo /dev/mapper/tb-boot; else partdev boot; fi; }
+# luks_format PREFIX PARTITION MAPPER — a container made the way the host's is
+# (version, KDF, memory, threads, time cost), passphrase "test", plus the host's
+# keyfile when its crypttab opens the container with one: the restored crypttab
+# and initramfs use that keyfile, and the test drive is a copy of this host anyway.
+luks_format() {
+    local pre="$1" p="$2" name="$3" ver kdf kf args=()
+    ver=$(layout "${pre}_LUKS_VERSION"); kdf=$(layout "${pre}_LUKS_PBKDF"); kf=$(layout "${pre}_KEYFILE")
+    if [ "${ver:-2}" = 2 ]; then
+        args=(--pbkdf "${kdf:-argon2id}")
+        if [ "${kdf:-argon2id}" != pbkdf2 ]; then
+            [ -n "$(layout "${pre}_LUKS_MEMORY")" ] && args+=(--pbkdf-memory "$(layout "${pre}_LUKS_MEMORY")")
+            [ -n "$(layout "${pre}_LUKS_THREADS")" ] && args+=(--pbkdf-parallel "$(layout "${pre}_LUKS_THREADS")")
+            [ "$(layout "${pre}_LUKS_TIME")" -gt 0 ] 2>/dev/null && args+=(--pbkdf-force-iterations "$(layout "${pre}_LUKS_TIME")")
+        fi
+    fi
+    printf '%s' "$TB_PASSPHRASE" | cryptsetup luksFormat --batch-mode --type "luks${ver:-2}" "${args[@]}" --key-file=- "$p" || die "luksFormat $p"
+    if [ -n "$kf" ]; then
+        printf '%s' "$TB_PASSPHRASE" | cryptsetup luksAddKey --batch-mode "${args[@]}" --key-file=- "$p" "$kf" || die "luksAddKey $kf → $p"
+    fi
+    printf '%s' "$TB_PASSPHRASE" | cryptsetup open --key-file=- "$p" "$name" || die "open $name"
+    ledger test "LUKS${ver:-2} (${kdf:-argon2id}) on $p opened as $name, passphrase \"test\"${kf:+ + the keyfile of this host, $kf}" "revert closes it"
+}
+# open_target — the test drive's containers and volume group, before finish renames it
+open_target() {
+    if [ "$(layout ROOT_CRYPT)" = 1 ] && [ ! -e /dev/mapper/tb-root ]; then
+        printf '%s' "$TB_PASSPHRASE" | cryptsetup open --key-file=- "$(partdev root)" tb-root || die "open $(partdev root)"
+    fi
+    if has_role boot && [ "$(layout BOOT_CRYPT)" = 1 ] && [ ! -e /dev/mapper/tb-boot ]; then
+        printf '%s' "$TB_PASSPHRASE" | cryptsetup open --key-file=- "$(partdev boot)" tb-boot || die "open $(partdev boot)"
+    fi
+    if [ -n "$(layout ROOT_VG)" ] && [ ! -e "$(root_blk)" ]; then
+        vgchange -ay --devices "$(root_pv)" "$(tb_vg)" >/dev/null || die "volume group $(tb_vg) not found on $(root_pv) — after finish it is called $(layout ROOT_VG); collect reads it without activating it"
+    fi
+    return 0
+}
 
 # --- format -----------------------------------------------------------------------------------------
 cmd_format() {
     [ -f "$TB_STATE/plan" ] || die "no plan — run prepare first"
-    local p root_blk ver kdf sv mnt name
+    local p root_blk sv mnt name lv mib role
     has_role esp  && { mkfs.vfat -F 32 -n TB-ESP "$(partdev esp)" >/dev/null || die "mkfs ESP"; }
     if has_role boot; then
-        case "$(layout BOOT_FS)" in vfat) mkfs.vfat -F 32 -n TB-BOOT "$(partdev boot)" >/dev/null ;; *) "mkfs.$(layout BOOT_FS)" -q -F -L tb-boot "$(partdev boot)" >/dev/null 2>&1 || "mkfs.$(layout BOOT_FS)" -f -L tb-boot "$(partdev boot)" >/dev/null ;; esac || die "mkfs /boot"
+        p=$(partdev boot)
+        [ "$(layout BOOT_CRYPT)" = 1 ] && { luks_format BOOT "$p" tb-boot; p=/dev/mapper/tb-boot; }
+        case "$(layout BOOT_FS)" in vfat) mkfs.vfat -F 32 -n TB-BOOT "$p" >/dev/null ;; *) "mkfs.$(layout BOOT_FS)" -q -F -L tb-boot "$p" >/dev/null 2>&1 || "mkfs.$(layout BOOT_FS)" -f -L tb-boot "$p" >/dev/null ;; esac || die "mkfs /boot"
     fi
     has_role swap && { mkswap -L tb-swap "$(partdev swap)" >/dev/null || die "mkswap"; }
-    p=$(partdev root); root_blk=$p
-    if [ "$(layout ROOT_CRYPT)" = 1 ]; then
-        ver=$(layout LUKS_VERSION); kdf=$(layout LUKS_PBKDF)
-        local kdfargs=(); [ "${ver:-2}" = 2 ] && kdfargs=(--pbkdf "${kdf:-argon2id}")
-        printf '%s' "$TB_PASSPHRASE" | cryptsetup luksFormat --batch-mode --type "luks${ver:-2}" "${kdfargs[@]}" --key-file=- "$p" || die "luksFormat"
-        printf '%s' "$TB_PASSPHRASE" | cryptsetup open --key-file=- "$p" tb-root || die "open tb-root"
-        root_blk=/dev/mapper/tb-root
-        ledger test "LUKS${ver:-2} ($kdf) on $p opened as tb-root, passphrase \"test\"" "revert closes it"
+    p=$(partdev root)
+    [ "$(layout ROOT_CRYPT)" = 1 ] && luks_format ROOT "$p" tb-root
+    if [ -n "$(layout ROOT_VG)" ]; then
+        pvcreate -ff -y "$(root_pv)" >/dev/null && vgcreate "$(tb_vg)" "$(root_pv)" >/dev/null || die "LVM volume group $(tb_vg) on $(root_pv)"
+        while IFS=: read -r lv mib role; do    # fixed-size volumes first, the root takes the rest
+            [ "$role" = root ] && continue
+            lvcreate -y -W y -n "$lv" -L "${mib}m" "$(tb_vg)" >/dev/null || die "lvcreate $lv"
+            [ "$role" = swap ] && { mkswap "/dev/$(tb_vg)/$lv" >/dev/null || die "mkswap $lv"; }
+        done < <(layout_all LV)
+        lvcreate -y -W y -n "$(root_lv)" -l 100%FREE "$(tb_vg)" >/dev/null || die "lvcreate $(root_lv)"
+        ledger test "LVM volume group $(tb_vg) on $(root_pv): $(layout_all LV | cut -d: -f1 | tr '\n' ' ')" "renamed $(layout ROOT_VG) by finish; wiped with the drive on the next run"
     fi
+    root_blk=$(root_blk)
     case "$(layout ROOT_FS)" in
         btrfs) mkfs.btrfs -q -f -L tb-root "$root_blk" >/dev/null ;;
         xfs)   mkfs.xfs -q -f -L tb-root "$root_blk" ;;
@@ -335,8 +470,8 @@ cmd_format() {
 cmd_mount() {
     [ -f "$TB_STATE/plan" ] || die "no plan"
     local root_blk mnt sv
-    root_blk=$(partdev root); [ "$(layout ROOT_CRYPT)" = 1 ] && root_blk=/dev/mapper/tb-root
-    [ -b "$root_blk" ] || die "$root_blk is not there (open it: testbed.sh format, or cryptsetup open)"
+    open_target; root_blk=$(root_blk)
+    [ -b "$root_blk" ] || die "$root_blk is not there (run: testbed.sh format)"
     mkdir -p "$TB_MNT"
     if [ "$(layout ROOT_FS)" = btrfs ]; then
         sv=$(layout_all SUBVOL | awk -F= '$1=="/"{print $2}')
@@ -349,7 +484,7 @@ cmd_mount() {
         mountpoint -q "$TB_MNT" || mount "$root_blk" "$TB_MNT" || die "mount root"
     fi
     if has_role home; then local h; h=$(partdev home); [ "$(layout HOME_CRYPT)" = 1 ] && h=/dev/mapper/tb-home; mkdir -p "$TB_MNT/home"; mountpoint -q "$TB_MNT/home" || mount "$h" "$TB_MNT/home" || die "mount /home"; fi
-    if has_role boot; then mkdir -p "$TB_MNT/boot"; mountpoint -q "$TB_MNT/boot" || mount "$(partdev boot)" "$TB_MNT/boot" || die "mount /boot"; fi
+    if has_role boot; then mkdir -p "$TB_MNT/boot"; mountpoint -q "$TB_MNT/boot" || mount "$(boot_blk)" "$TB_MNT/boot" || die "mount /boot"; fi
     if has_role esp; then local e; e=$(layout ESP_MOUNT); mkdir -p "$TB_MNT$e"; mountpoint -q "$TB_MNT$e" || mount "$(partdev esp)" "$TB_MNT$e" || die "mount ESP"; fi
     ledger test "target tree mounted at $TB_MNT" "revert unmounts it"
     say "mounted:"; findmnt -R -o TARGET,SOURCE,FSTYPE "$TB_MNT" | sed 's/^/    /'
@@ -407,6 +542,7 @@ cmd_restore() {
 # --- finish: manifest, homes, logger ----------------------------------------------------------------------
 cmd_finish() {
     local a uid gid hd
+    rm -f "$TB_STATE/auto-unlock"
     a=$(st_get archive); mountpoint -q "$TB_MNT" || die "target not mounted"
     mkdir -p "$TB_MNT/root/restore-test"
     BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes borg list --format '{type}{TAB}{size}{TAB}{path}{NL}' "$TB_REPO::$a" | gzip -1 > "$TB_MNT/root/restore-test/manifest.tsv.gz" || die "manifest"
@@ -440,8 +576,31 @@ cmd_finish() {
         ledger test "test drive: stale UKI ${f#"$TB_MNT"} parked in /root/restore-test (it names this machine's disk)" "test drive only"
         say "parked stale UKI ${f#"$TB_MNT"}"
     done < <(cl_ukis "$TB_MNT")
+    auto_unlock_grub
+    # The restored boot configuration must name the volume group by its real name:
+    # the temporary one exists only while this test bed runs.
+    if [ -n "$(layout ROOT_VG)" ] && grep -rlsF "/dev/mapper/$(tb_vg | sed 's/-/--/g')-" "$TB_MNT/boot/grub" "$TB_MNT/boot/grub2" "$TB_MNT/etc/fstab" "$TB_MNT/etc/default/grub" "$TB_MNT/etc/initramfs-tools/conf.d" 2>/dev/null | grep -q .; then
+        warn "the restored boot configuration names the test bed's temporary volume group $(tb_vg): $(grep -rlsF "/dev/mapper/$(tb_vg | sed 's/-/--/g')-" "$TB_MNT/boot/grub" "$TB_MNT/boot/grub2" "$TB_MNT/etc" 2>/dev/null | sed "s#^$TB_MNT##" | tr '\n' ' ')— it will not boot"
+    fi
     sync
     say "unmounting and closing the test drive ..."
+    unmount_mounts
+    if [ -n "$(layout ROOT_VG)" ] && vgs --devices "$(root_pv)" "$(tb_vg)" >/dev/null 2>&1; then
+        vgchange -an --devices "$(root_pv)" "$(tb_vg)" >/dev/null || die "cannot deactivate $(tb_vg) (still in use?)"
+        # vgrename refuses a name /dev already has (this host's group), and
+        # vgcfgrestore's "active volumes" question counts this host's volumes by
+        # name. The metadata goes only to the test drive's physical volume
+        # (--devices): back it up, rename it in the file, write it back there.
+        local vgf; vgf=$(mktemp /run/tb-vg.XXXXXX)
+        vgcfgbackup --devices "$(root_pv)" -f "$vgf" "$(tb_vg)" >/dev/null || die "cannot back up the metadata of $(tb_vg)"
+        sed -i "s/^$(tb_vg) {\$/$(layout ROOT_VG) {/" "$vgf"
+        grep -q "^$(layout ROOT_VG) {\$" "$vgf" || die "renaming $(tb_vg) in its metadata backup failed ($vgf)"
+        echo y | vgcfgrestore --devices "$(root_pv)" -f "$vgf" "$(layout ROOT_VG)" >/dev/null 2>&1 \
+            && vgs --devices "$(root_pv)" "$(layout ROOT_VG)" >/dev/null 2>&1 || die "cannot rename $(tb_vg) → $(layout ROOT_VG) on $(root_pv) (metadata: $vgf)"
+        rm -f "$vgf"
+        ledger test "test drive: volume group $(tb_vg) renamed $(layout ROOT_VG), the name the restored system mounts" "test drive only"
+        say "volume group $(tb_vg) renamed $(layout ROOT_VG) (inactive; this host never activates it)"
+    fi
     unmount_target
     cmd_fingerprint after >/dev/null
     cmd_fingerprint diff || warn "this machine changed during the test — see $TB_STATE/fingerprint.diff"
@@ -450,16 +609,70 @@ cmd_finish() {
 
 [testbed] Ready to boot the test drive.
   1. Leave only the test drive connected (serial $TB_TARGET_SERIAL).
-  2. Reboot, pick it from the firmware boot menu; the passphrase is: test
+  2. Reboot, pick it from the firmware boot menu — on a UEFI host the entry that starts with
+     "UEFI:" (the plain one is the legacy BIOS entry and does not boot a UEFI test drive); $( [ "$(st_get auto-unlock)" = grub ] && echo "it unlocks itself (built-in passphrase: test)" || echo "the passphrase is: test")
   3. Wait ~2 minutes after the login screen appears (the logger writes its report to
      this machine's $(layout REPORT_MOUNT) — PARTUUID $(layout REPORT_PARTUUID)).
   4. Boot back into this machine and run:  sudo $0 collect
 MSG
 }
+# auto_unlock_grub — TEST DRIVES ONLY: the test drive boots unattended. GRUB
+# asks for a passphrase for every container it opens: the encrypted /boot, and
+# the root too where grub.cfg names it (grub-mkconfig adds `cryptomount -u` for
+# a root on LUKS). The initramfs and systemd then open theirs with the keyfile
+# the restored crypttab names.
+# The core image the restore installed at the firmware's fallback path
+# (EFI/BOOT/BOOTX64.EFI) is rebuilt, inside the restored system with its own
+# GRUB, with the same prefix and early config plus the built-in passphrase
+# "test" (cryptomount -p, GRUB >= 2.12). The restore's own image is kept in
+# /root/restore-test and at EFI/<id>/grubx64.efi, untouched.
+auto_unlock_grub() {
+    local esp u loader mods moddir kv
+    [ "$(layout BOOT_CRYPT)" = 1 ] && [ "$(layout FIRMWARE)" = uefi ] || return 0
+    esp="$TB_MNT$(layout ESP_MOUNT)"; loader="$esp/EFI/BOOT/BOOTX64.EFI"
+    [ -f "$loader" ] && [ -d "$TB_MNT/boot/grub" ] || { warn "auto-unlock: no GRUB fallback loader at ${loader#"$TB_MNT"} — the test boot asks for the passphrase (test)"; return 0; }
+    u=$(cryptsetup luksUUID "$(partdev boot)" 2>/dev/null) || return 0
+    local p all=""
+    for p in $(lsblk -rnpo NAME,FSTYPE "$(target_disk)" | awk '$2=="crypto_LUKS"{print $1}'); do all="$all $(cryptsetup luksUUID "$p")"; done
+    for moddir in /usr/local/lib/grub/x86_64-efi /usr/lib/grub/x86_64-efi; do [ -f "$TB_MNT$moddir/cryptodisk.mod" ] && break; moddir=""; done
+    [ -n "$moddir" ] || { warn "auto-unlock: no x86_64-efi GRUB modules in the restored system"; return 0; }
+    kv=$(chroot "$TB_MNT" grub-mkimage --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    if [ -z "$kv" ] || [ "$(printf '2.12\n%s\n' "$kv" | sort -V | head -1)" != 2.12 ]; then
+        warn "auto-unlock: GRUB ${kv:-?} in the restored system has no cryptomount -p (needs 2.12) — the test boot asks for the passphrase (test)"; return 0
+    fi
+    mods="part_gpt part_msdos cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512 pbkdf2 ext2 fat lvm search search_fs_uuid normal configfile echo"
+    [ -f "$TB_MNT$moddir/argon2.mod" ] && mods="$mods argon2"
+    mkdir -p "$TB_MNT/root/restore-test"
+    [ -f "$TB_MNT/root/restore-test/BOOTX64.EFI.restored" ] || cp "$loader" "$TB_MNT/root/restore-test/BOOTX64.EFI.restored"
+    # /boot first (the prefix lives there), then every other container of the test drive
+    { printf 'cryptomount -u %s -p %s\n' "$u" "$TB_PASSPHRASE"
+      for p in $all; do [ "$p" = "$u" ] || printf 'cryptomount -u %s -p %s\n' "$p" "$TB_PASSPHRASE"; done
+    } > "$TB_MNT/root/restore-test/grub-early.cfg"
+    # shellcheck disable=SC2086
+    if chroot "$TB_MNT" grub-mkimage -d "$moddir" -O x86_64-efi -c /root/restore-test/grub-early.cfg \
+            -p "(cryptouuid/${u//-/})/grub" -o "$(layout ESP_MOUNT)/EFI/BOOT/BOOTX64.EFI" $mods; then
+        ledger test "test drive: EFI/BOOT/BOOTX64.EFI rebuilt with the built-in passphrase \"test\" for its LUKS containers ($(echo $all)) — the drive boots unattended" "test drive only; the restore's image is /root/restore-test/BOOTX64.EFI.restored"
+        say "auto-unlock: the test drive's fallback loader opens /boot with the built-in passphrase — no prompt at boot"
+        st_set auto-unlock grub
+    else
+        cp "$TB_MNT/root/restore-test/BOOTX64.EFI.restored" "$loader"
+        warn "auto-unlock: grub-mkimage failed — the restore's loader is back in place; the test boot asks for the passphrase (test)"
+    fi
+    return 0
+}
+unmount_mounts() {
+    local m
+    for m in $(findmnt -rno TARGET 2>/dev/null | grep -E "^($TB_MNT|/run/tb-verify)(/|$)" | sort -r); do umount "$m" 2>/dev/null || umount -l "$m"; done
+    return 0
+}
 unmount_target() {
     local m
-    for m in $(findmnt -rno TARGET 2>/dev/null | grep -E "^$TB_MNT(/|$)" | sort -r); do umount "$m" 2>/dev/null || umount -l "$m"; done
-    for m in tb-home tb-root tb-verify; do [ -e "/dev/mapper/$m" ] && cryptsetup close "$m"; done
+    unmount_mounts
+    [ -e /dev/mapper/tb-verify-root ] && dmsetup remove tb-verify-root
+    if [ -n "$(layout ROOT_VG 2>/dev/null)" ] && [ -e /dev/mapper/tb-root ]; then
+        vgchange -an --devices /dev/mapper/tb-root "$(tb_vg)" >/dev/null 2>&1 || true
+    fi
+    for m in tb-home tb-boot tb-root tb-verify-boot tb-verify; do [ -e "/dev/mapper/$m" ] && cryptsetup close "$m"; done
     return 0
 }
 
@@ -477,6 +690,8 @@ cmd_collect() {
     [ "$mnt" = /run/tb-report ] && umount "$mnt"
     grep -h '\*\*' "$TB_STATE"/boot-report/boot-report-*.md | sed 's/^/    /'
     grep -qh 'FAIL' "$TB_STATE"/boot-report/boot-report-*.md && verdict=FAIL
+    grep -qh '_report complete_' "$TB_STATE"/boot-report/boot-report-*.md \
+        || { warn "the boot report is partial — the test drive was switched off before its logger finished (the byte comparison on the booted drive is missing)"; verdict=FAIL; }
     # This machine, after booting it again.
     cmd_fingerprint after >/dev/null
     cp "$TB_STATE/fingerprint-before.txt" "$TB_STATE/fingerprint-before.keep" 2>/dev/null
@@ -484,14 +699,29 @@ cmd_collect() {
     # Byte comparison against the archive, hard-link aware, on the test drive read-only.
     local t; t=$(target_disk)
     p=$(partdev root); if [ "$(layout ROOT_CRYPT)" = 1 ]; then printf '%s' "$TB_PASSPHRASE" | cryptsetup open --readonly --key-file=- "$p" tb-verify || die "open test drive"; p=/dev/mapper/tb-verify; fi
+    if [ -n "$(layout ROOT_VG)" ]; then
+        # The test drive's volume group carries this host's name now: never activate
+        # it here. Map its root volume read-only by hand, from its own metadata only.
+        local ps ext
+        ps=$(pvs --devices "$p" --noheadings --units s --nosuffix -o pe_start "$p" 2>/dev/null | tr -d ' ')
+        ext=$(vgs --devices "$p" --noheadings --units s --nosuffix -o vg_extent_size "$(layout ROOT_VG)" 2>/dev/null | tr -d ' ')
+        lvs --devices "$p" --noheadings --units s --nosuffix -o seg_start,seg_size,seg_pe_ranges "$(layout ROOT_VG)/$(root_lv)" 2>/dev/null \
+            | awk -v ps="${ps%%.*}" -v ex="${ext%%.*}" -v d="$p" '{r=$3; sub(/^.*:/, "", r); split(r, a, "-"); printf "%d %d linear %s %d\n", $1, $2, d, ps + a[1] * ex}' \
+            | dmsetup create --readonly tb-verify-root || die "map the root volume $(layout ROOT_VG)/$(root_lv) of the test drive"
+        p=/dev/mapper/tb-verify-root
+    fi
     tmp=/run/tb-verify; mkdir -p "$tmp"
     local o=ro; [ "$(layout ROOT_FS)" = btrfs ] && o="ro,rescue=nologreplay,subvol=$(layout_all SUBVOL | awk -F= '$1=="/"{print $2}')"
+    [ "$(layout ROOT_FS)" = ext4 ] && o="ro,noload"
     mount -o "$o" "$p" "$tmp" || die "mount test root"
-    has_role boot && mount -o ro "$(partdev boot)" "$tmp/boot"
+    if has_role boot; then
+        local b; b=$(partdev boot)
+        if [ "$(layout BOOT_CRYPT)" = 1 ]; then printf '%s' "$TB_PASSPHRASE" | cryptsetup open --readonly --key-file=- "$b" tb-verify-boot && b=/dev/mapper/tb-verify-boot; fi
+        mount -o ro "$b" "$tmp/boot" 2>/dev/null || mount -o ro,noload "$b" "$tmp/boot"
+    fi
     has_role esp && mount -o ro "$(partdev esp)" "$tmp$(layout ESP_MOUNT)"
     python3 "$TB_DIR/compare-manifest.py" "$TB_STATE/manifest.tsv.gz" "$tmp" > "$TB_STATE/byte-comparison.md"
-    for m in $(findmnt -rno TARGET | grep -E "^$tmp(/|$)" | sort -r); do umount "$m"; done
-    [ -e /dev/mapper/tb-verify ] && cryptsetup close tb-verify
+    unmount_target
     sed -n '1,9p' "$TB_STATE/byte-comparison.md" | sed 's/^/    /'
     st_set verdict "$verdict"; touch "$TB_STATE/finished-collect"
     say "VERDICT: $verdict — state and evidence: $TB_STATE"

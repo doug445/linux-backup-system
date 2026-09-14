@@ -130,8 +130,10 @@ cl_find_carriers() {
 # cryptdevice= in that form were neither reported nor rewritten, so a restore
 # stopped in the initramfs with verify having said the carriers agree.
 # `search --fs-uuid --set=dev <id>` (Fedora's ESP stub) and `search.fs_uuid
-# <id> root` (Ubuntu's) are the two GRUB stub forms.
-CL_REF_PREFIX='(UUID=|(rd\.)?luks\.uuid=(luks-)?|(rd\.)?luks\.name=|--fs-uuid([ ]+--set(=[A-Za-z_]+)?)?[= ]+|search\.fs_uuid[ ]+|/dev/disk/by-uuid/|/dev/disk/by-partuuid/)'
+# <id> root` (Ubuntu's) are the two GRUB stub forms. A stub in front of an
+# encrypted /boot also names the LUKS container: `cryptomount -u <id>` and the
+# dashless `cryptouuid/<id>` device — left stale, it unlocks the OLD disk's /boot.
+CL_REF_PREFIX='(UUID=|(rd\.)?luks\.uuid=(luks-)?|(rd\.)?luks\.name=|--fs-uuid([ ]+--set(=[A-Za-z_]+)?)?[= ]+|search\.fs_uuid[ ]+|/dev/disk/by-uuid/|/dev/disk/by-partuuid/|cryptomount[ ]+-u[ ]+|cryptouuid/)'
 CL_ID='[0-9a-fA-F]{4,}(-[0-9a-fA-F]{2,}){0,4}'
 # In cl_rewrite_ids the character after the id is captured by the group that
 # follows the prefix; its number is one more than the prefix's own groups
@@ -167,6 +169,10 @@ cl_ids_in_file() {
             luks.name=*)              printf 'luks\t%s\n' "${low#luks.name=}" ;;
             uuid=*)                   printf 'uuid\t%s\n' "${low#uuid=}" ;;
             --fs-uuid*)               printf 'uuid\t%s\n' "${low##*[= ]}" ;;
+            cryptomount*)             printf 'luks\t%s\n' "${low##* }" ;;
+            cryptouuid/*)             m=${low#cryptouuid/}
+                                      [ ${#m} -eq 32 ] && m="${m:0:8}-${m:8:4}-${m:12:4}-${m:16:4}-${m:20:12}"
+                                      printf 'luks\t%s\n' "$m" ;;
         esac
     done
     return 0
@@ -215,6 +221,8 @@ cl_rewrite_ids() { # cl_rewrite_ids ROOT MAPFILE
         # ERE, GNU sed, case-insensitive: prefix kept (\1), id replaced.
         # '~' delimits: the prefix group carries '/' (/dev/disk/by-uuid/).
         expr="${expr}/^[[:space:]]*#/!s~(${CL_REF_PREFIX})${old}($|[^0-9a-fA-F-])~\\1${new}\\${CL_TAIL_GROUP}~gI;"
+        # GRUB's cryptouuid/ device names a LUKS UUID without its dashes
+        case "$old$new" in *-*) expr="${expr}/^[[:space:]]*#/!s~(cryptouuid/)${old//-/}($|[^0-9a-fA-F])~\\1${new//-/}\\2~gI;" ;; esac
     done < "$map"
     [ -n "$expr" ] || return 0
     while IFS=$'\t' read -r kind path; do
@@ -486,6 +494,11 @@ cl_refs_off_target() {
         done < <(cl_find_carriers "$root")
         [ -r "$root/etc/crypttab.initramfs" ] && cl_table_refs "$root/etc/crypttab.initramfs" 2 \
             | while IFS=$'\t' read -r k v; do [ "$k" = PATH ] || printf '/etc/crypttab.initramfs\t%s\t%s\n' "$k" "$v"; done
+        # /etc/crypttab too — Debian's initramfs is built from it — minus the data
+        # drives the boot does not wait for (noauto/nofail). An entry still naming
+        # the old disk's container, with that disk installed, unlocks the OLD root.
+        [ -r "$root/etc/crypttab" ] && awk "$_CL_REF_AWK"' $1 !~ /^#/ && NF >= 2 { o = "," $4 ","; if (o ~ /,(noauto|nofail),/) next; print $1 "\t" ref($2) }' "$root/etc/crypttab" \
+            | while IFS=$'\t' read -r n k v; do [ "$k" = PATH ] || printf '/etc/crypttab(%s)\t%s\t%s\n' "$n" "$k" "$v"; done
         [ -r "$root/etc/fstab" ] && awk "$_CL_REF_AWK"' $1 !~ /^#/ && NF >= 3 && ($2=="/" || $2=="/boot" || $2=="/efi" || $2=="/boot/efi" || $2=="/home") { print $2 "\t" ref($1) }' "$root/etc/fstab" \
             | while IFS=$'\t' read -r mnt k v; do [ "$k" = PATH ] || printf '/etc/fstab(%s)\t%s\t%s\n' "$mnt" "$k" "$v"; done
     } | sort -u | while IFS=$'\t' read -r f rk id; do

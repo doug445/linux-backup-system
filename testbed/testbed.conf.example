@@ -14,5 +14,9 @@ TB_BACKUP_SERIAL=""
 #     bigbox) TB_EXTRA_EXCLUDES="/srv/media/* /var/lib/machines/*" ;;
 # esac
 
+# Optional: how much of the test drive the test bed uses, from its start (GiB,
+# default 100; 0 = the whole drive). The rest stays unpartitioned.
+#TB_TARGET_GIB=100
+
 # Optional: USB transfer size during the test (KiB, 0 = leave the kernel's).
 #TB_SECTORS_KB=128

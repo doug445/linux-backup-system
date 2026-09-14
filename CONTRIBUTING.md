@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.9.0**
+**linux-backup-system 4.0.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -51,9 +51,9 @@ have.
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
 | **Limine** (CachyOS's default) | ⚠️ under test | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
 | **rEFInd** | ⚠️ under test | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
-| **SELinux restore relabel** (Fedora, RHEL) | ⚠️ under test | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
+| **SELinux restore relabel** (Fedora, RHEL — ✅ on Linux Mint, permissive) | ⚠️ under test | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
 | Bare-metal restore — Manjaro, btrfs on LUKS2 (sd-encrypt), systemd-boot + mkinitcpio UKIs, Secure Boot with sbctl keys | ✅ total system restore, booted fully working | a report on another distro or boot layout |
-| Bare-metal restore — Fedora, Debian / Ubuntu / Mint, Arch, EndeavourOS; ext4, LVM-on-LUKS; systemd-boot Type #1, dracut/kernel-install UKIs, shim Secure Boot, GRUB EFI, encrypted argon2id `/boot`, Limine, rEFInd, SELinux relabel; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
+| Bare-metal restore — Fedora, Arch, EndeavourOS; systemd-boot Type #1, dracut/kernel-install UKIs, shim Secure Boot, Limine, rEFInd, SELinux relabel; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
 | **Bare-metal restore — Raspberry Pi, GRUB legacy BIOS, encrypted pbkdf2 `/boot`, openSUSE, and the distros the package map does not know** | ❌ not under test — **most wanted** | the same test bed run on that hardware |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
 

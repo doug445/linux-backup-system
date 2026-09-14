@@ -298,8 +298,31 @@ if [ "$IS_UKI" = true ]; then
     esac
 else
     if command -v update-initramfs >/dev/null 2>&1; then
-        say "Debian family — update-initramfs -k all -c"
-        run update-initramfs -k all -c
+        # One kernel at a time, newest first, and every one of them: `-k all -c`
+        # writes each new image beside the old one and STOPS at the first
+        # failure. On a small /boot (a 732 MiB encrypted one holding four
+        # kernels) the first write hit ENOSPC and every initramfs stayed the
+        # source disk's — whose crypttab unlocks the OLD root. The old image
+        # moves aside to the root filesystem while its replacement is written,
+        # and comes back if the new one fails.
+        say "Debian family — update-initramfs, one kernel at a time (newest first)"
+        aside=/var/tmp/restore-initrd-aside; (( DRY )) || mkdir -p "$aside"
+        # Installed kernels only: /lib/modules keeps directories of kernels
+        # long removed (module leftovers, DKMS builds), and an initramfs for
+        # each of those filled /boot again.
+        while read -r kv; do
+            [ -n "$kv" ] || continue
+            [ -f "/boot/vmlinuz-$kv" ] || { say "skipping $kv — /lib/modules only, no /boot/vmlinuz-$kv"; continue; }
+            img="/boot/initrd.img-$kv"
+            if [ -f "$img" ] && (( ! DRY )); then mv "$img" "$aside/"; fi
+            if run update-initramfs -c -k "$kv"; then
+                (( DRY )) || rm -f "$aside/initrd.img-$kv"
+            else
+                warn "update-initramfs failed for $kv — its previous initramfs is put back (it still describes the SOURCE disk: do not boot this kernel)"
+                (( DRY )) || { rm -f "$img"; [ -f "$aside/initrd.img-$kv" ] && mv "$aside/initrd.img-$kv" "$img"; }
+            fi
+        done < <(printf '%s\n' "${KVERS[@]}" | sort -rV)
+        (( DRY )) || rmdir "$aside" 2>/dev/null || true
     elif command -v dracut >/dev/null 2>&1; then
         say "Fedora family — dracut --regenerate-all --force"
         if ! run dracut --regenerate-all --force; then

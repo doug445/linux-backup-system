@@ -42,7 +42,25 @@ sec() { out ""; out "## $*"; out ""; }
 cmd() { out '```'; out "\$ $*"; timeout 180 bash -c "$*" >&3 2>&1; out '```'; }
 disk_of() { local kn sl pk; kn=$(basename "$(readlink -f "$1")"); while :; do sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1); [ -n "$sl" ] && { kn=$sl; continue; }; pk=$(lsblk -dno PKNAME "/dev/$kn" 2>/dev/null | head -1); [ -n "$pk" ] && { kn=$pk; continue; }; break; done; echo "/dev/$kn"; }
 
-systemctl is-system-running --wait >/dev/null 2>&1 || true
+# publish — the report so far, and this boot's journal, onto the source machine's
+# boot partition, where `testbed.sh collect` (root) reads them. Called as soon as
+# the verdict and health sections exist, and again at the end: the byte
+# comparison takes minutes, and a test drive powered off early still leaves
+# its report behind.
+TS=$(date +%Y%m%d-%H%M%S)
+publish() {
+    local dev m d
+    dev=$(blkid -t "PARTUUID=$REPORT_PARTUUID" -o device 2>/dev/null | head -1)
+    [ -n "$dev" ] || { echo "report partition PARTUUID=$REPORT_PARTUUID not found" >&2; return 1; }
+    m=/run/testbed-report; mkdir -p "$m"
+    mount -o rw,nosuid,nodev,noexec "$dev" "$m" || return 1
+    d="$m/restore-test-$STAMP"; mkdir -p "$d"
+    cp "$R" "$d/boot-report-$TS.md"
+    journalctl -b --no-pager -o short-iso > "$d/journal-$TS.txt" 2>&1
+    sync; umount "$m"
+}
+
+timeout 600 systemctl is-system-running --wait >/dev/null 2>&1 || true   # never block on a boot that does not settle
 out "# Restore test bed — boot report ($HOST, $STAMP)"
 out ""; out "generated $(date -Is), kernel $(uname -r)"
 
@@ -72,6 +90,8 @@ sec "Health"
 cmd "systemctl --failed --no-legend"
 cmd "journalctl -b -p err --no-pager -o short-iso | tail -60"
 
+publish || true
+
 sec "Network, Wi-Fi, Bluetooth"
 cmd "nm-online -t 60 -q && echo 'online' || echo 'NOT online after 60 s'"
 cmd "nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device 2>/dev/null"
@@ -83,14 +103,6 @@ if [ -r /root/restore-test/manifest.tsv.gz ]; then
     python3 /root/restore-test/compare-manifest.py /root/restore-test/manifest.tsv.gz / >&3 2>&1
 else out "(no manifest)"; fi
 
-dev=$(blkid -t "PARTUUID=$REPORT_PARTUUID" -o device 2>/dev/null | head -1)
-if [ -n "$dev" ]; then
-    m=/run/testbed-report; mkdir -p "$m"
-    if mount -o rw,nosuid,nodev,noexec "$dev" "$m"; then
-        d="$m/restore-test-$STAMP"; mkdir -p "$d"
-        cp "$R" "$d/boot-report-$(date +%Y%m%d-%H%M%S).md"
-        journalctl -b --no-pager -o short-iso > "$d/journal-$(date +%Y%m%d-%H%M%S).txt" 2>&1
-        sync; umount "$m"
-    fi
-fi
+out ""; out "_report complete_"
+publish || true
 cp "$R" /root/restore-test/

@@ -57,7 +57,7 @@ grep -q 'backup-diag.sh' <<<"$out" && ok "plan lists backup-diag.sh" || bad "pla
 grep -q 'borg-backup-drive-detach.sh' <<<"$out" && ok "plan lists the detach script" || bad "plan omits borg-backup-drive-detach.sh"
 grep -q 'unbound variable' <<<"$out" && bad "a variable was unbound under set -u: $(grep -m1 'unbound variable' <<<"$out")" || ok "no unbound variable"
 grep -q '\[deps\]' <<<"$out" && ok "dependency step ran (reported, not installed)" || bad "no [deps] line — dependencies were not checked"
-grep -qE 'tray dependencies (present|: )|would install tray' <<<"$out" && ok "tray dependencies probed" || bad "tray dependencies not probed"
+grep -qE 'tray dependencies (present|: |not installed)|would install tray' <<<"$out" && ok "tray dependencies probed" || bad "tray dependencies not probed"
 
 after=$(ls -la /usr/local/sbin /etc/systemd/system 2>/dev/null | sha256sum)
 [ "$before" = "$after" ] && ok "nothing installed" || bad "/usr/local/sbin or /etc/systemd/system changed"
