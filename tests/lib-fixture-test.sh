@@ -183,7 +183,10 @@ expect "absent mount reports 0% free" 0 "$(bx_free_pct)"
 echo "== backup sources"
 BACKUP_EXTRA_SOURCES=""
 first=$(bx_backup_sources | head -1); expect "root first" / "$first"
-m=$(findmnt -rno TARGET -t tmpfs 2>/dev/null | grep -v '^/$' | head -1)
+# A STABLE mount: the first tmpfs in the table was sometimes a short-lived
+# /run/credentials/<unit> mount that systemd removed between the lookup and
+# the check (an intermittent failure under a busy system).
+m=""; for c in /dev/shm /run /tmp; do mountpoint -q "$c" 2>/dev/null && { m=$c; break; }; done
 if [ -n "$m" ]; then
     BACKUP_EXTRA_SOURCES="$m"
     if bx_backup_sources | grep -qx "$m"; then ok "extra mounted source included ($m)"; else bad "extra source $m missing"; fi

@@ -681,6 +681,10 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
         IFS=$'\t' read -r c_kind c_old < <(cl_crypttab_ref "$CRYPTTAB" "$_name") || true
         case "$c_kind" in UUID|PARTUUID) ;; *) continue ;; esac
         cl_ref_exists "$c_kind" "$c_old" && continue      # still present: a second drive carried over
+        if cl_crypttab_optional "$CRYPTTAB" "$_name"; then  # noauto/nofail: a data drive, not the boot
+            log "  $_name: optional data drive (noauto/nofail), not connected here — left as-is"
+            continue
+        fi
         _unmatched_entries+=("$_name")
     done < <(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CRYPTTAB")
     if [ ${#_unmatched_entries[@]} -eq 1 ] && [ ${#_unmatched_maps[@]} -eq 1 ]; then
@@ -820,7 +824,10 @@ n_carriers=$(cl_find_carriers "$TARGET" | wc -l)
 log "  carriers found under $TARGET: $n_carriers"
 cl_find_carriers "$TARGET" | while IFS=$'\t' read -r k f; do log "    $k: ${f#"$TARGET"}"; done
 while IFS=$'\t' read -r k f; do log "  rewrote $k: ${f#"$TARGET"}"; done < <(cl_rewrite_ids "$TARGET" "$ID_MAP")
-left=$(cl_carrier_mismatches "$TARGET")
+# The new root/home/boot/ESP filesystem ids are declared by the mounts
+# themselves even where fstab names a mapper path (and a swapfile's resume=
+# names the root filesystem): not "undeclared".
+left=$(CL_EXTRA_EXPECTED="${ROOT_UUID:-} ${HOME_UUID:-} ${BOOT_UUID:-} ${EFI_UUID:-}" cl_carrier_mismatches "$TARGET")
 if [ -n "$left" ]; then
     warn "command-line ids not declared by the restored fstab/crypttab (check before rebooting):"
     while IFS=$'\t' read -r k f rk id; do warn "    $k ${f#"$TARGET"}: $rk $id"; done <<<"$left"
@@ -957,15 +964,21 @@ done < <(cl_table_refs "$FSTAB" 1)
 # Verify crypttab references
 if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
     log "Verifying crypttab references..."
-    while IFS=$'\t' read -r kind val; do
+    while read -r _cname; do
+        IFS=$'\t' read -r kind val < <(cl_crypttab_ref "$CRYPTTAB" "$_cname") || continue
         [ "$kind" = PATH ] && continue
         if cl_ref_exists "$kind" "$val"; then
-            log "  OK: LUKS $kind=$val found"
+            log "  OK: LUKS $_cname $kind=$val found"
+        elif cl_crypttab_optional "$CRYPTTAB" "$_cname"; then
+            # A data drive the boot does not wait for (noauto/nofail): not
+            # connected to this machine is normal after a restore.
+            warn "  $_cname $kind=$val not connected — optional (noauto/nofail), the boot does not need it"
+            WARNINGS=$((WARNINGS + 1))
         else
-            error "  FAIL: LUKS $kind=$val NOT FOUND!"
+            error "  FAIL: LUKS $_cname $kind=$val NOT FOUND — the boot waits for it"
             ERRORS=$((ERRORS + 1))
         fi
-    done < <(cl_table_refs "$CRYPTTAB" 2)
+    done < <(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CRYPTTAB")
 fi
 
 # Verify every kernel command-line carrier names a device that exists NOW
@@ -992,6 +1005,36 @@ if [ -n "$offt" ]; then
 else
     log "  OK: root, /boot, ESP, /home, crypttab.initramfs and every command line resolve onto the target disk(s)"
 fi
+# Unified kernel images carry their command line inside a signed binary; no
+# file rewrite reaches it. The generator's images were rebuilt above; one it
+# does not know (a hand-built rescue image, a leftover preset) still names the
+# old disk — and with that disk installed, boots it.
+log "Verifying the command line embedded in every unified kernel image..."
+_uki_n=0
+while read -r _uki; do
+    [ -n "$_uki" ] || continue
+    _uki_n=$((_uki_n + 1))
+    _ucl=$(cl_uki_cmdline "$_uki")
+    if [ -z "$_ucl" ]; then log "  ${_uki#"$TARGET"}: no embedded command line (it takes the loader's)"; continue; fi
+    _utmp=$(mktemp); printf '%s\n' "$_ucl" > "$_utmp"
+    _ubad=""
+    while IFS=$'\t' read -r rk id; do
+        [ -n "$id" ] || continue
+        if ! cl_id_exists "$rk" "$id"; then _ubad="$_ubad $rk $id (not present)"
+        else
+            _ud=$(cl_ref_disk "$rk" "$id")
+            case " $TARGET_DISKS " in *" $_ud "*) ;; *) [ -n "$_ud" ] && _ubad="$_ubad $rk $id (on $_ud)" ;; esac
+        fi
+    done < <(cl_ids_in_file "$_utmp")
+    rm -f "$_utmp"
+    if [ -n "$_ubad" ]; then
+        error "  FAIL: ${_uki#"$TARGET"} embeds a command line naming:$_ubad — rebuild it for this disk or remove it; the boot menu offers it"
+        ERRORS=$((ERRORS + 1))
+    else
+        log "  OK: ${_uki#"$TARGET"}"
+    fi
+done < <(cl_ukis "$TARGET")
+[ "$_uki_n" -gt 0 ] || log "  no unified kernel images"
 
 # Verify GRUB config UUIDs
 for grub_cfg in "$TARGET/boot/grub/grub.cfg" "$TARGET/boot/grub2/grub.cfg"; do

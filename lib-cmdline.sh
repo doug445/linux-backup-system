@@ -258,7 +258,9 @@ cl_expected_ids() {
 # ---------------------------------------------------------------------------
 cl_carrier_mismatches() {
     local root="${1%/}" expected kind path rk id
-    expected=" $(cl_expected_ids "$root" | tr '\n' ' ') "
+    # CL_EXTRA_EXPECTED: ids declared by other means — the root filesystem when
+    # fstab mounts it by mapper path, the one a swapfile's resume= names.
+    expected=" $(cl_expected_ids "$root" | tr '\n' ' ') $(printf '%s' "${CL_EXTRA_EXPECTED:-}" | tr '[:upper:]' '[:lower:]') "
     while IFS=$'\t' read -r kind path; do
         while IFS=$'\t' read -r rk id; do
             [ -n "$id" ] || continue
@@ -491,5 +493,66 @@ cl_refs_off_target() {
         [ -n "$d" ] || continue
         case "$disks" in *" $d "*) ;; *) printf '%s\t%s\t%s\t%s\n' "$f" "$rk" "$id" "$d" ;; esac
     done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# cl_crypttab_optional FILE NAME — true when crypttab entry NAME carries noauto
+# or nofail: a data drive the boot does not wait for. After a restore onto a
+# different machine or disk it is normally not connected, and that is not a
+# boot failure.
+# ---------------------------------------------------------------------------
+cl_crypttab_optional() {
+    [ -r "$1" ] || return 1
+    awk -v n="$2" '$1 !~ /^#/ && $1 == n { o = "," $4 ","; if (o ~ /,(noauto|nofail),/) opt = 1; found = 1; exit } END { exit !(found && opt) }' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# cl_uki_cmdline FILE — the .cmdline section a Unified Kernel Image carries,
+# NUL-stripped, on one line; nothing when the file is not a PE image or has no
+# .cmdline. Read by python3 from the PE section table (no binutils needed on a
+# live USB), objcopy as the fallback.
+#
+# A UKI is a carrier no file rewrite reaches: its command line is inside a
+# signed binary. The restore rebuilds the UKIs its generator knows about; a
+# hand-built one (a rescue image, one from an old preset) keeps the old disk's
+# ids and, with the old disk still installed, boots it.
+# ---------------------------------------------------------------------------
+cl_uki_cmdline() {
+    local f="$1" out
+    [ -r "$f" ] || return 0
+    if command -v python3 >/dev/null 2>&1; then
+        out=$(python3 - "$f" 2>/dev/null <<'PY'
+import struct, sys
+with open(sys.argv[1], "rb") as fh:
+    d = fh.read(4096)
+    if d[:2] != b"MZ": sys.exit(0)
+    pe = struct.unpack_from("<I", d, 0x3c)[0]
+    fh.seek(pe); h = fh.read(24)
+    if h[:4] != b"PE\0\0": sys.exit(0)
+    nsec, = struct.unpack_from("<H", h, 6); optsz, = struct.unpack_from("<H", h, 20)
+    fh.seek(pe + 24 + optsz); tab = fh.read(40 * nsec)
+    for i in range(nsec):
+        name, vsize, _va, rawsz, rawptr = struct.unpack_from("<8sIIII", tab, 40 * i)
+        if name.rstrip(b"\0") == b".cmdline":
+            fh.seek(rawptr)
+            sys.stdout.write(fh.read(min(vsize or rawsz, rawsz)).replace(b"\0", b"").decode("utf-8", "replace").strip())
+            break
+PY
+)
+    elif command -v objcopy >/dev/null 2>&1; then
+        local t; t=$(mktemp); objcopy -O binary --only-section=.cmdline "$f" "$t" 2>/dev/null && out=$(tr -d '\0' < "$t"); rm -f "$t"
+    fi
+    [ -n "${out:-}" ] && printf '%s\n' "$out" | tr '\n' ' ' | sed 's/ *$//'
+    echo
+    return 0
+}
+
+# cl_ukis ROOT — every UKI under ROOT's boot directories, one path per line.
+cl_ukis() {
+    local root="${1%/}" d f
+    for d in /boot /efi /boot/efi; do
+        for f in "$root$d"/EFI/Linux/*.efi "$root$d"/EFI/Linux/*.EFI; do [ -f "$f" ] && printf '%s\n' "$f"; done
+    done | sort -u
     return 0
 }
