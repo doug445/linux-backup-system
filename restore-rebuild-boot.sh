@@ -296,6 +296,36 @@ if [ "$IS_UKI" = true ]; then
             fi ;;
         *) warn "no mkinitcpio, dracut or kernel-install — cannot regenerate UKIs" ;;
     esac
+    # kernel-install and dracut name each image after its kernel version and
+    # rebuild only the installed kernels. Anything else on the boot partitions
+    # still embeds the SOURCE disk's command line, and the loader menu offers
+    # it: a rescue image (Fedora's <token>-0-rescue.efi — its plugin writes
+    # Type #1 rescue entries only, so it is rebuilt here with dracut), and the
+    # images of kernels removed since (a package removal that left its UKI;
+    # no modules, nothing to rebuild from — moved off the boot partitions).
+    case "$UKI_TOOL" in kernel-install|dracut)
+        _newest=$(printf '%s\n' "${KVERS[@]}" | sort -V | tail -1)
+        _stale=/var/lib/linux-backup-system/stale-ukis
+        for _u in /boot/EFI/Linux/*.efi /efi/EFI/Linux/*.efi /boot/efi/EFI/Linux/*.efi; do
+            [ -f "$_u" ] || continue
+            _b=$(basename "$_u"); _known=false
+            for kv in "${KVERS[@]}"; do case "$_b" in *"$kv"*) _known=true; break ;; esac; done
+            [ "$_known" = true ] && continue
+            case "$_b" in
+                *rescue*)
+                    if [ -n "$_newest" ] && command -v dracut >/dev/null 2>&1 && ensure_kernel_cmdline; then
+                        say "rescue image $_u: rebuilt for this disk (kernel $_newest, no-hostonly)"
+                        _cl=$(tr '\n' ' ' < /etc/kernel/cmdline 2>/dev/null || tr '\n' ' ' < /usr/lib/kernel/cmdline)
+                        run rm -f "$_u"
+                        run dracut --force --uefi --no-hostonly --kver "$_newest" --kernel-cmdline "$_cl" "$_u" \
+                            || warn "rescue image rebuild failed — $_u is gone from the menu; rebuild it by hand: dracut --uefi --no-hostonly --kver $_newest $_u"
+                        continue
+                    fi ;;
+            esac
+            warn "$_u belongs to no installed kernel (${KVERS[*]}) and cannot be rebuilt — moved to $_stale/ (it names the source disk)"
+            run mkdir -p "$_stale"; run mv -f "$_u" "$_stale/"
+        done ;;
+    esac
 else
     if command -v update-initramfs >/dev/null 2>&1; then
         # One kernel at a time, newest first, and every one of them: `-k all -c`
@@ -380,6 +410,20 @@ if [ "$USES_GRUB" = true ]; then
             # the restore script.
             say "Fedora family with shim on the ESP — keeping the signed GRUB image, not running $gi"
             say "(if the ESP was empty or damaged: dnf reinstall shim-x64 grub2-efi-x64 restores it)"
+            # The stub's one job is to find the filesystem holding grub2/grub.cfg.
+            # The id rewrite maps only ids the source disk had: a stub that was
+            # already dead on the source (left from an earlier /boot) stays dead.
+            # Point it at the restored filesystem that holds grub2/ instead.
+            _stub="$edir/EFI/$bid/grub.cfg"
+            if [ -f "$_stub" ] && [ -f /boot/grub2/grub.cfg ]; then
+                if mountpoint -q /boot; then _want=$(findmnt -no UUID /boot); _pfx='($dev)/grub2'
+                else _want=$(findmnt -no UUID /); _pfx='($dev)/boot/grub2'; fi
+                _have=$(sed -nE 's/.*search .*--fs-uuid --set=dev ([^ ]+).*/\1/p' "$_stub" | head -1)
+                if [ -n "$_want" ] && [ -n "$_have" ] && [ "$_have" != "$_want" ]; then
+                    say "ESP GRUB stub named fs uuid $_have (not this disk's) — pointed at $_want, the filesystem holding grub2/"
+                    runsh "sed -i -E 's/(search .*--fs-uuid --set=dev )$_have/\\1$_want/; s|^set prefix=.*|set prefix=$_pfx|' '$_stub'"
+                fi
+            fi
         elif [ -n "$gi" ] && [ "$NO_NVRAM" = 1 ]; then
             say "RESTORE_NO_NVRAM=1: GRUB installed without a firmware entry, at the removable-media path"
             run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck --no-nvram

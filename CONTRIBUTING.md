@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 4.0.0**
+**linux-backup-system 4.0.1**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -39,7 +39,7 @@ have.
 | Setup | Status | What to confirm |
 |---|---|---|
 | Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint, Arch / Manjaro / EndeavourOS | ✅ | still worth a report on a different boot layout — the machines are listed under *Verified on* in the README |
-| **openSUSE** | ❌ | `zypper` package names; a real backup + verify pass |
+| **openSUSE** | ❌ — **contributions wanted** | `zypper` package names; a real backup + verify pass |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — a package manager the map does not know | ❌ **most wanted** | the family token, its non-interactive install command, the package names for borg / Back In Time / Timeshift / the tray, a synthetic `os-release` fixture, and a real backup + verify pass |
 | btrfs root → snapper + send/receive replicas | ✅ | |
 | ext4 root → Timeshift layer | ✅ | |
@@ -51,9 +51,10 @@ have.
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
 | **Limine** (CachyOS's default) | ⚠️ under test | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
 | **rEFInd** | ⚠️ under test | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
-| **SELinux restore relabel** (Fedora, RHEL — ✅ on Linux Mint, permissive) | ⚠️ under test | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
+| **SELinux restore relabel** — ✅ on Linux Mint (permissive) and Fedora (enforcing); RHEL not yet | ✅ | a report from RHEL or another SELinux distro: the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
 | Bare-metal restore — Manjaro, btrfs on LUKS2 (sd-encrypt), systemd-boot + mkinitcpio UKIs, Secure Boot with sbctl keys | ✅ total system restore, booted fully working | a report on another distro or boot layout |
-| Bare-metal restore — Fedora, Arch, EndeavourOS; systemd-boot Type #1, dracut/kernel-install UKIs, shim Secure Boot, Limine, rEFInd, SELinux relabel; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
+| Bare-metal restore — Fedora 44, btrfs on LUKS2 (dracut), systemd-boot + kernel-install UKIs, SELinux enforcing | ✅ total system restore, booted fully working | a report on RHEL or another dracut distro |
+| Bare-metal restore — Arch, EndeavourOS; systemd-boot Type #1, shim Secure Boot, Limine, rEFInd; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
 | **Bare-metal restore — Raspberry Pi, GRUB legacy BIOS, encrypted pbkdf2 `/boot`, openSUSE, and the distros the package map does not know** | ❌ not under test — **most wanted** | the same test bed run on that hardware |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
 
@@ -105,9 +106,18 @@ Open an issue with the **New Linux setup** template, titled
    sudo backintime-backup.sh --dry-run
    sudo timeshift-backup.sh --dry-run        # non-btrfs roots
    sudo borg-backup.sh                       # a real archive
-   sudo backup-verify.sh; echo "exit $?"     # 0 = restore-ready
+   sudo backup-verify.sh; echo "exit $?"     # 0 = restore-ready; section 7 names leftovers
    ```
 3. anything you had to fix by hand — **that is the actual finding.**
+4. for a **Bare-metal restore** row: a restore test bed run on a spare drive —
+   `sudo TB_WIPE=<serial> testbed/testbed.sh all`, boot the test drive,
+   `sudo testbed/testbed.sh collect` — and from its state directory
+   (`/var/lib/linux-backup-testbed/<host>-<stamp>/`) attach `LEDGER.md`,
+   `verdict`, `byte-comparison.md` and `boot-report/boot-report-*.md`. Identify
+   drives by the serial udev reports (`udevadm info -q property -n /dev/sdX |
+   grep ID_SERIAL_SHORT`): behind some USB bridges `lsblk` shows only zeros. If
+   the backup drive is shared with another machine, say so — the test bed writes
+   only its own `borg-testbed-<host>` repository there.
 
 A dry-run-only report is useful too, and costs nothing: it exercises all of
 detection without touching the drive. Say so in the title if that is what it

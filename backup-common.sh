@@ -40,7 +40,7 @@
 # shellcheck disable=SC2034  # read by every script that sources this file
 # Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
 [ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
-BX_VERSION="4.0.0"
+BX_VERSION="4.0.1"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -425,8 +425,10 @@ bx_replica_send() {
         echo "could not snapshot $src$(awk 'NR>1 && $2=="file"{f=1} END{if(f) print " (an ACTIVE SWAPFILE on a subvolume makes the kernel refuse to snapshot it)"}' /proc/swaps 2>/dev/null)"
         return 1
     fi
-    btrfs send "${pargs[@]}" "$ldir/$name" 2>>"$logf" | btrfs receive "$ddir/" >>"$logf" 2>&1
+    local rlog; rlog=$(mktemp /tmp/bx-receive.XXXXXX)
+    btrfs send "${pargs[@]}" "$ldir/$name" 2>>"$logf" | btrfs receive "$ddir/" >"$rlog" 2>&1
     rc=("${PIPESTATUS[@]}")
+    cat "$rlog" >>"$logf"
     # sed, not grep -P: a grep without PCRE (busybox, --disable-perl-regexp)
     # returned "" and every replica just written was deleted as incomplete.
     ro=$(btrfs property get "$ddir/$name" ro 2>/dev/null | sed -n 's/^ro=//p')
@@ -434,10 +436,17 @@ bx_replica_send() {
         for d in "$ldir/${label}_"[0-9]*; do
             [ -d "$d" ] && [ "$d" != "$ldir/$name" ] && btrfs subvolume delete "$d" >>"$logf" 2>&1
         done
+        rm -f "$rlog"
         if [ -n "$parent" ]; then echo "incremental from $parent"; else echo "full"; fi
         return 0
     fi
-    echo "send rc=${rc[0]:-?} receive rc=${rc[1]:-?} ro=${ro:-missing}${parent:+ (incremental from $parent)}"
+    # An SELinux type the loaded policy no longer knows (a removed policy module
+    # leaves its label on the files) is refused by receive with EINVAL: say so.
+    local hint; hint=$(awk -v src="${src%/}" '/^ERROR: lsetxattr .* security\.selinux=.* failed: Invalid argument$/ {
+            sub(/^ERROR: lsetxattr /, ""); sub(/ failed: Invalid argument$/, ""); n=index($0, " security.selinux=")
+            printf " — %s/%s carries the SELinux label %s, a type the loaded policy does not know (its policy module was removed): relabel it with restorecon -R %s/%s", src, substr($0,1,n-1), substr($0,n+18), src, substr($0,1,n-1); exit }' "$rlog")
+    rm -f "$rlog"
+    echo "send rc=${rc[0]:-?} receive rc=${rc[1]:-?} ro=${ro:-missing}${parent:+ (incremental from $parent)}$hint"
     [ -d "$ddir/$name" ] && btrfs subvolume delete "$ddir/$name" >>"$logf" 2>&1
     btrfs subvolume delete "$ldir/$name" >>"$logf" 2>&1
     return 1
@@ -692,6 +701,8 @@ bx_pkg_for() {
         bootctl|systemd-inhibit|udevadm) echo systemd ;;
         findmnt|lsblk|blkid|wipefs|sfdisk|mountpoint) echo util-linux ;;
         awk)        echo gawk ;;
+        sgdisk)     case "$fam" in arch|suse) echo gptfdisk ;; *) echo gdisk ;; esac ;;
+        mkfs.vfat)  echo dosfstools ;;
         timeshift)  echo timeshift ;;
         snapper)    echo snapper ;;
         mount.ecryptfs) echo ecryptfs-utils ;;
@@ -752,4 +763,133 @@ bx_ensure_deps() {
     fi
     echo "[deps] installed OK: ${pkgs[*]}"
     return 0
+}
+
+# --- Live-system leftovers a restore carries over --------------------------------
+# Three things found on a real Fedora host (restore test bed, 2026-09-14): each
+# is harmless on the running system and each broke or would break a restore.
+# backup-verify.sh reports them (section 7) and repairs them with --fix.
+#
+# BX_ROOT (default empty = the live system) prefixes every path, for fixtures.
+
+# bx_orphan_ukis — unified kernel images named after a kernel version that is no
+# longer installed (no /lib/modules/<version>): a kernel package removal that left
+# its image behind. The loader menu still offers it; a restore cannot rebuild it
+# (nothing to rebuild from) and it embeds the source disk's command line. Rescue
+# images and images named without a version (mkinitcpio's arch-linux.efi) are
+# not judged. One path per line.
+bx_orphan_ukis() {
+    local r="${BX_ROOT:-}" f b kv known d kvers
+    kvers=$(ls -1 "$r/lib/modules" 2>/dev/null)
+    [ -n "$kvers" ] || return 0     # no kernels to judge against
+    for d in /boot /efi /boot/efi; do
+        for f in "$r$d"/EFI/Linux/*.efi "$r$d"/EFI/Linux/*.EFI; do
+            [ -f "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in *rescue*) continue ;; esac
+            grep -qE '[0-9]+\.[0-9]+(\.[0-9]+)?' <<<"$b" || continue
+            known=0
+            while read -r kv; do [ -n "$kv" ] && case "$b" in *"$kv"*) known=1; break ;; esac; done <<<"$kvers"
+            [ "$known" = 1 ] || printf '%s\n' "$f"
+        done
+    done | sort -u
+    return 0
+}
+
+# bx_grub_home_uuid — the filesystem GRUB's own grub.cfg lives on, and the prefix
+# the ESP stub needs to reach it: "UUID<TAB>PREFIXDIR". Empty when this host has
+# no grub.cfg under /boot.
+bx_grub_home_uuid() {
+    local g
+    for g in grub2 grub; do
+        [ -f "${BX_ROOT:-}/boot/$g/grub.cfg" ] || continue
+        if mountpoint -q /boot 2>/dev/null; then printf '%s\t/%s\n' "$(findmnt -no UUID /boot)" "$g"
+        else printf '%s\t/boot/%s\n' "$(findmnt -no UUID /)" "$g"; fi
+        return 0
+    done
+    return 0
+}
+
+# bx_dead_grub_stubs — ESP GRUB stubs (EFI/<distro>/grub.cfg, the file the signed
+# grubx64.efi reads first) whose `search --fs-uuid` names a filesystem that does
+# not exist: left from an earlier /boot. The firmware entry for that loader lands
+# at a GRUB prompt, and a restore's id rewrite cannot map an id the source never
+# had. "STUB<TAB>DEAD-UUID<TAB>WANTED-UUID" (WANTED empty: no grub.cfg to point at).
+bx_dead_grub_stubs() {
+    local r="${BX_ROOT:-}" f have want
+    want=$(bx_grub_home_uuid | cut -f1)
+    for f in "$r"/boot/efi/EFI/*/grub.cfg "$r"/efi/EFI/*/grub.cfg "$r"/boot/EFI/*/grub.cfg; do
+        [ -f "$f" ] || continue
+        case "$f" in */EFI/BOOT/*|*/EFI/Boot/*) continue ;; esac
+        [ "$(wc -l < "$f")" -le 40 ] || continue
+        have=$(sed -nE 's/^[[:space:]]*search(\.fs_uuid| .*--fs-uuid( --set=[a-z]+)?) ([0-9A-Fa-f-]+).*/\3/p' "$f" | head -1)
+        [ -n "$have" ] || continue
+        if [ -n "${BX_UUID_EXISTS:-}" ]; then grep -qixF "$have" "$BX_UUID_EXISTS" && continue
+        else blkid -U "$have" >/dev/null 2>&1 && continue; fi
+        printf '%s\t%s\t%s\n' "$f" "$have" "$want"
+    done
+    return 0
+}
+
+# bx_fix_grub_stub STUB DEAD WANTED — point the stub at the filesystem holding grub.cfg
+bx_fix_grub_stub() {
+    local f="$1" have="$2" want="$3" pfx
+    [ -f "$f" ] && [ -n "$have" ] && [ -n "$want" ] || return 1
+    pfx=$(bx_grub_home_uuid | cut -f2)
+    cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)" 2>/dev/null
+    sed -i -E "s/$have/$want/g" "$f" || return 1
+    # Fedora form: set prefix=($dev)/grub2 — the directory on that filesystem
+    [ -n "$pfx" ] && sed -i -E "s|^([[:space:]]*set prefix=\(\\\$dev\)).*|\1$pfx|" "$f"
+    return 0
+}
+
+# bx_unlabeled_paths — the topmost paths in the backup set whose SELinux label the
+# loaded policy reports as unlabeled_t: files that never got a label, and files
+# carrying a type no loaded module defines (a removed policy module — snapd's —
+# leaves its type on the files). The second kind makes `btrfs receive` refuse the
+# whole replica ("lsetxattr ... Invalid argument"). Nothing when SELinux is off.
+bx_unlabeled_paths() {
+    command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null || return 0
+    local src p srcs bm="${BACKUP_MOUNT:-/mnt/backup}"
+    srcs=$(bx_backup_sources)
+    while read -r src; do
+        [ -d "$src" ] || continue
+        find "$src" -xdev \( -path "$bm" -o -path "$bm/*" \) -prune -o -context '*:unlabeled_t:*' -print -prune 2>/dev/null
+    done <<<"$srcs" | sort -u | while read -r p; do
+        # -xdev still lists a mountpoint of another filesystem (a backup drive at
+        # /mnt/backup, a USB stick): its label is that filesystem's root, not ours.
+        if [ "$p" != / ] && mountpoint -q "$p" 2>/dev/null && ! grep -qxF "$p" <<<"$srcs"; then continue; fi
+        printf '%s\n' "$p"
+    done
+    return 0
+}
+
+# bx_grub_missing_files — files /etc/default/grub names (GRUB_FONT, GRUB_THEME,
+# GRUB_BACKGROUND) that do not exist. grub-mkconfig aborts on a missing font
+# ("failed to get canonical path of ...pf2") and leaves only grub.cfg.new: GRUB
+# on the host is then half-written, and a restore's GRUB rebuild fails the same
+# way. Judged only where GRUB is in use (a grub.cfg under /boot): a host that
+# boots another loader keeps the GRUB packages and their config, and nothing
+# should be built or regenerated for a GRUB it never runs. "VAR<TAB>PATH" per line.
+bx_grub_missing_files() {
+    local r="${BX_ROOT:-}" v p
+    [ -f "$r/etc/default/grub" ] || return 0
+    [ -f "$r/boot/grub2/grub.cfg" ] || [ -f "$r/boot/grub/grub.cfg" ] || return 0
+    for v in GRUB_FONT GRUB_THEME GRUB_BACKGROUND; do
+        p=$(sed -nE "s/^[[:space:]]*$v=[\"']?([^\"']*)[\"']?[[:space:]]*$/\1/p" "$r/etc/default/grub" | tail -1)
+        [ -n "$p" ] && [ ! -e "$r$p" ] && printf '%s\t%s\n' "$v" "$p"
+    done
+    return 0
+}
+
+# bx_fix_grub_font PATH — build a missing GRUB_FONT .pf2 from the installed TTF
+# of the same name (LiberationMono.pf2 <- LiberationMono-Regular.ttf).
+bx_fix_grub_font() {
+    local pf2="$1" name ttf mk
+    mk=$(command -v grub2-mkfont || command -v grub-mkfont) || return 1
+    name=$(basename "$pf2" .pf2)
+    ttf=$(find /usr/share/fonts /usr/local/share/fonts -type f \( -iname "$name.ttf" -o -iname "$name-Regular.ttf" -o -iname "$name.otf" -o -iname "$name-Regular.otf" \) 2>/dev/null | head -1)
+    [ -z "$ttf" ] && command -v fc-match >/dev/null 2>&1 && ttf=$(fc-match -f '%{file}' "$name" 2>/dev/null)
+    [ -n "$ttf" ] && [ -f "$ttf" ] || return 1
+    mkdir -p "$(dirname "$pf2")" && "$mk" -s 16 -o "$pf2" "$ttf"
 }

@@ -167,16 +167,17 @@ column, use the suite for testing only — not in production.**
 | EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, SATA SSD) | ext4 root on LUKS2, plain vfat `/boot` (XBOOTLDR) + ESP at `/efi`, systemd-boot Type #1 entries, dracut; USB NVMe backup drive | deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL; the two warnings are the deliberately unencrypted test drive and a 477 GiB drive under the 2x recommendation) — 2026-09-14, 3.7.0 |
 | Manjaro (x86_64) | 2019 ASUS ZenBook UX534FTC (i7-10510U, 16 GB RAM, 2 TB NVMe) | btrfs root (`@`/`@home`/`@cache`/`@log`, snapper, swapfile) on LUKS2 opened by sd-encrypt, XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs from mkinitcpio, Secure Boot with sbctl keys; 2 TB USB SATA SSD backup drive (LUKS2) | **total system restore ✅ — success**, 2026-09-14, 3.9.0: restored onto a blank 2 TB USB NVMe and booted into a fully working system with Secure Boot on (Wi-Fi, DNS, Bluetooth up), the original disk untouched. Backups: deploy over a retired borgmatic install, unlock-on-connect, incremental btrfs replicas, borg archive, LUKS headers |
 | Linux Mint 22.3 (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM) — **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**, each on its own SATA SSD; the Mint SSD is the one restored | ext4 root on LVM-on-LUKS2 (`mint-vg`, root + swap LVs, unlocked in the initramfs by a keyfile), encrypted LUKS2 argon2id `/boot` opened by GRUB 2.14 (EFI), ESP at `/boot/efi`, standard `vmlinuz` + `initramfs` from initramfs-tools, SELinux permissive; 2 TB USB SATA SSD backup drive (LUKS2, btrfs) | **total system restore ✅ — success**, 2026-09-14, 4.0.0: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) and booted into a fully working system (Wi-Fi, DNS, login screen; SELinux relabel boot), `testbed.sh collect` → `VERDICT: PASS`, the other two OSes' disks and the original Mint disk untouched |
+| Fedora 44 Workstation (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, GeForce 840M) — the same **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**; the Fedora SSD is the one restored | btrfs root (`root` + `home` subvolumes) on LUKS2 argon2id unlocked in the initramfs by dracut + systemd-cryptsetup (`rd.luks.uuid=`), vfat XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs built by kernel-install (plus a dracut rescue UKI), Secure Boot off, **SELinux enforcing**, Cinnamon on X11; 2 TB USB SATA SSD backup drive (LUKS2, btrfs, shared with another machine) | **total system restore ✅ — success**, 2026-09-14, 4.0.1: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) from a functional test archive (35.6 GB, 587,461 files) and booted into a fully working system (Wi-Fi, DNS, login screen; SELinux enforcing relabel boot), `testbed.sh collect` → `VERDICT: PASS`, 99.99 % of files restored with the archived size, the other two OSes' disks and the original Fedora disk untouched. Backups: deploy over a hand-written pre-suite borg setup, borg archive, LUKS headers |
 
 **Distros**
 
 | Distro | Backup + verify | Bare-metal restore |
 |---|:--:|:--:|
-| Fedora | ✅ | ⚠️ |
+| Fedora | ✅ | ✅ |
 | Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ | ✅ over a fresh Asahi install (never bare metal — see the FAQ) |
 | Debian / Ubuntu / Linux Mint | ✅ | ✅ |
 | Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro, ⚠️ EndeavourOS, ❌ Arch |
-| openSUSE (Leap / Tumbleweed) | ❌ | ❌ not under test |
+| openSUSE (Leap / Tumbleweed) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ not under test |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ not under test |
 
 **Root filesystems** (this picks the local-snapshot engine — see Layers)
@@ -195,7 +196,7 @@ column, use the suite for testing only — not in production.**
 |---|:--:|:--:|
 | systemd-boot (Type #1 entries, no UKI) | ✅ | ⚠️ |
 | systemd-boot + UKI (unified kernel image), rebuilt by mkinitcpio presets | ✅ | ✅ |
-| UKI rebuilt by dracut or kernel-install | ✅ | ⚠️ |
+| UKI rebuilt by dracut or kernel-install | ✅ | ✅ |
 | **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed | ✅ | ✅ |
 | Secure Boot through shim (Fedora, Ubuntu) | ✅ | ⚠️ |
 | GRUB (EFI) | ✅ | ✅ |
@@ -209,7 +210,7 @@ column, use the suite for testing only — not in production.**
 | Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ not under test |
 | rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ not under test |
 | SELinux restore relabel on Linux Mint (SELinux permissive) — `/.autorelabel` on the restored system: the first boot relabeled every file and rebooted once, then booted clean | ✅ | ✅ |
-| SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ⚠️ | ⚠️ |
+| SELinux restore relabel on Fedora (SELinux enforcing) — `/.autorelabel` on the restored system: the first boot relabeled every file and rebooted once, then booted clean and enforcing | ✅ | ✅ |
 | Restore from an **installed system** onto a second disk, the original disk still installed — no NVRAM writes, nothing written to the original disk | — | ✅ |
 | Restore from a live USB | — | ⚠️ |
 | Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ | ✅ |
@@ -233,7 +234,7 @@ wiped on every run.
 cp testbed/testbed.conf.example /mnt/backup/testbed/testbed.conf   # the two drives' serials, once
 sudo testbed/testbed.sh plan                                # the test drive laid out like THIS machine
 sudo TB_WIPE=<test-drive-serial> testbed/testbed.sh all     # fingerprint, wipe, partition, LUKS, backup, restore, logger
-# reboot, pick the test drive's "UEFI:" entry in the firmware menu (it unlocks itself), wait five minutes, boot back
+# reboot, pick the test drive's "UEFI:" entry in the firmware menu (passphrase: test, unless finish says it unlocks itself), wait five minutes, boot back
 sudo testbed/testbed.sh collect                             # boot report, fingerprint diff, byte comparison → VERDICT
 sudo testbed/testbed.sh revert                              # undo every test-only change
 ```
@@ -247,7 +248,10 @@ since the host holds the real one, and renamed by `finish`), the btrfs
 subvolumes fstab mounts. The test archive goes to
 its own repository (`borg-testbed-<host>`), keeping every home's configuration,
 keys, shell setup and Claude Code state but no bulk data; the host config is not
-touched. The restore runs from a frozen copy of the suite. `fingerprint`
+touched, and no btrfs replica is written or pruned — the backup drive can be
+another machine's production drive, and replicas share one directory pruned by
+label. `testbed.conf` is copied into the run's state directory, so `collect`
+finds it with the backup drive unplugged. The restore runs from a frozen copy of the suite. `fingerprint`
 records the machine's own disks — partition tables, exact LUKS headers, every
 file on `/boot` and the ESP, firmware boot entries — before and after, and the
 verdict fails if anything but the expected (systemd-boot's random seed, a
@@ -256,10 +260,12 @@ report and journal on the host's unencrypted boot partition, the one place it
 writes — as soon as the verdict and health sections exist, and again when the
 byte comparison is done (`collect` fails a partial report); every
 step is recorded in a ledger with its revert. Test drives always get the
-passphrase `test` and boot unattended: containers the restored crypttab opens by
-keyfile get the host's keyfile as a second key, and an encrypted `/boot` is
-opened by a test-only rebuild of the GRUB fallback loader carrying `test` built in
-(`cryptomount -p`, GRUB ≥ 2.12; the restore's own loader is kept beside it). The
+passphrase `test`. Where the host's own boot chain opens them without a prompt,
+so does the test drive: containers the restored crypttab opens by keyfile get the
+host's keyfile as a second key, and an encrypted `/boot` is opened by a test-only
+rebuild of the GRUB fallback loader carrying `test` built in (`cryptomount -p`,
+GRUB ≥ 2.12; the restore's own loader is kept beside it). A root the host unlocks
+by passphrase in the initramfs asks for `test` at boot — `finish` says which. The
 suite's real restore scripts never carry a passphrase. Not
 mirrored yet (the suite restores them; the test bed cannot lay them out): root
 on mdadm RAID, a volume group over several physical volumes.
@@ -444,9 +450,22 @@ without changing anything:
 sudo /usr/local/sbin/borg-backup.sh --dry-run        # borg runs with --dry-run
 sudo /usr/local/sbin/backintime-backup.sh --dry-run  # rsync runs with --dry-run
 sudo /usr/local/sbin/timeshift-backup.sh --dry-run   # non-btrfs roots
-sudo /usr/local/sbin/backup-verify.sh                # read-only by nature
+sudo /usr/local/sbin/backup-verify.sh                # read-only (the timer never passes --fix)
 sudo /usr/local/sbin/restore-rebuild-boot.sh --dry-run   # the boot-chain plan a restore would execute here
 ```
+
+`backup-verify.sh` section 7 names the leftovers of a long-lived system that a
+restore carries over: unified kernel images of kernels removed since (the menu
+still offers them; nothing can rebuild them), an ESP GRUB stub searching for a
+filesystem that no longer exists, a `GRUB_FONT`/`GRUB_THEME` that does not
+exist (`grub-mkconfig` aborts on it and leaves only `grub.cfg.new`), and files
+whose SELinux label the loaded policy does not know — a removed policy module
+leaves its type behind, and `btrfs receive` then refuses the whole replica.
+`sudo backup-verify.sh --fix` repairs them in place: the images move to
+`/var/lib/linux-backup-system/stale-ukis/`, the stub is pointed at the
+filesystem holding `grub.cfg`, the font is built from the installed TTF, the
+files are relabeled with `restorecon -R`. The restore handles the same cases on
+the restored disk by itself.
 
 `timeshift-backup.sh` also takes `--prune-only` (retention without a new
 snapshot). Its prune treats a snapshot directory without `info.json` — which
@@ -850,8 +869,8 @@ says where each decision lives.
   restore onto a fresh disk is the "bare-metal restore" column — ✅ where a
   test-bed run has passed, ⚠️ where it is under test now.
 - **Limine and rEFInd are written and fixture-tested, never run on metal**;
-  the SELinux relabel has run on metal on Linux Mint (permissive), not yet on
-  Fedora/RHEL (enforcing); syslinux/extlinux configs are recognised by the verify
+  the SELinux relabel has run on metal on Linux Mint (permissive) and Fedora
+  (enforcing), not yet on RHEL; syslinux/extlinux configs are recognised by the verify
   pass, but the restore does not reinstall that loader. Image-based distros
   (ostree, transactional), NixOS, ZFS/bcachefs roots and mdadm RAID are not
   handled by the restore yet — see [CONTRIBUTING.md](CONTRIBUTING.md#wanted-setups-the-restore-does-not-handle-yet).
@@ -939,7 +958,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 4.0.0
+- **Version:** 4.0.1
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

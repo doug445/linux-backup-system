@@ -67,10 +67,12 @@ out ""; out "generated $(date -Is), kernel $(uname -r)"
 sec "Verdict"
 root_src=$(findmnt -no SOURCE / | sed 's/\[.*//'); root_disk=$(disk_of "$root_src"); serial=$(lsblk -dno SERIAL "$root_disk" | tr -d ' ')
 out "- root: \`$root_src\` on \`$root_disk\` serial \`$serial\` ($(lsblk -dno TRAN "$root_disk"))"
-if [ "$serial" = "$TEST_SERIAL" ]; then out "- **PASS: running from the restored test drive**"; else out "- **FAIL: not running from the test drive (serial $TEST_SERIAL)**"; fi
+if [ "$serial" = "$TEST_SERIAL" ] || udevadm info -q property -n "$root_disk" 2>/dev/null | grep -qxF "ID_SERIAL_SHORT=$TEST_SERIAL"; then out "- **PASS: running from the restored test drive**"; else out "- **FAIL: not running from the test drive (serial $TEST_SERIAL)**"; fi
 host_open=""; host_mounted=""
 for s in $HOST_DISK_SERIALS; do
-    d=$(lsblk -dnpo NAME,SERIAL | awk -v s="$s" '$2==s{print $1}'); [ -n "$d" ] || continue
+    d=$(lsblk -dnpo NAME,SERIAL | awk -v s="$s" '$2==s{print $1}')
+    [ -n "$d" ] || d=$(for x in $(lsblk -dnpo NAME); do udevadm info -q property -n "$x" 2>/dev/null | grep -qxF "ID_SERIAL_SHORT=$s" && echo "$x"; done)
+    [ -n "$d" ] || continue
     host_open="$host_open$(lsblk -rnpo NAME,TYPE "$d" | awk '$2=="crypt"{printf "%s ", $1}')"
     host_mounted="$host_mounted$(findmnt -rno TARGET,SOURCE | awk -v d="$d" 'index($2, d)==1{printf "%s ", $1}')"
 done

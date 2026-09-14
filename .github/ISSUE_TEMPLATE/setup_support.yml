@@ -40,6 +40,7 @@ body:
         - Legacy BIOS boot
         - A plain (unencrypted) /boot
         - An initramfs generator other than dracut / mkinitcpio / initramfs-tools
+        - A restore test bed result for a setup not yet ✅ in the Bare-metal restore column
         - Something else (say below)
     validations:
       required: true
@@ -65,6 +66,21 @@ body:
         sudo borg-backup.sh --dry-run       — sources correct
         sudo borg-backup.sh                 — real archive created
         sudo backup-verify.sh               — exit 0
+
+  - type: textarea
+    id: testbed
+    attributes:
+      label: Restore test bed result (for a Bare-metal restore row)
+      description: >
+        `sudo TB_WIPE=<serial> testbed/testbed.sh all`, boot the test drive,
+        `sudo testbed/testbed.sh collect`. Paste the VERDICT line and attach
+        LEDGER.md, byte-comparison.md and boot-report/boot-report-*.md from
+        /var/lib/linux-backup-testbed/<host>-<stamp>/. Say if the backup drive
+        is shared with another machine. Never attach testbed passphrases other
+        than the fixed "test", keyfiles or LUKS headers.
+      placeholder: |
+        VERDICT: PASS — 99.99% of files restored with the archived size
+        booted: Wi-Fi, DNS, login screen; SELinux enforcing relabel boot
 
   - type: textarea
     id: report

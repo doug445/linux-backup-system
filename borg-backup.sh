@@ -166,7 +166,12 @@ btrfs_sources() {
 
 btrfs_ok=true
 declare -A LABEL_OK=()
-if bx_is_btrfs && [ "$(findmnt -no FSTYPE --target "$BACKUP_MOUNT" 2>/dev/null)" != btrfs ]; then
+if [ "${BX_NO_REPLICAS:-0}" = 1 ]; then
+    # The restore test bed's archive: the replica directory is shared by every
+    # host that uses the drive and pruned by label (root, home) — a test run
+    # must neither add replicas there nor prune another host's.
+    log "BX_NO_REPLICAS=1: btrfs replica layer skipped — nothing in $SNAP_DIR is created or pruned"
+elif bx_is_btrfs && [ "$(findmnt -no FSTYPE --target "$BACKUP_MOUNT" 2>/dev/null)" != btrfs ]; then
     # `btrfs receive` needs a btrfs destination. On an ext4/xfs/exfat backup
     # drive every send failed, every run, and the session still ended rc=0
     # with no snapshot layer at all.
