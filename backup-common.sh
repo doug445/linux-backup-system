@@ -300,7 +300,8 @@ bx_backup_sources() {
             seen="$seen${dev}[${sub}] "
             printf '%s\n' "$t"
         done < <(_bx_mount_table)
-        for m in ${BACKUP_EXTRA_SOURCES:-}; do
+        local _xs=(); read -ra _xs <<<"${BACKUP_EXTRA_SOURCES:-}"   # no glob expansion
+        for m in "${_xs[@]}"; do
             [ "$m" = / ] && continue
             if [ -n "${BX_MOUNT_TABLE:-}" ]; then grep -qE "^$m " "$BX_MOUNT_TABLE" && printf '%s\n' "$m"
             else mountpoint -q "$m" 2>/dev/null && printf '%s\n' "$m"; fi
@@ -324,7 +325,12 @@ bx_excludes() {
     local f type _
     { read -r _; while read -r f type _; do [ "$type" = file ] && printf '%s\n' "$f"; done; } < /proc/swaps 2>/dev/null
     [ -n "${BACKUP_MOUNT:-}" ] && printf '%s\n' "${BACKUP_MOUNT}/*"
-    local e; for e in ${BACKUP_EXTRA_EXCLUDES:-}; do printf '%s\n' "$e"; done
+    # read -a, not an unquoted for-in: the patterns carry globs, and
+    # `for e in ${BACKUP_EXTRA_EXCLUDES}` expanded "/home/*" into the files in
+    # /home before borg ever saw the pattern.
+    local e ex=()
+    read -ra ex <<<"${BACKUP_EXTRA_EXCLUDES:-}"
+    for e in "${ex[@]}"; do printf '%s\n' "$e"; done
     return 0
 }
 
@@ -333,7 +339,11 @@ bx_excludes() {
 # get a btrfs replica: send/receive ignores excludes, and Manjaro's @cache
 # subvolume sent 54 GiB of package cache to the drive on every run.
 bx_source_fully_excluded() { # bx_source_fully_excluded MOUNT
-    bx_excludes | grep -qxF -- "${1%/}/*"
+    # Not `bx_excludes | grep -q`: grep -q exits at the first match, the
+    # writer gets SIGPIPE, and under the callers' `set -o pipefail` a found
+    # match came back as "not excluded" whenever the list was long.
+    local ex; ex=$(bx_excludes)
+    grep -qxF -- "${1%/}/*" <<<"$ex"
 }
 
 # ---------------------------------------------------------------------------

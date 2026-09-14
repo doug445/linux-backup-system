@@ -318,6 +318,13 @@ grep -qx '/x/y' <<<"$ex" && grep -qx '/z/\*' <<<"$ex" && ok "BACKUP_EXTRA_EXCLUD
 grep -qx '/home/\*/build/\*' <<<"$ex" && bad "a personal exclude (~/build) is still in the universal list" || ok "no personal excludes in the universal list"
 grep -qx '/.snapshots/\*' <<<"$ex" && grep -qx '/var/lib/snapd/snap/\*' <<<"$ex" && ok "snapper dirs and snap images excluded" || bad "snapper/snap excludes missing"
 
+echo "== extra excludes keep their globs; the fully-excluded check survives pipefail"
+got=$(cd / && BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="/home/* /usr/*" bx_excludes | tail -2 | tr '\n' ' ')
+expect "patterns printed literally, not expanded against the filesystem" "/home/* /usr/* " "$got"
+many=$(for i in $(seq 1 5000); do printf '/x/%s/* ' "$i"; done)
+( set -o pipefail; BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="$many /home/*" bx_source_fully_excluded /home ) && ok "a long exclude list under pipefail: /home still fully excluded" || bad "SIGPIPE under pipefail turned a match into 'not excluded'"
+( set -o pipefail; BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="$many" bx_source_fully_excluded /var/cache ) && ok "…and the base list's /var/cache too" || bad "/var/cache lost under pipefail"
+
 echo "== capacity check knob"
 BACKUP_MOUNT="$T/absent"; CAPACITY_CHECK=off
 m=$(bx_check_backup_capacity); rc=$?; expect "CAPACITY_CHECK=off passes" 0 "$rc"; grep -q disabled <<<"$m" && ok "…and says so" || bad "no 'disabled' message: $m"
