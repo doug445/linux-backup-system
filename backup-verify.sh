@@ -34,6 +34,9 @@
 # from crypttab/fstab/findmnt at run time, nothing is hardcoded to one host.
 #
 # Exit: 0 = restore-ready, 1 = ready with warnings, 2 = a restore would fail.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 # Per-host config: source the shared library and /etc/backup-system.conf so a

@@ -31,6 +31,9 @@
 # back to a full send, a failed send keeps the previous parent, and a
 # fully-excluded tree gets no replica. Needs root (loop devices, mounts);
 # skipped otherwise. Touches nothing outside its own temp directory.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$HERE/.."

@@ -41,6 +41,9 @@
 #
 # Runs without root too: the sections that need it are marked SKIP, not failed.
 # Exit 0 whenever the report was written; the findings are in the report.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 OUT=""; REDACT=1; FULL=0

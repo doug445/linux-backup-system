@@ -51,6 +51,8 @@
 # cl_find_carriers ROOT — "kind<TAB>path" for every command-line carrier found
 # under ROOT ("" or "/" for the live system).
 # ---------------------------------------------------------------------------
+# Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
+[ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
 cl_find_carriers() {
     local root="${1%/}" f d
     [ -f "$root/etc/kernel/cmdline" ] && printf 'cmdline\t%s\n' "$root/etc/kernel/cmdline"

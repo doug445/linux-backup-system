@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -34,6 +34,9 @@
 # unit can bring the drive back cleanly.
 #
 # Never touches a drive that is still present, and never starts anything.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 # Debian upgraded in place from before usrmerge, Gentoo split-usr: cryptsetup
 # lives in /sbin and mount in /bin. Never hard-code /usr/bin.
