@@ -171,45 +171,45 @@ column, use the suite for testing only — not in production.**
 
 | Distro | Backup + verify | Bare-metal restore |
 |---|:--:|:--:|
-| Fedora | ✅ | ❌ |
+| Fedora | ✅ | ⚠️ |
 | Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ | ✅ over a fresh Asahi install (never bare metal — see the FAQ) |
-| Debian / Ubuntu / Linux Mint | ✅ | ❌ |
-| Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro · ❌ Arch, EndeavourOS |
-| openSUSE (Leap / Tumbleweed) | ❌ | ❌ |
-| **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ |
+| Debian / Ubuntu / Linux Mint | ✅ | ⚠️ |
+| Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro · ⚠️ Arch, EndeavourOS |
+| openSUSE (Leap / Tumbleweed) | ❌ | ❌ not under test |
+| **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ not under test |
 
 **Root filesystems** (this picks the local-snapshot engine — see Layers)
 
 | Root fs | Local-snapshot engine | Backup + verify | Bare-metal restore |
 |---|---|:--:|:--:|
 | btrfs (subvolumes, swapfile) | btrfs send/receive (`borg-backup.sh`) | ✅ | ✅ |
-| ext4 | Timeshift (`timeshift-backup.sh`) | ✅ | ❌ |
+| ext4 | Timeshift (`timeshift-backup.sh`) | ✅ | ⚠️ |
 | xfs / f2fs / anything else | Timeshift | ❌ | ❌ |
 | root on LUKS2, unlocked by sd-encrypt (`rd.luks.name=` + `crypttab.initramfs`) | — | ✅ | ✅ |
-| root on LVM-on-LUKS | — | ✅ | ❌ |
+| root on LVM-on-LUKS | — | ✅ | ⚠️ |
 
 **Boot layouts**
 
 | Setup | Backup + verify | Bare-metal restore |
 |---|:--:|:--:|
-| systemd-boot (Type #1 entries, no UKI) | ✅ | ❌ |
+| systemd-boot (Type #1 entries, no UKI) | ✅ | ⚠️ |
 | systemd-boot + UKI (unified kernel image), rebuilt by mkinitcpio presets | ✅ | ✅ |
-| UKI rebuilt by dracut or kernel-install | ✅ | ❌ |
+| UKI rebuilt by dracut or kernel-install | ✅ | ⚠️ |
 | **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed | ✅ | ✅ |
-| Secure Boot through shim (Fedora, Ubuntu, openSUSE) | ✅ | ❌ |
-| GRUB (EFI) | ✅ | ❌ |
-| GRUB (legacy BIOS) | ❌ | ❌ |
-| Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ | ❌ |
+| Secure Boot through shim (Fedora, Ubuntu) | ✅ | ⚠️ |
+| GRUB (EFI) | ✅ | ⚠️ |
+| GRUB (legacy BIOS) | ❌ | ❌ not under test |
+| Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ | ⚠️ |
 | ESP at `/efi` + vfat XBOOTLDR `/boot` | ✅ | ✅ |
-| Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ | ❌ |
-| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ | ❌ |
+| Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ | ⚠️ |
+| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ | ❌ not under test |
 | Plain `/boot` (unencrypted /boot) | ✅ | ✅ |
-| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ | ❌ |
-| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ |
-| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ |
-| SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ❌ | ❌ |
+| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ | ❌ not under test |
+| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ⚠️ | ⚠️ |
+| rEFInd — `refind-install`, or binary + firmware boot entry | ⚠️ | ⚠️ |
+| SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ⚠️ | ⚠️ |
 | Restore from an **installed system** onto a second disk, the original disk still installed — no NVRAM writes, nothing written to the original disk | — | ✅ |
-| Restore from a live USB | — | ❌ |
+| Restore from a live USB | — | ⚠️ |
 | Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ | ✅ |
 
 A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware.
