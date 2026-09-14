@@ -504,6 +504,34 @@ sudo ./borg-restore.sh --dry-run /mnt/target /mnt/backup/borg-backup  # preview:
 sudo ./backintime-restore.sh /mnt/target /mnt/backup/backintime       # BIT snapshot
 ```
 
+**Restoring from an installed system instead of a live USB** — onto a second
+disk, a new internal drive fitted beside the old one, or a test disk — is
+detected (the running root is not a live image) and made safe for the disk
+you are running from. Nothing is written to it:
+
+- no firmware boot entry: `bootctl --no-variables`, `grub-install --no-nvram
+  --removable`, no `efibootmgr`, and the chroot sees `efivars` read-only — the
+  machine's boot order is left alone; pick the restored disk from the firmware
+  boot menu (`RESTORE_NO_NVRAM=0` to write an entry anyway);
+- borg's cache and security state go to a temporary directory, not `/root`;
+- only LUKS containers on the target disk are paired with the restored
+  system's entries — the running root's container and the backup drive are
+  open too;
+- the **root container** is mapped from the container actually under the
+  target's root. With the old disk still installed its old id still exists
+  and its mapper name is taken, so no other rule reaches it — and without
+  this the restored disk boots by unlocking, and running from, the OLD disk;
+- `crypttab.initramfs` (mkinitcpio sd-encrypt) is rewritten with `crypttab`;
+- a swapfile named in `fstab` is re-created (swapfiles are never in a
+  file-level backup) and `resume_offset=` rewritten to its new blocks, with
+  `resume=UUID=` moved to the new root filesystem;
+- the final check fails any boot-chain reference — command line,
+  `crypttab.initramfs`, `fstab` for `/`, `/boot`, the ESP, `/home` — that
+  resolves to a disk other than the target, not merely one that is missing.
+
+A live-USB restore takes none of these branches except the last three, which
+are simply correct there too.
+
 Before anything is rewritten, both method scripts check the new disk's
 partition types — the ESP (at `/boot/efi`, `/efi`, or `/boot` itself) must be
 typed *EFI System*, and a separate vfat `/boot` next to it *XBOOTLDR* — and
