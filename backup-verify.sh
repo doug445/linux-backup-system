@@ -194,14 +194,20 @@ hdr "1. Backup volume is independently unlockable"
 # The failure this exists to catch: the only key to the backup volume living on
 # the very filesystem the backup is meant to replace. If the root disk dies, a
 # keyfile-only backup volume is unrecoverable ciphertext.
-backup_src=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null)
+# Only a real mount at BACKUP_MOUNT: `findmnt --target` walks up to the nearest
+# mount, so with the drive unplugged it named the ROOT filesystem and this
+# check tested the root disk's keyslots — a false FAIL about the wrong disk.
+backup_src=""
+mountpoint -q "$BACKUP_MOUNT" 2>/dev/null && backup_src=$(findmnt -no SOURCE "$BACKUP_MOUNT" 2>/dev/null)
 backup_src=${backup_src%%\[*}
 backup_dev=""
 if [[ "$backup_src" == /dev/mapper/* ]]; then
     backup_dev=$(luks_dev_of_mapper "${backup_src#/dev/mapper/}")
 fi
 
-if [[ -z "$backup_dev" ]]; then
+if [[ -z "$backup_src" ]]; then
+    note "$BACKUP_MOUNT is not mounted — backup volume not checked"
+elif [[ -z "$backup_dev" ]]; then
     note "could not resolve a LUKS device behind $BACKUP_MOUNT (not mounted? not encrypted?)"
 else
     mapfile -t all_slots < <(slots_of "$backup_dev")
@@ -333,17 +339,17 @@ if [[ -d "$BORG_REPO" ]]; then
             # copy on Fedora and would satisfy a root-only archive.
             # One classifier for every boot form (backup-common.sh): UKI,
             # vmlinuz/Image, GRUB, systemd-boot, Raspberry Pi firmware files.
-            read -r uki kern gcfg sdb pifw < <(bx_boot_listing_counts "$listing")
+            read -r uki kern gcfg sdb pifw oth < <(bx_boot_listing_counts "$listing")
 
             if (( uki > 0 || kern > 0 )); then
                 ok "archive has a kernel ($uki UKI, $kern vmlinuz/Image/kernel*.img)"
             else
                 bad "archive contains NO kernel image — restore would not boot"
             fi
-            if (( gcfg > 0 || sdb > 0 || uki > 0 || pifw >= 2 )); then
-                ok "archive has a bootloader config ($gcfg grub.cfg, $sdb sd-boot, $uki UKI, $pifw Pi firmware files)"
+            if (( gcfg > 0 || sdb > 0 || uki > 0 || pifw >= 2 || ${oth:-0} > 0 )); then
+                ok "archive has a bootloader config ($gcfg grub.cfg, $sdb sd-boot, $uki UKI, $pifw Pi firmware files, ${oth:-0} Limine/rEFInd/syslinux)"
             else
-                bad "archive has NO bootloader config (no grub.cfg, loader entries, UKI, or Pi config.txt+cmdline.txt)"
+                bad "archive has NO bootloader config (no grub.cfg, loader entries, UKI, limine.conf, refind.conf, extlinux.conf/syslinux.cfg, or Pi config.txt+cmdline.txt)"
             fi
 
             # The kernel command line, wherever it lives in the archive, must

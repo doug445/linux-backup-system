@@ -217,6 +217,28 @@ for rs in borg-restore.sh backintime-restore.sh; do
     expect "$rs: swapfile left alone" "/swapfile none swap defaults 0 0" "$(grep '^/swapfile' "$F/rs.out")"
     grep -q 'WARN .*/dev/sda9' "$F/rs.out" && ok "$rs: kernel device name in fstab is warned about" || bad "$rs: no warning for /dev/sda9"
 done
+for rs in borg-restore.sh backintime-restore.sh; do
+    # The SELinux relabel step, run against synthetic restored systems.
+    blk=$(sed -n '/^SELINUX_MODE=\$(/,/^esac/p' "$HERE/../$rs")
+    [ -n "$blk" ] || { bad "$rs: SELinux relabel step not found"; continue; }
+    for mode in enforcing permissive disabled none; do
+        TARGET="$T/se-$mode"; mkdir -p "$TARGET/etc/selinux"
+        [ "$mode" = none ] || printf '# comment\nSELINUX=%s\nSELINUXTYPE=targeted\n' "$mode" > "$TARGET/etc/selinux/config"
+        ( log() { :; }; eval "$blk" )
+        case "$mode" in
+            enforcing|permissive) [ -f "$TARGET/.autorelabel" ] && ok "$rs: SELinux $mode -> /.autorelabel" || bad "$rs: SELinux $mode but no /.autorelabel" ;;
+            *) [ -f "$TARGET/.autorelabel" ] && bad "$rs: /.autorelabel created with SELinux $mode" || ok "$rs: SELinux $mode -> no relabel" ;;
+        esac
+    done
+done
+RB="$HERE/../restore-rebuild-boot.sh"
+grep -q 'limine bios-install' "$RB" && grep -q 'efi_boot_entry Limine' "$RB" && ok "boot rebuild reinstalls Limine (UEFI binary + boot entry, BIOS)" || bad "boot rebuild lacks the Limine step"
+grep -q 'refind-install --yes' "$RB" && grep -q 'efi_boot_entry rEFInd' "$RB" && ok "boot rebuild reinstalls rEFInd" || bad "boot rebuild lacks the rEFInd step"
+# The ESP-relative loader path efibootmgr wants, from the formula the script uses.
+ln=$(grep -m1 'rel="\\\\' "$RB")
+# shellcheck disable=SC2034,SC2154  # ESP/loader are read and rel is set by the eval'd line
+out=$(ESP=/boot/efi; loader=/boot/efi/EFI/limine/BOOTX64.EFI; eval "${ln#"${ln%%[![:space:]]*}"}"; printf '%s' "$rel")
+expect "efibootmgr loader path is backslashed and ESP-relative" '\EFI\limine\BOOTX64.EFI' "$out"
 grep -qE "grep -oP 'UUID=\\\\K" "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script still extracts ids with a substring UUID= match" || ok "restore scripts parse fstab/crypttab by field"
 grep -qE '\(\([A-Z_]+\+\+\)\)' "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script uses ((X++)) under set -e (exits when X is 0)" || ok "no ((X++)) under set -e in the restore scripts"
 

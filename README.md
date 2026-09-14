@@ -181,6 +181,9 @@ before trusting it.
 | Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ |
 | Plain `/boot` (unencrypted /boot) | ✅ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
+| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ |
+| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ |
+| SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ❌ |
 | Bare-metal restore **executing** the boot rebuild (not just its dry run) — x86_64 and non-Apple aarch64 | ⚠️ |
 | Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ |
 
@@ -410,7 +413,7 @@ The line that disagrees with reality is the bug. Then:
 | **Package names** (borg, Back In Time, AppIndicator, Timeshift) | `backup-common.sh` → `bx_pkg_for`; `deploy.sh` → `detect_distro` (`BIT_PKGS`, `BORG_PKG`) and the two `case "$DISTRO_FAMILY"` blocks in *Step 1: Install packages* | Map the command to your distro's package name. | `sudo borg-backup.sh --dry-run` — its `[deps]` lines name what it would install |
 | **Root filesystem → snapshot engine** | `backup-common.sh` → `bx_snapshot_engine` (btrfs → send/receive, else Timeshift); consumed by `borg-backup.sh` (replica block), `timeshift-backup.sh` (early exit on btrfs), `backup-verify.sh` (section 4) | A new engine means a new branch in all four. A filesystem that should simply use Timeshift needs nothing — it already does. | `--dry-run` of both backup scripts; one real run; `backup-verify.sh` section 4 |
 | **Where the boot-firmware partition is** | `backup-common.sh` → `BX_ESP_PATHS` (used by `bx_esp_mount` and `backup-verify.sh`), `bx_backup_sources`, and the ESP block in `restore-rebuild-boot.sh` — **the accepted paths are `/boot/efi`, `/efi` and `/boot/firmware`** | Add your mountpoint to `BX_ESP_PATHS`, the sources list, the rebuild script's loop, and the ESP loop in both restore scripts. Stopgap until then: `BACKUP_EXTRA_SOURCES="/your/esp"` in the config gets it into the backup set. | The report's *ESP candidates*; `borg-backup.sh --dry-run` lists it under `backup sources` |
-| **Which bootloader, and how to rebuild it** | `restore-rebuild-boot.sh` — the detection block (`IS_UKI`, `USES_GRUB`, `USES_SDBOOT`, `IS_PI_FW`) and the per-bootloader steps; an unknown bootloader **warns and continues** | Add a detection test and a rebuild step for rEFInd, Limine, syslinux/extlinux, U-Boot… The Raspberry Pi case (no bootloader, fix `root=PARTUUID` in `cmdline.txt`) is the template for a firmware-reads-the-partition board. | `restore-rebuild-boot.sh --dry-run` on the live system shows the plan; `tests/cli-test.sh` proves the dry run executes nothing |
+| **Which bootloader, and how to rebuild it** | `restore-rebuild-boot.sh` — the detection block (`IS_UKI`, `USES_GRUB`, `USES_SDBOOT`, `USES_LIMINE`, `USES_REFIND`, `IS_PI_FW`) and the per-bootloader steps; `efi_boot_entry` creates the firmware boot entry; an unknown bootloader **warns and continues** | Add a detection test and a rebuild step for syslinux/extlinux, LILO, U-Boot… (Limine and rEFInd are the templates for a loader that makes no boot entry of its own) The Raspberry Pi case (no bootloader, fix `root=PARTUUID` in `cmdline.txt`) is the template for a firmware-reads-the-partition board. | `restore-rebuild-boot.sh --dry-run` on the live system shows the plan; `tests/cli-test.sh` proves the dry run executes nothing |
 | **Whether the archive is bootable** | `backup-common.sh` → `bx_boot_listing_counts`, used by `backup-verify.sh` section 3: patterns over the archive listing for a UKI, a `vmlinuz`/`Image`/`kernel*.img` or a kernel-install `<machine-id>/<version>/linux`, a `grub.cfg`, systemd-boot entries, and Pi `config.txt`+`cmdline.txt`. A bootloader they do not know produces a **false FAIL**: *"archive has NO bootloader config"* | Add a pattern for your bootloader's config file (or kernel name, e.g. `zImage`) and a synthetic listing to `tests/lib-fixture-test.sh`. | The fixture test; then `backup-verify.sh` after one real archive — section 3 must PASS |
 | **Which initramfs tool** | `restore-rebuild-boot.sh` — `update-initramfs` / `dracut` / `mkinitcpio` by `command -v`; otherwise a warning | Add your generator. | `restore-rebuild-boot.sh --dry-run` shows the `would:` line |
 | **Kernel command-line carriers on restore** | `lib-cmdline.sh` → `cl_find_carriers` (BLS/systemd-boot entries, `/etc/kernel/cmdline` + `cmdline.d`, `GRUB_CMDLINE_LINUX` + `grub.d`, `extlinux.conf`, `syslinux.cfg`, `cmdline.txt`, `refind_linux.conf`, `limine.conf`, `/etc/default/limine`) and `cl_rewrite_ids`; called by both restore scripts after the `fstab`/`crypttab` fix-up, checked by `cl_stale_ids` before reboot and by `backup-verify.sh` against the archive | Add your carrier's path to `cl_find_carriers` and, if it uses a new reference syntax, to `CL_REF_PREFIX`. | Add it to `tests/cmdline-fixture-test.sh`; `backup-verify.sh` section 3 reports "carriers agree with fstab/crypttab" |
@@ -476,7 +479,21 @@ whatever the restored system uses — detected, not configured:
 - **GRUB** (EFI or legacy BIOS, x86_64 or aarch64) reinstalled and its config
   regenerated, with `GRUB_ENABLE_CRYPTODISK=y` set and a warning when GRUB is
   older than 2.12 on an argon2id `/boot`;
-- **systemd-boot** reinstalled with `bootctl` and entries recreated.
+- **systemd-boot** reinstalled with `bootctl` and entries recreated;
+- **Limine** and **rEFInd** reinstalled (`limine-install` on CachyOS, or the
+  loader binary copied to the ESP; `refind-install`) with a firmware boot
+  entry from `efibootmgr` — NVRAM entries are in no backup (untested on metal).
+
+On a restored system with SELinux enabled, the restore also creates
+`/.autorelabel`, so the first boot relabels every file (one extra reboot):
+the Back In Time layer does not carry SELinux labels, and an enforcing system
+with unlabeled files refuses logins.
+
+Some systems cannot be restored bare-metal by *any* file-level backup — Apple
+Silicon, ARM boards with U-Boot at raw offsets, Chromebooks, A/B image systems
+such as SteamOS — because their boot chain is not files. For those, reinstall
+first and restore over the fresh install; [CONTRIBUTING.md](CONTRIBUTING.md#not-possible--please-do-not-spend-time-on-these)
+lists them, and the setups that *are* possible but not handled yet.
 
 `restore-rebuild-boot.sh` is standalone and takes `--dry-run`, so you can preview
 the exact boot steps inside an `arch-chroot` (or even on a live system) before
@@ -675,9 +692,11 @@ says where each decision lives.
 - **The command-line rewrite on restore is exercised only against synthetic
   trees** (`tests/cmdline-fixture-test.sh`, every carrier kind). A real
   restore onto a fresh disk is the ⚠️ "bare-metal restore" row (under test now).
-- **`backup-verify.sh` knows GRUB, systemd-boot, UKIs and Raspberry Pi firmware
-  files.** rEFInd, Limine and syslinux archives produce a false "no bootloader
-  config" FAIL until a pattern is added.
+- **Limine, rEFInd and the SELinux relabel are written and fixture-tested,
+  never run on metal**; syslinux/extlinux configs are recognised by the verify
+  pass, but the restore does not reinstall that loader. Image-based distros
+  (ostree, transactional), NixOS, ZFS/bcachefs roots and mdadm RAID are not
+  handled by the restore yet — see [CONTRIBUTING.md](CONTRIBUTING.md#wanted-setups-the-restore-does-not-handle-yet).
 - **Raspberry Pi: written, never run.** The firmware-boot recogniser, the
   verify patterns and the `cmdline.txt` `root=PARTUUID` rewrite in
   `restore-rebuild-boot.sh` are exercised only against synthetic listings in
@@ -762,7 +781,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.7.0
+- **Version:** 3.8.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

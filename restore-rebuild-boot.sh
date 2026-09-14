@@ -36,7 +36,8 @@
 # Handles:
 #   - initramfs: dracut / update-initramfs / mkinitcpio
 #   - UKI (unified kernel image): kernel-install / dracut --uefi
-#   - bootloader: GRUB (EFI + BIOS, x86_64/aarch64) and systemd-boot (bootctl)
+#   - bootloader: GRUB (EFI + BIOS, x86_64/aarch64), systemd-boot (bootctl),
+#     Limine and rEFInd (untested on metal), with a firmware boot entry
 #   - encrypted /boot: enables GRUB cryptodisk; warns if GRUB < 2.12 with argon2
 #
 # Usage:  restore-rebuild-boot.sh [--dry-run]
@@ -148,6 +149,50 @@ elif [ -n "$ESP" ] && [ -d "$ESP/loader/entries" ] && [ ! -f /boot/grub2/grub.cf
 fi
 command -v bootctl >/dev/null 2>&1 && bootctl --quiet is-installed 2>/dev/null && [ "$USES_GRUB" = false ] && USES_SDBOOT=true
 
+# Limine (CachyOS's default): limine.conf wherever Limine reads it, or its EFI
+# binary under EFI/limine. rEFInd: its binary or refind.conf under EFI/refind.
+# UNTESTED ON METAL — see the README status table.
+USES_LIMINE=false; LIMINE_EFI=""
+for f in /boot/limine.conf /boot/limine/limine.conf ${ESP:+"$ESP/limine.conf" "$ESP/limine/limine.conf" "$ESP/EFI/limine/limine.conf" "$ESP/EFI/BOOT/limine.conf"}; do
+    [ -f "$f" ] && { USES_LIMINE=true; break; }
+done
+if [ -n "$ESP" ]; then
+    for f in "$ESP"/EFI/limine/BOOT*.EFI "$ESP"/EFI/limine/*.efi; do [ -f "$f" ] && { USES_LIMINE=true; LIMINE_EFI="$f"; break; }; done
+    [ -z "$LIMINE_EFI" ] && [ -f "$ESP/EFI/BOOT/limine.conf" ] && for f in "$ESP"/EFI/BOOT/BOOT*.EFI; do [ -f "$f" ] && { LIMINE_EFI="$f"; break; }; done
+fi
+USES_REFIND=false
+if [ -n "$ESP" ] && { compgen -G "$ESP/EFI/refind/refind_*.efi" >/dev/null 2>&1 || [ -f "$ESP/EFI/refind/refind.conf" ]; }; then
+    USES_REFIND=true
+fi
+
+# efi_boot_entry LABEL LOADER — create a firmware boot entry for LOADER (a file
+# on the ESP) unless one already points at it on this ESP. NVRAM entries are in
+# no backup: a new disk has none, and without one the firmware only tries
+# EFI/BOOT/BOOT<arch>.EFI. grub-install and bootctl make their own; Limine
+# and a hand-copied rEFInd do not.
+efi_boot_entry() {
+    local label="$1" loader="$2" src kn disk part puuid rel
+    [ "$IS_EFI" = true ] || return 0
+    if ! command -v efibootmgr >/dev/null 2>&1; then
+        warn "efibootmgr not installed — no firmware boot entry for $label; install efibootmgr, or pick the disk from the firmware boot menu"
+        return 0
+    fi
+    src=$(findmnt -no SOURCE "$ESP" 2>/dev/null); kn=$(basename "$(readlink -f "$src" 2>/dev/null)")
+    disk=$(lsblk -npo PKNAME "$src" 2>/dev/null | head -1)
+    part=$(cat "/sys/class/block/$kn/partition" 2>/dev/null || true)
+    puuid=$(lsblk -no PARTUUID "$src" 2>/dev/null | head -1)
+    rel="\\${loader#"$ESP"/}"; rel="${rel//\//\\}"
+    if [ -z "$disk" ] || [ -z "$part" ]; then
+        warn "could not resolve the ESP's disk and partition — create the entry by hand: efibootmgr --create --disk <disk> --part <n> --label $label --loader '$rel'"
+        return 0
+    fi
+    if [ -n "$puuid" ] && efibootmgr -v 2>/dev/null | grep -iF "$puuid" | grep -qiF "$(basename "$loader")"; then
+        say "firmware boot entry for $label on this ESP already present"
+        return 0
+    fi
+    run efibootmgr --create --disk "$disk" --part "$part" --label "$label" --loader "$rel"
+}
+
 # Is /boot on LUKS, and if GRUB, is it new enough for argon2?
 BOOT_ON_LUKS=false
 boot_src=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//')
@@ -156,7 +201,7 @@ boot_src=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//')
 
 say "distro=$DISTRO_FAMILY arch=$ARCH efi=$IS_EFI esp=${ESP:-none}"
 say "kernels: ${KVERS[*]:-none}"
-say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT pi_firmware=$IS_PI_FW"
+say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT limine=$USES_LIMINE refind=$USES_REFIND pi_firmware=$IS_PI_FW"
 [ ${#KVERS[@]} -eq 0 ] && warn "no kernels found under /lib/modules — cannot rebuild"
 
 # ---------------------------------------------------------------------------
@@ -268,6 +313,60 @@ if [ "$USES_SDBOOT" = true ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# 4. Limine: reinstall the loader binary (UEFI) or its boot sector (BIOS) and
+#    create the firmware boot entry. limine.conf itself was restored with the
+#    files and its kernel command lines rewritten by the restore script.
+#    UNTESTED ON METAL.
+# ---------------------------------------------------------------------------
+if [ "$USES_LIMINE" = true ]; then
+    say "===== Limine ====="
+    if command -v limine-install >/dev/null 2>&1; then
+        # CachyOS's limine-mkinitcpio-hook: installs the binary, the entries
+        # and the firmware boot entry for this system's own layout.
+        run limine-install || warn "limine-install reported errors — review above"
+        command -v limine-update >/dev/null 2>&1 && { run limine-update || warn "limine-update reported errors — review above"; }
+    elif [ "$IS_EFI" = true ]; then
+        case "$ARCH" in x86_64) lb=BOOTX64.EFI ;; aarch64) lb=BOOTAA64.EFI ;; *) lb="" ;; esac
+        if [ -z "$ESP" ]; then
+            warn "Limine on UEFI but no ESP mounted — cannot reinstall it"
+        elif [ -z "$lb" ] || [ ! -f "/usr/share/limine/$lb" ]; then
+            warn "Limine EFI binary /usr/share/limine/${lb:-BOOT<arch>.EFI} not found — is the limine package installed in the restored system?"
+        else
+            dest="${LIMINE_EFI:-$ESP/EFI/limine/$lb}"
+            runsh "mkdir -p '$(dirname "$dest")' && cp /usr/share/limine/$lb '$dest'"
+            efi_boot_entry Limine "$dest"
+        fi
+    else
+        disk=$(lsblk -npo PKNAME "$boot_src" 2>/dev/null | head -1)
+        if [ -n "$disk" ] && command -v limine >/dev/null 2>&1; then
+            run limine bios-install "$disk"
+        else
+            warn "Limine BIOS install needs the boot disk and the limine tool (disk: ${disk:-unknown}) — run: limine bios-install <disk>"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5. rEFInd: refind-install finds the ESP, reinstalls the binary and drivers,
+#    and creates the firmware boot entry. refind.conf and refind_linux.conf
+#    were restored with the files. UNTESTED ON METAL.
+# ---------------------------------------------------------------------------
+if [ "$USES_REFIND" = true ]; then
+    say "===== rEFInd ====="
+    if command -v refind-install >/dev/null 2>&1; then
+        run refind-install --yes || warn "refind-install reported errors — review above"
+    else
+        case "$ARCH" in x86_64) rb=refind_x64.efi ;; aarch64) rb=refind_aa64.efi ;; *) rb="" ;; esac
+        if [ -n "$rb" ] && [ -f "/usr/share/refind/$rb" ]; then
+            runsh "mkdir -p '$ESP/EFI/refind' && cp /usr/share/refind/$rb '$ESP/EFI/refind/$rb'"
+            efi_boot_entry rEFInd "$ESP/EFI/refind/$rb"
+        else
+            warn "rEFInd detected but neither refind-install nor /usr/share/refind/${rb:-refind_<arch>.efi} is present — reinstall rEFInd before rebooting"
+        fi
+    fi
+fi
+
 if [ "$IS_PI_FW" = true ]; then
     say "===== Raspberry Pi firmware boot ($PI_FW_DIR) — nothing to install ====="
     # The firmware finds the root by PARTUUID in cmdline.txt; a restore onto a
@@ -286,8 +385,8 @@ if [ "$IS_PI_FW" = true ]; then
     [ -f "$PI_FW_DIR/config.txt" ] && grep -q '^initramfs' "$PI_FW_DIR/config.txt" \
         && say "config.txt loads an initramfs; update-initramfs (rpi hooks) refreshed it above" \
         || say "config.txt loads no initramfs — kernel*.img boots the root directly"
-elif [ "$USES_GRUB" = false ] && [ "$USES_SDBOOT" = false ]; then
-    warn "no bootloader detected (neither GRUB nor systemd-boot nor Pi firmware) — boot install skipped"
+elif [ "$USES_GRUB" = false ] && [ "$USES_SDBOOT" = false ] && [ "$USES_LIMINE" = false ] && [ "$USES_REFIND" = false ]; then
+    warn "no bootloader detected (neither GRUB, systemd-boot, Limine, rEFInd nor Pi firmware) — boot install skipped"
 fi
 
 say "===== boot rebuild ${DRY:+(dry run) }complete ====="

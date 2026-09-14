@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.7.0**
+**linux-backup-system 3.8.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -45,8 +45,46 @@ have.
 | Plain (unencrypted) `/boot` | ✅ | a restored machine booting is the bare-metal row below |
 | **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
+| **Limine** (CachyOS's default) | ❌ — written, fixture-tested only | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
+| **rEFInd** | ❌ — written, fixture-tested only | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
+| **SELinux restore relabel** (Fedora, RHEL) | ❌ — written, fixture-tested only | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
 | **Bare-metal restore executing the boot rebuild** | ⚠️ under test | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
+
+### Wanted: setups the restore does not handle yet
+
+These can be restored bare-metal in principle — the boot code lives in files
+— but the suite does not know how yet, and a restore today would leave the
+machine unbootable or broken. Each is a good first patch for someone who runs
+one. The README's *Hand-rolling a fix* section says where each decision lives.
+
+| Setup | Why a restore fails today | What a patch needs |
+|---|---|---|
+| **Image-based "immutable" distros** — Fedora Silverblue / Kinoite / Bazzite / CoreOS (rpm-ostree), openSUSE MicroOS / Aeon (transactional-update) | the rebuild runs dracut and grub-mkconfig; an ostree system's boot entries belong to `ostree admin`, a transactional one's to its snapshot tooling | detection of the deployment model, and a rebuild step that redeploys through it instead |
+| **NixOS** | disk UUIDs live in `/etc/nixos/hardware-configuration.nix`; `fstab` is generated from it and the suite's rewrite is overwritten on the next build | the UUID rewrite in `hardware-configuration.nix`, and a rebuild through `nixos-install --root` / `nixos-enter` |
+| **ZFS or bcachefs root** | no id rewrite for `root=ZFS=` / pool names or bcachefs's multi-device syntax; the target pool must be created first | pool/filesystem recreation steps in the restore checklist, the id forms in `lib-cmdline.sh`, the initramfs hooks |
+| **mdadm RAID, multi-device btrfs** | array UUIDs in `mdadm.conf` and the initramfs are not rewritten; the arrays must exist before the files go back | the `mdadm.conf` rewrite, an initramfs regeneration that picks it up |
+| **syslinux / extlinux, LILO / elilo** (Slackware) | command lines are rewritten, but the loader itself is never reinstalled | an `extlinux --install` / `lilo` step in `restore-rebuild-boot.sh` |
+| **LUKS unlocked by TPM2, FIDO2 or Clevis** | the new container carries no token enrollment; the restored system asks for the passphrase (not a failure, but not documented) | a post-restore note or a re-enrollment step (`systemd-cryptenroll`, `clevis luks bind`) |
+| **Secure Boot with your own keys** (sbctl) | files the rebuild regenerates are unsigned until re-signed | an `sbctl sign-all` step when sbctl is in use |
+| **Non-systemd distros** — Void (runit), Alpine / Gentoo (OpenRC), Slackware | `kernel-install` and `bootctl` are absent; only the GRUB path applies, and the backup side's units need a cron or service equivalent | the family (see below), and a scheduler for ad-hoc/scheduled mode without systemd |
+
+### Not possible — please do not spend time on these
+
+A bare-metal restore needs everything the firmware reads before Linux starts
+to be *files* in the backup. On these systems it is not: the boot chain sits
+in raw sectors, signed partitions or firmware-managed storage that no
+file-level backup can hold or recreate. The supported path is the same for
+all of them — **reinstall the system with its own installer or image, then
+restore this backup over the fresh install** — and that already works; a
+patch that tries to make them bare-metal cannot.
+
+| System | Why |
+|---|---|
+| **Apple Silicon** (Fedora Asahi Remix) | m1n1, U-Boot and the partitions the Mac's firmware boots from are Apple-managed; reinstall with the Asahi installer from macOS first (✅ verified that way) |
+| **ARM boards with U-Boot at raw offsets** — most Rockchip and Allwinner boards, many others | the bootloader is written to fixed sectors of the boot medium (or SPI flash), outside any partition; flash the vendor or distro image first. A **Raspberry Pi is not in this group**: its firmware is ordinary files on a vfat partition |
+| **Chromebooks** (depthcharge) | the firmware boots signed kernel partitions, not a bootloader from a filesystem |
+| **A/B verified-image systems** — SteamOS, ChromeOS, Ubuntu Core | the OS is a signed, dm-verity-protected image; it is reinstalled, never restored file by file |
 
 ### How to file a setup report
 
