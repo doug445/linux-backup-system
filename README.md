@@ -234,6 +234,7 @@ layer (borg archives, btrfs/Timeshift replicas, BIT snapshots):
 | `CAPACITY_CHECK` | refuse | `refuse` / `warn` / `off` — the floor is measured on the whole filesystem of each source, so a btrfs system disk that also holds 1.5 TiB of VM images beside a 100 GiB system needs `warn` to use a 1 TiB drive |
 | `BACKUP_HOST_ID` | the hostname at deploy | what this host's backups are filed under (borg archive prefix, Back In Time chain, replica names); pinned so a hostname change never orphans the chain |
 | `BACKUP_EXTRA_EXCLUDES` | empty | extra exclude patterns for the file-level layers, anchored at `/`; borg and Back In Time share one list |
+| `BACKUP_EXTRA_INCLUDES` | empty | paths re-included inside an excluded tree — they win over every exclude (`/home/*/*` excluded, `/home/*/.config` kept); a directory carries its subtree |
 | `BX_LOCK_WAIT` | 7200 | seconds a layer waits for another layer's run to finish (all three take one lock; 0 = skip) |
 
 Normal runs keep `KEEP`. Only when the drive is genuinely tight does it drop the

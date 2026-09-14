@@ -154,6 +154,10 @@ mapfile -t SOURCES < <(bx_backup_sources)
 for _src in "${SOURCES[@]}"; do
     case "$_src" in /mnt/*|/media/*|/run/*|/tmp/*) RSYNC_ARGS+=("--include=$_src") ;; esac
 done
+# BACKUP_EXTRA_INCLUDES: rsync needs the entry and its subtree named apart.
+while IFS= read -r _in; do
+    [ -n "$_in" ] && RSYNC_ARGS+=("--include=$_in" "--include=$_in/***")
+done < <(bx_includes)
 while IFS= read -r _t; do
     [ -n "$_t" ] && [ "$_t" != / ] || continue
     case " ${SOURCES[*]} " in *" $_t "*) continue ;; esac

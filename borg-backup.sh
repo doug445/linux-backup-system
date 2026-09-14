@@ -308,6 +308,9 @@ BORG_OPTS=(--verbose --filter AME --list --show-rc --compression lz4
 for _src in "${SOURCES[@]}"; do
     case "$_src" in /mnt/*|/media/*|/run/*|/tmp/*) BORG_OPTS+=("--pattern=+$_src") ;; esac
 done
+# BACKUP_EXTRA_INCLUDES re-enter excluded trees; before the excludes, since
+# borg takes the first match. A directory pattern carries its subtree.
+while IFS= read -r _in; do [ -n "$_in" ] && BORG_OPTS+=("--pattern=+$_in"); done < <(bx_includes)
 while IFS= read -r _ex; do [ -n "$_ex" ] && BORG_OPTS+=("--pattern=-$_ex"); done < <(bx_excludes)
 # --stats is incompatible with --dry-run in borg; use one or the other.
 if (( DRY )); then BORG_OPTS+=(--dry-run); else BORG_OPTS+=(--stats); fi
