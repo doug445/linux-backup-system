@@ -18,7 +18,7 @@ body:
         > and the fix is built from it. Read it before posting anyway.
 
         > ### Never paste key material
-        > No keyfiles, no LUKS header backups (`*.img` from `luks-headers/`),
+        > No keyfiles, no LUKS header backups (`*.header` from `luks-headers/`),
         > no borg passphrase. Nothing in a bug needs them.
 
         This project takes serious bugs, setup reports and new Linux setups, and
@@ -51,6 +51,7 @@ body:
         - restore-rebuild-boot.sh (boot-chain rebuild)
         - backup-tray.py (tray indicator)
         - backup-diag.sh (troubleshooting report)
+        - testbed/testbed.sh (restore test bed)
         - Documentation
         - Not sure
     validations:
@@ -64,7 +65,7 @@ body:
         The `suite=` value at the top of any backup log, the first table row of
         the troubleshooting report, or `git describe --tags --always --dirty`.
         Only the latest release receives fixes.
-      placeholder: "3.0.0"
+      placeholder: "4.0.1"
     validations:
       required: true
 

@@ -52,9 +52,10 @@
 #   all           fingerprint before → prepare → format → mount → backup → restore → finish
 #
 # Test drives only ever get the passphrase "test": they hold a copy of this machine
-# and are wiped again on the next run. They boot unattended: the host's crypttab
-# keyfile is a second key on each container that crypttab opens with it, and an
-# encrypted /boot is opened by a test-only GRUB fallback loader with "test" built in.
+# and are wiped again on the next run. What the host opens without a prompt, the
+# test drive does too: the host's crypttab keyfile is a second key on each container
+# that crypttab opens with it, and an encrypted /boot is opened by a test-only GRUB
+# fallback loader with "test" built in. A root unlocked by passphrase asks for "test".
 # The suite's real restore scripts never carry a passphrase.
 #
 # Configuration (testbed.conf, see testbed.conf.example): $TESTBED_CONF, then
@@ -81,8 +82,11 @@ case "${1:-}" in -h|--help|"") sed -n '/^# testbed\/testbed.sh/,/^\[ -n "\${BASH
 # --- configuration -------------------------------------------------------------
 TB_TARGET_SERIAL="${TB_TARGET_SERIAL:-}"; TB_BACKUP_SERIAL="${TB_BACKUP_SERIAL:-}"
 TB_CONF=none
+# Last: the copy the newest test run of this host kept in its state directory —
+# collect runs after a reboot with the backup drive (and its copy) unplugged.
 for _c in "${TESTBED_CONF:-}" "$BACKUP_MOUNT/testbed/testbed.conf" \
-          "$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)/.config/linux-backup-system/testbed.conf" "$TB_DIR/testbed.conf"; do
+          "$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)/.config/linux-backup-system/testbed.conf" "$TB_DIR/testbed.conf" \
+          "$(ls -1d "/var/lib/linux-backup-testbed/$BACKUP_HOST_ID"-* 2>/dev/null | sort | tail -1)/testbed.conf"; do
     if [ -n "$_c" ] && [ -r "$_c" ]; then TB_CONF="$_c"; # shellcheck disable=SC1090
         . "$_c"; break; fi
 done
@@ -104,6 +108,7 @@ if [ -z "${TB_STATE:-}" ]; then
     [ -n "$TB_STATE" ] || TB_STATE="/var/lib/linux-backup-testbed/$TB_HOST-$(date +%Y%m%d-%H%M)"
 fi
 LEDGER="$TB_STATE/LEDGER.md"
+case "$TB_CONF" in none|"$TB_STATE/testbed.conf") ;; *) mkdir -p "$TB_STATE" && cp -f "$TB_CONF" "$TB_STATE/testbed.conf" 2>/dev/null ;; esac
 st_get() { cat "$TB_STATE/$1" 2>/dev/null; }
 st_set() { mkdir -p "$TB_STATE"; printf '%s\n' "$2" > "$TB_STATE/$1"; }
 ledger() { # ledger test|permanent WHAT REVERT
@@ -113,7 +118,20 @@ ledger() { # ledger test|permanent WHAT REVERT
 }
 
 # --- drives -------------------------------------------------------------------------
-disk_by_serial() { [ -n "$1" ] && lsblk -dnpo NAME,SERIAL 2>/dev/null | awk -v s="$1" '$2==s {print $1; exit}'; }
+# A disk answers to lsblk's serial or udev's ID_SERIAL_SHORT: behind some USB
+# bridges lsblk reports the SCSI serial (0000000000000000 on a Realtek bridge,
+# Fedora 44) while the drive's own serial is only in ID_SERIAL_SHORT.
+disk_has_serial() { # disk_has_serial DISK SERIAL
+    [ -n "$2" ] || return 1
+    [ "$(lsblk -dno SERIAL "$1" 2>/dev/null | tr -d ' ')" = "$2" ] && return 0
+    udevadm info -q property -n "$1" 2>/dev/null | grep -qxF "ID_SERIAL_SHORT=$2"
+}
+disk_by_serial() {
+    local d
+    [ -n "$1" ] || return 1
+    for d in $(lsblk -dnpo NAME 2>/dev/null); do disk_has_serial "$d" "$1" && { echo "$d"; return 0; }; done
+    return 1
+}
 # This machine's own disks: every disk under a mounted filesystem, an active swap
 # partition or an open container — minus the backup and test drives.
 host_disks() {
@@ -351,6 +369,9 @@ cmd_prepare() {
     local t; t=$(target_disk)
     cmd_plan >/dev/null || die "plan failed — run: testbed.sh plan"
     [ "${TB_WIPE:-}" = "$TB_TARGET_SERIAL" ] || die "this ERASES $t ($(lsblk -dno MODEL,SIZE "$t" | xargs)). Confirm with TB_WIPE=$TB_TARGET_SERIAL"
+    # every tool prepare + format run, checked (and installed) BEFORE the drive is touched
+    bx_ensure_deps sgdisk wipefs cryptsetup mkfs.vfat "mkfs.$(layout ROOT_FS)" | sed 's/^/[testbed] /'
+    [ "${PIPESTATUS[0]}" -eq 0 ] || die "missing tools — install them and re-run prepare"
     unmount_target    # a previous run's mounts, volume group and containers on the test drive
     local m; for m in $(lsblk -rnpo MOUNTPOINTS "$t" 2>/dev/null | grep .); do umount "$m" || die "cannot unmount $m on the test drive (a shell inside it?)"; done
     for m in $(lsblk -rnpo NAME,TYPE "$t" | awk '$2=="crypt"{print $1}'); do cryptsetup close "$(basename "$m")" 2>/dev/null; done
@@ -513,8 +534,11 @@ cmd_backup() {
     set_sectors "$(bx_disk_of "$(findmnt -no SOURCE "$BACKUP_MOUNT" | sed 's/\[.*//')")"
     st_set backup-mode "$mode"
     say "TEST archive ($mode) → $TB_REPO"
-    ledger test "TEST archive ($mode) in $TB_REPO; excludes on the command line only, /etc/backup-system.conf untouched" "revert deletes $TB_REPO (revert --keep-repo keeps it)"
-    env BORG_REPO="$TB_REPO" BACKUP_EXTRA_EXCLUDES="$ex" BACKUP_EXTRA_INCLUDES="${keep_inc# }" \
+    ledger test "TEST archive ($mode) in $TB_REPO; excludes on the command line only, /etc/backup-system.conf untouched; no btrfs replicas (BX_NO_REPLICAS=1: the drive's shared replica directory is neither written nor pruned)" "revert deletes $TB_REPO (revert --keep-repo keeps it)"
+    # The backup drive may be another machine's production drive: the test run
+    # writes only to its own repository. Replicas live in one directory shared by
+    # every host and are pruned by label — skipped.
+    env BX_NO_REPLICAS=1 BORG_REPO="$TB_REPO" BACKUP_EXTRA_EXCLUDES="$ex" BACKUP_EXTRA_INCLUDES="${keep_inc# }" \
         "$TB_STATE/suite/borg-backup.sh" > "$TB_STATE/backup.log" 2>&1
     local brc=$?
     tail -3 "$TB_STATE/backup.log"
@@ -672,7 +696,7 @@ unmount_target() {
     if [ -n "$(layout ROOT_VG 2>/dev/null)" ] && [ -e /dev/mapper/tb-root ]; then
         vgchange -an --devices /dev/mapper/tb-root "$(tb_vg)" >/dev/null 2>&1 || true
     fi
-    for m in tb-home tb-boot tb-root tb-verify-boot tb-verify; do [ -e "/dev/mapper/$m" ] && cryptsetup close "$m"; done
+    for m in tb-home tb-boot tb-root tb-verify-home tb-verify-boot tb-verify; do [ -e "/dev/mapper/$m" ] && cryptsetup close "$m"; done
     return 0
 }
 
@@ -714,6 +738,21 @@ cmd_collect() {
     local o=ro; [ "$(layout ROOT_FS)" = btrfs ] && o="ro,rescue=nologreplay,subvol=$(layout_all SUBVOL | awk -F= '$1=="/"{print $2}')"
     [ "$(layout ROOT_FS)" = ext4 ] && o="ro,noload"
     mount -o "$o" "$p" "$tmp" || die "mount test root"
+    # Everything else the archive has files under: the other btrfs subvolumes of
+    # the root filesystem (/home) and a /home partition. Unmounted, every file in
+    # them counted as missing.
+    local sv svp
+    if [ "$(layout ROOT_FS)" = btrfs ]; then
+        while IFS='=' read -r svp sv; do
+            [ -n "$svp" ] && [ "$svp" != / ] && [ -d "$tmp$svp" ] || continue
+            mount -o "ro,rescue=nologreplay,subvol=$sv" "$p" "$tmp$svp" || warn "could not mount subvolume $sv at $svp — its files count as missing"
+        done < <(layout_all SUBVOL)
+    fi
+    if has_role home; then
+        local h; h=$(partdev home)
+        if [ "$(layout HOME_CRYPT)" = 1 ]; then printf '%s' "$TB_PASSPHRASE" | cryptsetup open --readonly --key-file=- "$h" tb-verify-home && h=/dev/mapper/tb-verify-home; fi
+        mount -o ro "$h" "$tmp/home" 2>/dev/null || mount -o ro,noload "$h" "$tmp/home" || warn "could not mount the test drive's /home — its files count as missing"
+    fi
     if has_role boot; then
         local b; b=$(partdev boot)
         if [ "$(layout BOOT_CRYPT)" = 1 ]; then printf '%s' "$TB_PASSPHRASE" | cryptsetup open --readonly --key-file=- "$b" tb-verify-boot && b=/dev/mapper/tb-verify-boot; fi
@@ -745,10 +784,14 @@ cmd_revert() {
             else warn "report in $mnt not collected yet — run collect first (left in place)"; fi
         fi
     fi
-    if [ "$keep" = 0 ] && [ -d "$TB_REPO" ]; then
-        case "$TB_REPO" in "$BACKUP_MOUNT"/borg-testbed-*) rm -rf "$TB_REPO" && say "deleted the test repository $TB_REPO" ;; *) warn "TB_REPO=$TB_REPO is not a borg-testbed-* path — not deleting it" ;; esac
+    local repo_gone=0
+    if [ "$keep" = 0 ] && ! mountpoint -q "$BACKUP_MOUNT"; then
+        # Locked or unplugged: the repository is not reachable, so it is not gone.
+        warn "backup drive not mounted at $BACKUP_MOUNT — the test repository $TB_REPO is still on it; mount the drive and run revert again"
+    elif [ "$keep" = 0 ] && [ -d "$TB_REPO" ]; then
+        case "$TB_REPO" in "$BACKUP_MOUNT"/borg-testbed-*) rm -rf "$TB_REPO" && say "deleted the test repository $TB_REPO" && repo_gone=1 ;; *) warn "TB_REPO=$TB_REPO is not a borg-testbed-* path — not deleting it" ;; esac
     fi
-    ledger test "reverted: mounts, mappings, transfer sizes, report$( [ "$keep" = 0 ] && echo ', test repository')" "-"
+    ledger test "reverted: mounts, mappings, transfer sizes, report$( [ "$repo_gone" = 1 ] && echo ', test repository')" "-"
     say "reverted. Evidence stays in $TB_STATE"
 }
 

@@ -34,10 +34,22 @@
 # from crypttab/fstab/findmnt at run time, nothing is hardcoded to one host.
 #
 # Exit: 0 = restore-ready, 1 = ready with warnings, 2 = a restore would fail.
+#
+# Read-only, except with --fix: then the leftovers of section 7 (images of removed
+# kernels, a dead ESP GRUB stub, a missing GRUB font, files whose SELinux label
+# the loaded policy does not know) are repaired in place. The timer never passes it.
 # Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
 # shebang is ignored when a script is handed to another shell by name.
 [ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
+FIX=0
+for _a in "$@"; do
+    case "$_a" in
+        --fix) FIX=1 ;;
+        -h|--help) echo "usage: backup-verify.sh [--fix]   (exit 0 ready, 1 warnings, 2 a restore would fail; --fix repairs section 7)"; exit 0 ;;
+        *) echo "backup-verify.sh: unknown argument: $_a" >&2; exit 2 ;;
+    esac
+done
 
 # Per-host config: source the shared library and /etc/backup-system.conf so a
 # run by hand (or from the tray) sees the same drive the units do. Values set
@@ -647,6 +659,60 @@ if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
         echo "        (grub-install on Debian/Ubuntu), then regenerate grub.cfg."
     fi
 fi
+
+hdr "7. Leftovers on this system a restore would carry over"
+leftovers=0
+STALE_UKI_DIR=/var/lib/linux-backup-system/stale-ukis
+while read -r u; do
+    [[ -n "$u" ]] || continue; leftovers=1
+    if (( FIX )); then
+        mkdir -p "$STALE_UKI_DIR" && mv -f "$u" "$STALE_UKI_DIR/" && ok "fixed: $u (no installed kernel) moved to $STALE_UKI_DIR/" || bad "could not move $u"
+    else
+        note "$u belongs to no installed kernel (/lib/modules: $(ls -1 /lib/modules 2>/dev/null | paste -sd' ')) — the boot menu offers it,"
+        echo "        and a restore cannot rebuild it (it embeds this disk's command line). --fix moves it to $STALE_UKI_DIR/"
+    fi
+done < <(bx_orphan_ukis)
+font_fixed=0
+while IFS=$'\t' read -r v p; do
+    [[ -n "$v" ]] || continue; leftovers=1
+    if (( FIX )) && [[ "$v" == GRUB_FONT ]] && bx_fix_grub_font "$p" >/dev/null 2>&1; then
+        ok "fixed: $v=$p was missing — built from the installed font"; font_fixed=1
+    elif [[ "$v" == GRUB_FONT ]]; then
+        note "/etc/default/grub: $v=$p does not exist — grub-mkconfig aborts on it and leaves only grub.cfg.new${FIX:+}"
+        (( FIX )) && echo "        no matching TTF to build it from: install the font, or remove the $v line"
+        (( FIX )) || echo "        --fix builds it from the installed TTF of that name (grub2-mkfont)"
+    else
+        note "/etc/default/grub: $v=$p does not exist — install it or remove the $v line"
+    fi
+done < <(bx_grub_missing_files)
+(( font_fixed )) && echo "        the font is back: the next grub-mkconfig run (a kernel update) writes grub.cfg again"
+while IFS=$'\t' read -r f have want; do
+    [[ -n "$f" ]] || continue; leftovers=1
+    if [[ -z "$want" ]]; then
+        note "$f (ESP GRUB stub) searches for filesystem $have, which does not exist, and there is no grub.cfg"
+        echo "        under /boot: GRUB is not this system's boot path. Left alone (a firmware entry may still"
+        echo "        load another loader through shim); delete the stub if nothing uses it."
+    elif (( FIX )); then
+        bx_fix_grub_stub "$f" "$have" "$want" && ok "fixed: $f now searches for $want (was $have, which does not exist)" || bad "could not rewrite $f"
+    else
+        note "$f (ESP GRUB stub) searches for filesystem $have, which does not exist — GRUB lands at a prompt."
+        echo "        --fix points it at $want, the filesystem holding grub.cfg"
+    fi
+done < <(bx_dead_grub_stubs)
+mapfile -t unl < <(bx_unlabeled_paths)
+if (( ${#unl[@]} )); then
+    leftovers=1
+    if (( FIX )); then
+        for p in "${unl[@]}"; do restorecon -R "$p" 2>/dev/null; done
+        mapfile -t still < <(bx_unlabeled_paths)
+        (( ${#still[@]} )) && bad "restorecon left ${#still[@]} path(s) unlabeled: ${still[*]:0:5}" || ok "fixed: relabeled ${#unl[@]} path(s) the loaded SELinux policy did not know (restorecon -R)"
+    else
+        note "${#unl[@]} path(s) carry no SELinux label the loaded policy knows (unlabeled_t): ${unl[*]:0:5}$( (( ${#unl[@]} > 5 )) && echo ' …')"
+        echo "        A type left by a removed policy module makes btrfs receive refuse the whole replica"
+        echo "        (\"lsetxattr ... Invalid argument\"). --fix relabels them (restorecon -R)."
+    fi
+fi
+(( leftovers )) || ok "no images of removed kernels, dead GRUB stubs, missing GRUB files or unknown SELinux labels"
 
 echo
 if   (( fail )); then printf '%sRESTORE WOULD FAIL — fix the FAIL items above.%s\n' "$R" "$N"; exit 2

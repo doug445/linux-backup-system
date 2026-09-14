@@ -419,17 +419,50 @@ detect_backup_mount() {
 # process's own environment before that process is stopped. Exact pids only:
 # a pattern match would also hit any shell whose command line names the tray.
 ###############################################################################
+# tray_session_env PID — the desktop-session variables of one of the user's processes
+tray_session_env() {
+    tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null \
+        | grep -E '^(DISPLAY|WAYLAND_DISPLAY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|XDG_SESSION_TYPE|XAUTHORITY)=' \
+        | tr '\n' ' ' || true
+}
+# start_tray ENVS VERB — launch the tray in the user's session and prove it stayed up
+start_tray() {
+    local envs="$1" verb="$2" out
+    out=$(mktemp /tmp/backup-tray-start.XXXXXX); chmod 644 "$out"
+    # shellcheck disable=SC2086  # envs is a list of KEY=VALUE words by construction
+    runuser -u "$SUDO_USER" -- env $envs setsid /usr/local/bin/backup-tray >"$out" 2>&1 </dev/null &
+    sleep 3
+    if pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' >/dev/null 2>&1; then
+        log "  tray $verb (pid $(pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' | head -1))"
+        [ -s "$out" ] && sed 's/^/  [tray] /' "$out"
+    else
+        warn "  tray did not stay up — start it from the desktop: /usr/local/bin/backup-tray &"
+        [ -s "$out" ] && sed 's/^/  [tray] /' "$out" >&2
+    fi
+    rm -f "$out"
+}
 restart_tray() {
-    local pids pid envs
+    local pids pid envs="" spid
     pids=$(pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' 2>/dev/null || true)
     if [ -z "$pids" ]; then
-        log "  no tray running for $SUDO_USER — it starts at the next login (autostart)"
+        # Not running: start it now in the user's graphical session when there
+        # is one (its environment read from a process of that session), instead
+        # of leaving the first tray to the next login.
+        (( DRY )) && { log "  (dry run: a real run starts the tray in $SUDO_USER's desktop session, if one is logged in)"; return 0; }
+        for spid in $(pgrep -u "$SUDO_USER" 2>/dev/null); do
+            envs=$(tray_session_env "$spid")
+            case "$envs" in *DBUS_SESSION_BUS_ADDRESS=*) case "$envs" in *DISPLAY=*) break ;; esac ;; esac
+            envs=""
+        done
+        if [ -z "$envs" ]; then
+            log "  no desktop session for $SUDO_USER — the tray starts at the next login (autostart)"
+            return 0
+        fi
+        start_tray "$envs" started
         return 0
     fi
     for pid in $pids; do
-        envs=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
-               | grep -E '^(DISPLAY|WAYLAND_DISPLAY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|XDG_SESSION_TYPE|XAUTHORITY)=' \
-               | tr '\n' ' ' || true)
+        envs=$(tray_session_env "$pid")
         kill "$pid" 2>/dev/null || true
     done
     sleep 1
@@ -437,14 +470,7 @@ restart_tray() {
         warn "  tray stopped but its session environment could not be read — start it from the desktop: /usr/local/bin/backup-tray &"
         return 0
     fi
-    # shellcheck disable=SC2086  # envs is a list of KEY=VALUE words by construction
-    runuser -u "$SUDO_USER" -- env $envs setsid /usr/local/bin/backup-tray >/dev/null 2>&1 </dev/null &
-    sleep 2
-    if pgrep -u "$SUDO_USER" -f '^python3 /usr/local/bin/backup-tray$' >/dev/null 2>&1; then
-        log "  tray restarted with the new build"
-    else
-        warn "  tray did not come back — start it from the desktop: /usr/local/bin/backup-tray &"
-    fi
+    start_tray "$envs" "restarted with the new build"
 }
 
 ###############################################################################
@@ -1069,6 +1095,14 @@ deploy_systemd_units() {
     local mount_unit
     mount_unit=$(systemd_escape_path "$BACKUP_MOUNT")
 
+    # Ad-hoc: stop an active backup timer BEFORE any unit file is written. A
+    # Persistent= timer left running by an earlier install re-evaluates on the
+    # daemon-reload below and starts the missed run at once — the backup began
+    # mid-deploy, and the later `disable --now` stops the timer, not the run.
+    if [ "$SCHEDULE_MODE" != scheduled ]; then
+        systemctl disable --now backintime-backup.timer borg-backup.timer timeshift-backup.timer 2>/dev/null || true
+    fi
+
     # BIT service — always deploy
     sed -e "s|RequiresMountsFor=.*|RequiresMountsFor=$BACKUP_MOUNT|" \
         -e "s|After=.*mount|After=${mount_unit}.mount|" \
@@ -1527,7 +1561,7 @@ systemctl enable --now backup-verify.timer luks-header-backup.timer 2>/dev/null 
 log "  Borg timer:  $(systemctl is-enabled borg-backup.timer 2>/dev/null || true) / $(systemctl is-active borg-backup.timer 2>/dev/null || true)"
 log "  BIT timer:   $(systemctl is-enabled backintime-backup.timer 2>/dev/null || true) / $(systemctl is-active backintime-backup.timer 2>/dev/null || true)"
 if [ "$HAS_SNAPPER" = true ]; then
-    log "  Snapper:     $(systemctl is-active snapper-timeline.timer 2>/dev/null || echo 'check manually')"
+    log "  Snapper:     $(systemctl is-active snapper-timeline.timer 2>/dev/null || true)"
 fi
 
 # Step 7: Deploy recovery scripts to backup drive

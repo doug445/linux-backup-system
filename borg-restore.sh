@@ -1082,6 +1082,15 @@ log "Verifying kernel command-line carriers against the new disk..."
 stale=$(cl_stale_ids "$TARGET")
 if [ -n "$stale" ]; then
     while IFS=$'\t' read -r k f rk id; do
+        # An ESP GRUB stub is only a boot path when there is a grub.cfg for it
+        # to reach. With none (a host that boots systemd-boot, GRUB left behind
+        # by the installer — it was just as dead on the source) it cannot stop
+        # the restored system booting.
+        if [ "$k" = grubstub ] && [ ! -f "$TARGET/boot/grub2/grub.cfg" ] && [ ! -f "$TARGET/boot/grub/grub.cfg" ]; then
+            warn "  ${f#"$TARGET"} (ESP GRUB stub) references $rk $id which does not exist, and there is no grub.cfg — GRUB is not this system's boot path; left as it is (a firmware entry may still load another loader through shim)"
+            WARNINGS=$((WARNINGS + 1))
+            continue
+        fi
         error "  FAIL: $k ${f#"$TARGET"} references $rk $id which does not exist — the restored system would not boot"
         ERRORS=$((ERRORS + 1))
     done <<<"$stale"

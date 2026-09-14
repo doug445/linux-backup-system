@@ -121,8 +121,16 @@ if [ -z "$LUKS_UUID" ]; then
 elif [ -e "/dev/mapper/${MAPPER}" ]; then
     log "already unlocked: /dev/mapper/${MAPPER}"
 else
-    if [ -z "$KEYFILE" ] || [ ! -r "$KEYFILE" ]; then
-        log "ERROR: keyfile '${KEYFILE:-<unset>}' missing/unreadable — cannot auto-unlock."
+    # No keyfile configured is a normal setup — a drive unlocked by passphrase
+    # from the desktop. Failing here marked every boot with the drive plugged in
+    # "degraded" (restore test bed, Fedora 44). A configured keyfile that is
+    # missing is still an error.
+    if [ -z "$KEYFILE" ]; then
+        log "no BACKUP_KEYFILE configured — the drive stays locked until it is unlocked from the desktop (or set BACKUP_KEYFILE for unlock-on-connect)."
+        exit 0
+    fi
+    if [ ! -r "$KEYFILE" ]; then
+        log "ERROR: keyfile '$KEYFILE' missing/unreadable — cannot auto-unlock."
         exit 1
     fi
     log "unlocking ${LUKS_UUID} with $KEYFILE"

@@ -161,6 +161,9 @@ run "uname -rm" uname -rm
 runsh "hostname / init / firmware" 'echo "hostname=$(hostname)"; echo "init=$(ps -o comm= -p 1 2>/dev/null)"; [ -d /sys/firmware/efi ] && echo firmware=UEFI || echo firmware=BIOS; [ -r /proc/device-tree/compatible ] && printf "device-tree=%s\n" "$(tr "\0" " " </proc/device-tree/compatible)"; true'
 if have mokutil; then run "mokutil --sb-state" mokutil --sb-state; else out "mokutil: not installed (Secure Boot state unknown)"; out ""; fi
 runsh "virtualisation" 'systemd-detect-virt 2>/dev/null || echo "systemd-detect-virt unavailable"'
+# SELinux decides whether a restore relabels, and a type left by a removed policy
+# module breaks btrfs replicas ("lsetxattr ... Invalid argument").
+runsh "SELinux" 'if command -v getenforce >/dev/null 2>&1; then getenforce; sestatus 2>/dev/null | grep -E "policy name|Current mode|Mode from config"; else echo "not installed"; fi'
 
 section "Tool inventory"
 out '```'
@@ -189,6 +192,12 @@ out '```'
 section "Storage layout"
 run "lsblk" lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINTS,LABEL,UUID,TRAN,HOTPLUG,RM
 run "findmnt (real filesystems)" findmnt -rno TARGET,SOURCE,FSTYPE,OPTIONS -t ext4,ext3,ext2,btrfs,xfs,f2fs,vfat,exfat,ntfs,zfs,bcachefs
+# Serial values are not printed; what matters is whether lsblk and udev agree.
+# Behind some USB bridges lsblk reports the bridge's SCSI serial (all zeros)
+# while the drive's own serial is only in udev's ID_SERIAL_SHORT — the restore
+# test bed identifies drives by serial.
+runsh "disk serials (agreement only, values not shown)" 'lsblk -dnpo NAME,TRAN,SERIAL | while read -r d t sr; do u=$(udevadm info -q property -n "$d" 2>/dev/null | sed -n "s/^ID_SERIAL_SHORT=//p"); case "$sr" in ""|$t) sr="";; esac; ph=no; [ -z "$sr" ] || [ -z "$(printf %s "$sr" | tr -d 0)" ] && ph=yes; printf "%-14s tran=%-5s lsblk-serial-placeholder=%-3s udev-serial=%-7s agree=%s
+" "$d" "${t:--}" "$ph" "$([ -n "$u" ] && echo present || echo absent)" "$([ "$sr" = "$u" ] && echo yes || echo NO)"; done; true'
 file "/etc/fstab" /etc/fstab
 file "/etc/crypttab" /etc/crypttab
 if [ $IS_ROOT = 1 ] && have cryptsetup; then
@@ -205,7 +214,14 @@ fi
 section "Boot layout"
 runsh "ESP candidates" 'for e in /boot/efi /efi /boot /esp; do [ -d "$e/EFI" ] && { echo "$e: has EFI/ (mounted: $(mountpoint -q "$e" && echo yes || echo no), fstype: $(findmnt -no FSTYPE "$e" 2>/dev/null || echo -))"; ls "$e/EFI" 2>/dev/null | sed "s/^/    EFI\//"; }; done; true'
 runsh "systemd-boot entries / UKIs" 'for e in /boot/efi /efi /boot; do [ -d "$e/loader/entries" ] && { echo "$e/loader/entries:"; ls "$e/loader/entries" | sed "s/^/    /"; }; [ -d "$e/EFI/Linux" ] && { echo "$e/EFI/Linux:"; ls "$e/EFI/Linux" | sed "s/^/    /"; }; done; true'
-runsh "GRUB" 'for f in /boot/grub2/grub.cfg /boot/grub/grub.cfg /etc/default/grub; do [ -f "$f" ] && echo "present: $f"; done; grep -hE "^GRUB_(ENABLE_CRYPTODISK|CMDLINE_LINUX|CMDLINE_LINUX_DEFAULT)=" /etc/default/grub 2>/dev/null; true'
+runsh "GRUB" 'for f in /boot/grub2/grub.cfg /boot/grub/grub.cfg /boot/grub2/grub.cfg.new /boot/grub/grub.cfg.new /etc/default/grub; do [ -f "$f" ] && echo "present: $f"; done; grep -hE "^GRUB_(ENABLE_CRYPTODISK|CMDLINE_LINUX|CMDLINE_LINUX_DEFAULT|FONT|THEME)=" /etc/default/grub 2>/dev/null; true'
+# Which loader the firmware really starts. A shim entry can chain to a
+# grubx64.efi that was replaced by another loader (systemd-boot) — then GRUB's
+# files are not the boot path, and removing shim or its entry breaks booting.
+if have efibootmgr; then run "efibootmgr" efibootmgr; else out "efibootmgr: not installed"; out ""; fi
+if [ $IS_ROOT = 1 ]; then
+    runsh "what each shim on the ESP chains to" 'for e in /boot/efi /efi /boot; do for sh in "$e"/EFI/*/shim*.efi; do [ -f "$sh" ] || continue; d=$(dirname "$sh"); for g in "$d"/grub*.efi; do [ -f "$g" ] || continue; k=unknown; grep -qa "systemd-boot" "$g" && k=systemd-boot; grep -qa "GNU GRUB" "$g" && k=GRUB; echo "$sh -> $(basename "$g"): $k"; done; done; done 2>/dev/null | sort -u; true'
+fi
 runsh "kernel-install / dracut / mkinitcpio config" 'for f in /etc/kernel/install.conf /etc/kernel/cmdline /etc/dracut.conf /etc/mkinitcpio.conf /etc/initramfs-tools/initramfs.conf; do [ -f "$f" ] && { echo "== $f"; grep -vE "^\s*(#|$)" "$f" | head -20; }; done; ls /etc/dracut.conf.d /etc/mkinitcpio.d /etc/mkinitcpio.conf.d 2>/dev/null; true'
 runsh "/boot contents (names only)" 'ls -la /boot 2>/dev/null | awk "{print \$1, \$5, \$NF}"; true'
 runsh "installed kernels" 'ls /lib/modules 2>/dev/null; true'
@@ -228,6 +244,11 @@ if [ -r "$CONF" ]; then
     fi
 else
     out "**\`$CONF\`**: not present — every value is at its built-in default"; out ""
+fi
+if [ $IS_ROOT = 1 ] && mountpoint -q "${BACKUP_MOUNT:-/mnt/backup}" 2>/dev/null; then
+    # A drive another machine also backs up to: btrfs replicas share one
+    # directory and are pruned by label, so two hosts on one drive collide.
+    runsh "other machines' data on the backup drive (names only)" 'm="${BACKUP_MOUNT:-/mnt/backup}"; echo "Back In Time hosts: $(ls "$m/backintime/backintime" 2>/dev/null | tr "\n" " ")"; echo "btrfs replicas per label: $(ls "$m/snapshots" 2>/dev/null | sed -E "s/_[0-9]{8}_[0-9]{6}$//" | sort | uniq -c | awk "{printf \"%s=%s \", \$2, \$1}")"; echo "test bed repositories: $(ls -d "$m"/borg-testbed-* 2>/dev/null | xargs -r -n1 basename | tr "\n" " ")"; echo "this host: $(hostname)"; true'
 fi
 runsh "deployed scripts" 'for f in /usr/local/sbin/{backup-common,lib-cmdline,borg-backup,backintime-backup,timeshift-backup,backup-verify,luks-header-backup,restore-rebuild-boot,borg-backup-drive-attach,borg-backup-drive-detach,backup-diag}.sh /usr/local/bin/backup-tray; do [ -e "$f" ] && printf "%s  %s  %s\n" "$(stat -c "%a %U" "$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-12)" "$f"; done; true'
 
@@ -318,6 +339,16 @@ if have journalctl; then
     done
 fi
 runsh "restore session logs in /tmp" 'ls -la /tmp/borg-restore-*.log /tmp/backintime-restore-*.log 2>/dev/null || echo none'
+
+# ---------------------------------------------------------------------------
+section "Restore test bed runs"
+# The evidence a Bare-metal restore row turns green on: attach the state
+# directory's LEDGER.md, boot-report/ and byte-comparison.md with the issue.
+if [ $IS_ROOT = 1 ]; then
+    runsh "/var/lib/linux-backup-testbed" 'n=0; for d in /var/lib/linux-backup-testbed/*/; do [ -d "$d" ] || continue; n=1; g() { cat "$d/$1" 2>/dev/null | head -1; }; printf "%s  verdict=%s suite=%s backup=%s restore-rc=%s collected=%s\n" "$(basename "$d")" "$(g verdict || true)" "$(g suite-version)" "$(g backup-mode)" "$(g restore-rc)" "$([ -f "$d/finished-collect" ] && echo yes || echo no)"; grep -h "restored with the archived size" "$d/byte-comparison.md" 2>/dev/null | sed "s/^/    /"; done; [ "$n" = 1 ] || echo "no test bed runs on this machine"'
+else
+    skip "the test bed state needs root"
+fi
 
 # ---------------------------------------------------------------------------
 section "Restore readiness (backup-verify.sh, read-only)"

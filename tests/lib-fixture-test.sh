@@ -351,9 +351,34 @@ printf 0 > "$T/usb/2-1/authorized"; printf 0bda > "$T/usb/2-1/idVendor"; printf 
 printf 1 > "$T/usb/1-3/authorized"; printf 046d > "$T/usb/1-3/idVendor"; printf c52b > "$T/usb/1-3/idProduct"
 printf 1 > "$T/usb/usb1/authorized"
 expect "only the unauthorized device, with port, id and name" "2-1 0bda:9201 RTL9201" "$(BX_SYSFS_USB="$T/usb" bx_usb_blocked_devices)"
-BX_SYSFS_USB="$T/usb" bx_drive_gone_hint | grep -q 'NOT AUTHORIZED.*0bda:9201' && ok "the drive-gone hint names it" || bad "hint does not name the blocked device"
+# captured first: grep -q exits at the first match, and as root the hint goes on to
+# a kernel-log line — SIGPIPE, and pipefail turned the match into a failure
+h=$(BX_SYSFS_USB="$T/usb" bx_drive_gone_hint); grep -q 'NOT AUTHORIZED.*0bda:9201' <<<"$h" && ok "the drive-gone hint names it" || bad "hint does not name the blocked device"
 printf 1 > "$T/usb/2-1/authorized"
 expect "nothing blocked: no hint about authorization" "" "$(BX_SYSFS_USB="$T/usb" bx_drive_gone_hint | grep AUTHORIZED)"
+
+echo "== live-system leftovers a restore carries over (section 7 of backup-verify)"
+R="$T/leftover"; mkdir -p "$R/lib/modules/7.2.5-200.fc44.x86_64" "$R/boot/EFI/Linux" "$R/efi/EFI/fedora" "$R/efi/EFI/ubuntu" "$R/efi/EFI/BOOT" "$R/etc/default"
+for n in tok-7.2.5-200.fc44.x86_64.efi tok-7.0.10-201.fc44.x86_64.efi tok-0-rescue.efi arch-linux.efi; do : > "$R/boot/EFI/Linux/$n"; done
+expect "an image of a removed kernel is an orphan; installed, rescue and unversioned images are not" \
+    "$R/boot/EFI/Linux/tok-7.0.10-201.fc44.x86_64.efi" "$(BX_ROOT="$R" bx_orphan_ukis)"
+printf 'search --no-floppy --root-dev-only --fs-uuid --set=dev a600b79c-5c17-4816-8136-061866b63f22\nset prefix=($dev)/grub2\nexport $prefix\nconfigfile $prefix/grub.cfg\n' > "$R/efi/EFI/fedora/grub.cfg"
+printf 'search.fs_uuid 2C60-CECC root hd0,gpt2\nset prefix=($root)/boot/grub\nconfigfile $prefix/grub.cfg\n' > "$R/efi/EFI/ubuntu/grub.cfg"
+printf 'search --fs-uuid --set=dev dead-0000\n' > "$R/efi/EFI/BOOT/grub.cfg"
+printf '2c60-cecc\n' > "$T/uuids"
+st=$(BX_ROOT="$R" BX_UUID_EXISTS="$T/uuids" bx_dead_grub_stubs)
+expect "a stub naming a filesystem that does not exist is dead (Fedora form); a live one (Ubuntu form) and EFI/BOOT are not" \
+    "$R/efi/EFI/fedora/grub.cfg a600b79c-5c17-4816-8136-061866b63f22" "$(cut -f1,2 <<<"$st" | tr '\t' ' ')"
+cp "$R/efi/EFI/fedora/grub.cfg" "$T/stub.cfg"
+bx_grub_home_uuid() { printf '%s\t%s\n' 2C6A-68E0 /grub2; }
+bx_fix_grub_stub "$T/stub.cfg" a600b79c-5c17-4816-8136-061866b63f22 2C6A-68E0
+grep -q -- '--fs-uuid --set=dev 2C6A-68E0$' "$T/stub.cfg" && grep -qx 'set prefix=($dev)/grub2' "$T/stub.cfg" && ok "the stub is pointed at the filesystem holding grub.cfg" || bad "stub rewrite: $(cat "$T/stub.cfg")"
+unset -f bx_grub_home_uuid
+printf 'GRUB_TIMEOUT=5\nGRUB_FONT=/boot/grub2/LiberationMono.pf2\nGRUB_THEME="/boot/grub2/themes/x/theme.txt"\n' > "$R/etc/default/grub"
+mkdir -p "$R/boot/grub2/themes/x"; : > "$R/boot/grub2/themes/x/theme.txt"
+expect "GRUB not in use (no grub.cfg): its config files are not judged" "" "$(BX_ROOT="$R" bx_grub_missing_files)"
+: > "$R/boot/grub2/grub.cfg"
+expect "a GRUB_FONT that does not exist is named; an existing GRUB_THEME is not" "GRUB_FONT /boot/grub2/LiberationMono.pf2" "$(BX_ROOT="$R" bx_grub_missing_files | tr '\t' ' ')"
 
 echo "== snapshot engine"
 e=$(bx_snapshot_engine)
