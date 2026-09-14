@@ -150,6 +150,76 @@ printf 'root=UUID=%s\n' "$OR" > "$R/etc/kernel/cmdline"
 expect "stale old root id detected" "cmdline $R/etc/kernel/cmdline uuid $OR" "$(cl_stale_ids "$R" | tr '\t' ' ')"
 unset CL_ID_EXISTS_CMD
 
+echo "== fstab / crypttab references parsed by field (PARTUUID is not a UUID)"
+F="$T/tab"; mkdir -p "$F/etc"
+FP=abcd1234-01                                 # a PARTUUID whose tail must not read as a UUID
+printf '%b' "PARTUUID=$FP /boot/efi vfat umask=0077 0 2\nUUID=$OR  /      btrfs subvol=root 0 0\nUUID=$OR\t/home\tbtrfs subvol=home 0 0\n# UUID=$OR /old ext4 x 0 0\nLABEL=\"EOSBOOT\" /boot vfat defaults 0 2\n/swapfile none swap defaults 0 0\n/dev/mapper/vg-data /data ext4 defaults 0 2\n" > "$F/etc/fstab"
+printf '%b' "cryptroot PARTUUID=$FP none luks\ncrypthome UUID=$OL /etc/k luks\n" > "$F/etc/crypttab"
+expect "fstab: PARTUUID entry is kind PARTUUID" "PARTUUID $FP" "$(cl_fstab_ref "$F/etc/fstab" /boot/efi | tr '\t' ' ')"
+expect "fstab: root UUID" "UUID $OR" "$(cl_fstab_ref "$F/etc/fstab" / | tr '\t' ' ')"
+expect "fstab: quoted LABEL" "LABEL EOSBOOT" "$(cl_fstab_ref "$F/etc/fstab" /boot | tr '\t' ' ')"
+expect "fstab: swapfile is a PATH" "PATH /swapfile" "$(cl_fstab_ref "$F/etc/fstab" swap | tr '\t' ' ')"
+expect "fstab: commented entry ignored" "" "$(cl_fstab_ref "$F/etc/fstab" /old)"
+expect "fstab: no substring match on a mount prefix" "" "$(cl_fstab_ref "$F/etc/fstab" /bo)"
+expect "crypttab: PARTUUID device" "PARTUUID $FP" "$(cl_crypttab_ref "$F/etc/crypttab" cryptroot | tr '\t' ' ')"
+expect "crypttab: UUID device" "UUID $OL" "$(cl_crypttab_ref "$F/etc/crypttab" crypthome | tr '\t' ' ')"
+expect "fstab refs: every active line" "PARTUUID UUID UUID LABEL PATH PATH" "$(cl_table_refs "$F/etc/fstab" 1 | cut -f1 | tr '\n' ' ' | sed 's/ $//')"
+cp "$F/etc/fstab" "$F/fstab.orig"
+cl_table_set_ref "$F/etc/fstab" 1 UUID "$OR" "$NR"
+expect "set_ref: both btrfs lines rewritten, whitespace kept" "UUID=$NR  /      btrfs subvol=root 0 0|UUID=$NR"$'\t'"/home"$'\t'"btrfs subvol=home 0 0" "$(sed -n '2p;3p' "$F/etc/fstab" | paste -sd'|')"
+expect "set_ref: comment line untouched" "# UUID=$OR /old ext4 x 0 0" "$(sed -n 4p "$F/etc/fstab")"
+expect "set_ref: PARTUUID line untouched" "PARTUUID=$FP /boot/efi vfat umask=0077 0 2" "$(sed -n 1p "$F/etc/fstab")"
+cl_table_set_ref "$F/etc/fstab" 1 UUID "${FP}" "$NR"
+expect "set_ref: UUID=<partuuid value> does not match PARTUUID=" "PARTUUID=$FP /boot/efi vfat umask=0077 0 2" "$(sed -n 1p "$F/etc/fstab")"
+cl_table_set_ref "$F/etc/fstab" 1 PARTUUID "$FP" "$NP"
+expect "set_ref: PARTUUID rewritten as a PARTUUID" "PARTUUID=$NP /boot/efi vfat umask=0077 0 2" "$(sed -n 1p "$F/etc/fstab")"
+cl_table_set_ref "$F/etc/fstab" 1 LABEL EOSBOOT 'A&B'
+expect "set_ref: quoted LABEL, & in the new value" "LABEL=A&B /boot vfat defaults 0 2" "$(sed -n 5p "$F/etc/fstab")"
+expect "set_ref: line count unchanged" "$(wc -l < "$F/fstab.orig")" "$(wc -l < "$F/etc/fstab")"
+cl_table_set_ref "$F/etc/crypttab" 2 PARTUUID "$FP" "$NP"
+expect "set_ref: crypttab column 2 only" "cryptroot PARTUUID=$NP none luks|crypthome UUID=$OL /etc/k luks" "$(paste -sd'|' "$F/etc/crypttab")"
+refstub() { case "$1:$2" in "partuuid:$NP"|"uuid:$NR") return 0 ;; *) return 1 ;; esac; }
+# shellcheck disable=SC2034  # read by cl_ref_exists in the sourced library
+CL_ID_EXISTS_CMD=refstub
+cl_ref_exists PARTUUID "$NP" && ok "ref_exists: PARTUUID looked up as a partuuid" || bad "ref_exists: PARTUUID not found"
+cl_ref_exists UUID "$NP" && bad "ref_exists: a partuuid value passed as a UUID" || ok "ref_exists: kind matters"
+cl_ref_exists PATH /swapfile && ok "ref_exists: paths are not checked" || bad "ref_exists: PATH failed"
+unset CL_ID_EXISTS_CMD
+for rs in borg-restore.sh backintime-restore.sh; do
+    # The restore scripts' own fstab step, run against a synthetic fstab with blkid stubbed.
+    fn=$(sed -n '/^fix_fstab_ref() {/,/^}/p' "$HERE/../$rs")
+    [ -n "$fn" ] || { bad "$rs: fix_fstab_ref not found"; continue; }
+    (
+        log() { :; }; warn() { echo "WARN $*"; }
+        blkid() { # blkid -s KIND -o value DEV
+            case "$2:$5" in
+                UUID:/dev/newroot) echo "$NR" ;; PARTUUID:/dev/newesp) echo "$NP" ;;
+                UUID:/dev/newesp) echo "FFFF-0001" ;; LABEL:/dev/newboot) echo "EOSBOOT" ;;
+                *) return 2 ;;
+            esac; }
+        eval "$fn"
+        FSTAB="$F/rs-fstab"
+        printf '%b' "PARTUUID=$FP /efi vfat umask=0077 0 2\nUUID=$OR / btrfs subvol=root 0 0\nUUID=$OR /home btrfs subvol=home 0 0\nLABEL=EOSBOOT /boot vfat defaults 0 2\n/swapfile none swap defaults 0 0\n/dev/sda9 /data ext4 defaults 0 2\n" > "$FSTAB"
+        fix_fstab_ref root / /dev/newroot;   echo "MAP root $FIX_OLD $FIX_NEW"
+        fix_fstab_ref /home /home /dev/newroot; echo "MAP home ${FIX_OLD:-none}"
+        fix_fstab_ref ESP /efi /dev/newesp;  echo "MAP esp $FIX_OLD $FIX_NEW"
+        fix_fstab_ref /boot /boot /dev/newboot; echo "MAP boot ${FIX_OLD:-none}"
+        fix_fstab_ref swap swap "";          echo "MAP swap ${FIX_OLD:-none}"
+        fix_fstab_ref data /data /dev/x
+        echo "---"; cat "$FSTAB"
+    ) > "$F/rs.out" 2>&1
+    expect "$rs: root UUID rewritten on both btrfs lines" "2" "$(grep -c "^UUID=$NR " "$F/rs.out")"
+    expect "$rs: root pair handed to the command-line map" "MAP root $OR $NR" "$(grep '^MAP root' "$F/rs.out")"
+    expect "$rs: /home already correct after root, no second pair" "MAP home none" "$(grep '^MAP home' "$F/rs.out")"
+    expect "$rs: PARTUUID ESP gets the new PARTUUID, not the fs UUID" "PARTUUID=$NP /efi vfat umask=0077 0 2" "$(grep ' /efi ' "$F/rs.out")"
+    expect "$rs: ESP pair is PARTUUID old -> new" "MAP esp $FP $NP" "$(grep '^MAP esp' "$F/rs.out")"
+    expect "$rs: unchanged LABEL kept, not mapped" "MAP boot none" "$(grep '^MAP boot' "$F/rs.out")"
+    expect "$rs: swapfile left alone" "/swapfile none swap defaults 0 0" "$(grep '^/swapfile' "$F/rs.out")"
+    grep -q 'WARN .*/dev/sda9' "$F/rs.out" && ok "$rs: kernel device name in fstab is warned about" || bad "$rs: no warning for /dev/sda9"
+done
+grep -qE "grep -oP 'UUID=\\\\K" "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script still extracts ids with a substring UUID= match" || ok "restore scripts parse fstab/crypttab by field"
+grep -qE '\(\([A-Z_]+\+\+\)\)' "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script uses ((X++)) under set -e (exits when X is 0)" || ok "no ((X++)) under set -e in the restore scripts"
+
 echo
 echo "cmdline-fixture-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

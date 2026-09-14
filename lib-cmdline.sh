@@ -198,6 +198,75 @@ cl_carrier_mismatches() {
 }
 
 # ---------------------------------------------------------------------------
+# fstab / crypttab device references, parsed BY FIELD. A device column is
+# KIND=VALUE — UUID, PARTUUID, LABEL or PARTLABEL, optionally quoted — or
+# anything else (a path such as /dev/mapper/x or /swapfile), reported as kind
+# PATH. The restore scripts once matched "UUID=" as a substring: that also hit
+# the tail of "PARTUUID=", and a filesystem UUID was written where a partition
+# UUID belongs.
+# ---------------------------------------------------------------------------
+_CL_REF_AWK='function ref(d,  k) {
+    gsub(/"/, "", d)
+    if (match(d, /^(UUID|PARTUUID|LABEL|PARTLABEL)=/)) { k = substr(d, 1, RLENGTH - 1); return k "\t" substr(d, RLENGTH + 1) }
+    return "PATH\t" d
+}'
+
+# cl_table_refs FILE COL — "KIND<TAB>VALUE" of device column COL (fstab 1,
+# crypttab 2) on every active line.
+cl_table_refs() {
+    [ -r "$1" ] || return 0
+    awk -v c="$2" "$_CL_REF_AWK"' $1 !~ /^#/ && NF >= c { print ref($c) }' "$1"
+}
+
+# cl_fstab_ref FSTAB MOUNT — "KIND<TAB>VALUE" of the entry mounted at MOUNT;
+# MOUNT "swap" means the first swap entry. Empty when there is none.
+cl_fstab_ref() {
+    [ -r "$1" ] || return 0
+    awk -v m="$2" "$_CL_REF_AWK"' $1 !~ /^#/ && NF >= 3 && ($2 == m || (m == "swap" && $3 == "swap")) { print ref($1); exit }' "$1"
+}
+
+# cl_crypttab_ref CRYPTTAB NAME — "KIND<TAB>VALUE" of mapping NAME's device.
+cl_crypttab_ref() {
+    [ -r "$1" ] || return 0
+    awk -v n="$2" "$_CL_REF_AWK"' $1 == n && NF >= 2 { print ref($2); exit }' "$1"
+}
+
+# cl_table_set_ref FILE COL KIND OLD NEW — on every active line whose column
+# COL is exactly KIND=OLD (quoted or not), write KIND=NEW. Every line, as btrfs
+# subvolumes share one UUID. Nothing else changes: other columns, whitespace
+# and comments are kept byte for byte, and the file through `cat >` keeps its
+# inode, mode and label.
+cl_table_set_ref() {
+    local f="$1" tmp
+    [ -f "$f" ] || return 1
+    tmp="$(mktemp "$(dirname "$f")/.lbs-tab.XXXXXX")" || return 1
+    awk -v c="$2" -v k="$3" -v o="$4" -v n="$5" '
+        $1 !~ /^#/ && NF >= c {
+            d = $c; gsub(/"/, "", d)
+            if (d == k "=" o) {
+                line = $0; out = ""; i = 0
+                while (match(line, /[^ \t]+/)) {
+                    i++
+                    out = out substr(line, 1, RSTART - 1) (i == c ? k "=" n : substr(line, RSTART, RLENGTH))
+                    line = substr(line, RSTART + RLENGTH)
+                }
+                $0 = out line
+            }
+        }
+        { print }' "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$f"; rm -f "$tmp"
+}
+
+# cl_ref_exists KIND VALUE — does a device with this reference exist now?
+# PATH is not checked (always true). CL_ID_EXISTS_CMD overrides it (tests).
+cl_ref_exists() {
+    local kind="$1" val="$2"
+    [ "$kind" = PATH ] && return 0
+    if [ -n "${CL_ID_EXISTS_CMD:-}" ]; then "$CL_ID_EXISTS_CMD" "$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')" "$val"; return; fi
+    [ -n "$(blkid -t "$kind=$val" -o device 2>/dev/null)" ]
+}
+
+# ---------------------------------------------------------------------------
 # cl_id_exists KIND ID — does this id exist on the running system? Uses blkid;
 # CL_ID_EXISTS_CMD overrides it (tests): a command given KIND ID.
 # ---------------------------------------------------------------------------

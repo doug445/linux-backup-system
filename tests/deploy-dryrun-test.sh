@@ -52,6 +52,7 @@ grep -qE 'tray    -> /usr/local/bin/backup-tray \((running: would be restarted|n
 grep -qE 'Capacity:.*Linux filesystems.*floor.*recommended' <<<"$out" && ok "printed the capacity floor and recommendation" || bad "no capacity line"
 grep -q 'backup-diag.sh' <<<"$out" && ok "plan lists backup-diag.sh" || bad "plan omits backup-diag.sh"
 grep -q 'borg-backup-drive-detach.sh' <<<"$out" && ok "plan lists the detach script" || bad "plan omits borg-backup-drive-detach.sh"
+grep -q 'unbound variable' <<<"$out" && bad "a variable was unbound under set -u: $(grep -m1 'unbound variable' <<<"$out")" || ok "no unbound variable"
 grep -q '\[deps\]' <<<"$out" && ok "dependency step ran (reported, not installed)" || bad "no [deps] line — dependencies were not checked"
 grep -qE 'tray dependencies (present|: )|would install tray' <<<"$out" && ok "tray dependencies probed" || bad "tray dependencies not probed"
 

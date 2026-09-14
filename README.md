@@ -138,16 +138,16 @@ on that setup. Yellow ⚠️ means that setup is **undergoing testing now** — 
 deployed on real hardware and being run, but the backup-plus-verify pass has
 not been recorded yet. A red ❌ means the code paths exist and dry-run clean but
 that exact combination has **not** been verified yet — run it there and confirm
-before trusting it. The tooling was developed and dry-run-verified on Fedora
-Asahi Remix (aarch64), and fully verified end-to-end on Linux Mint 22.3
-(x86_64, ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI): real
-backups and a `backup-verify` pass on 2026-09-11, and the Timeshift retention
-paths (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot
-cleanup) on 2026-09-12 — first against a loop-device drive seeded with
-fabricated snapshots, then a real count prune on the production backup drive,
-deleting through `timeshift --delete` and confirmed by `backup-verify.sh`.
-It has also been tested and verified on **Fedora 44** (x86_64) on a 2019
-System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
+before trusting it.
+
+**Verified on** — the machines behind the ✅ rows:
+
+| Distro (arch) | Machine | Layout | Verified |
+|---|---|---|---|
+| Fedora Asahi Remix (aarch64) | MacBook Pro, M1 Pro | btrfs root, GRUB on `arm64-efi` behind m1n1/U-Boot | development platform; restore over a fresh Asahi install boots — September 2026, earlier 3.x |
+| Linux Mint 22.3 (x86_64) | — | ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI | backups + `backup-verify` 2026-09-11; Timeshift retention (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot cleanup) 2026-09-12, on a loop-device drive and then a real count prune on the production drive |
+| Fedora 44 (x86_64) | 2019 System76 laptop (Clevo-based, 32 GB RAM, two NVMe) | — | backups + `backup-verify` |
+| EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, SATA SSD) | ext4 root on LUKS2, plain vfat `/boot` (XBOOTLDR) + ESP at `/efi`, systemd-boot Type #1 entries, dracut; USB NVMe backup drive | deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL; the two warnings are the deliberately unencrypted test drive and a 477 GiB drive under the 2x recommendation) — 2026-09-14, 3.7.0 |
 
 **Distros**
 
@@ -156,7 +156,7 @@ System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
 | Fedora | ✅ |
 | Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ |
 | Debian / Ubuntu / Linux Mint | ✅ |
-| Arch / Manjaro / EndeavourOS | ⚠️ |
+| Arch / Manjaro / EndeavourOS | ✅ |
 | openSUSE (Leap / Tumbleweed) | ❌ |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) |
 
@@ -179,10 +179,10 @@ System76 flagship laptop (Clevo-based, 32 GB RAM, two NVMe drives).
 | Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ |
 | Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ |
 | Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ |
-| Plain `/boot` (unencrypted /boot) | ⚠️ |
+| Plain `/boot` (unencrypted /boot) | ✅ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
 | Bare-metal restore **executing** the boot rebuild (not just its dry run) — x86_64 and non-Apple aarch64 | ⚠️ |
-| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ MacBook Pro M1 Pro, September 2026, with an earlier 3.x |
+| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ |
 
 A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware,
 and ✅ when it has produced one real backup on each layer and has passed
@@ -409,7 +409,7 @@ The line that disagrees with reality is the bug. Then:
 | **Distro family → package manager** | `backup-common.sh` → `bx_distro_family` (matches `ID` and each word of `ID_LIKE` from `os-release`) and `bx_pkg_install_cmd`; `deploy.sh` → `detect_distro` (the same families, plus per-family package names) | Add your `ID` / `ID_LIKE` token to the family it belongs to, or add a family with its install command. Both places, or the library will accept a distro the installer refuses. | Add a synthetic `os-release` case to `tests/lib-fixture-test.sh`; `sudo ./deploy.sh --dry-run` prints `Distro:` with the right family |
 | **Package names** (borg, Back In Time, AppIndicator, Timeshift) | `backup-common.sh` → `bx_pkg_for`; `deploy.sh` → `detect_distro` (`BIT_PKGS`, `BORG_PKG`) and the two `case "$DISTRO_FAMILY"` blocks in *Step 1: Install packages* | Map the command to your distro's package name. | `sudo borg-backup.sh --dry-run` — its `[deps]` lines name what it would install |
 | **Root filesystem → snapshot engine** | `backup-common.sh` → `bx_snapshot_engine` (btrfs → send/receive, else Timeshift); consumed by `borg-backup.sh` (replica block), `timeshift-backup.sh` (early exit on btrfs), `backup-verify.sh` (section 4) | A new engine means a new branch in all four. A filesystem that should simply use Timeshift needs nothing — it already does. | `--dry-run` of both backup scripts; one real run; `backup-verify.sh` section 4 |
-| **Where the boot-firmware partition is** | `backup-common.sh` → `BX_ESP_PATHS` (used by `bx_esp_mount` and `backup-verify.sh`), `bx_backup_sources`, and the ESP block in `restore-rebuild-boot.sh` — **the accepted paths are `/boot/efi`, `/efi` and `/boot/firmware`** | Add your mountpoint to `BX_ESP_PATHS`, the sources list, and the rebuild script's loop. Stopgap until then: `BACKUP_EXTRA_SOURCES="/your/esp"` in the config gets it into the backup set. | The report's *ESP candidates*; `borg-backup.sh --dry-run` lists it under `backup sources` |
+| **Where the boot-firmware partition is** | `backup-common.sh` → `BX_ESP_PATHS` (used by `bx_esp_mount` and `backup-verify.sh`), `bx_backup_sources`, and the ESP block in `restore-rebuild-boot.sh` — **the accepted paths are `/boot/efi`, `/efi` and `/boot/firmware`** | Add your mountpoint to `BX_ESP_PATHS`, the sources list, the rebuild script's loop, and the ESP loop in both restore scripts. Stopgap until then: `BACKUP_EXTRA_SOURCES="/your/esp"` in the config gets it into the backup set. | The report's *ESP candidates*; `borg-backup.sh --dry-run` lists it under `backup sources` |
 | **Which bootloader, and how to rebuild it** | `restore-rebuild-boot.sh` — the detection block (`IS_UKI`, `USES_GRUB`, `USES_SDBOOT`, `IS_PI_FW`) and the per-bootloader steps; an unknown bootloader **warns and continues** | Add a detection test and a rebuild step for rEFInd, Limine, syslinux/extlinux, U-Boot… The Raspberry Pi case (no bootloader, fix `root=PARTUUID` in `cmdline.txt`) is the template for a firmware-reads-the-partition board. | `restore-rebuild-boot.sh --dry-run` on the live system shows the plan; `tests/cli-test.sh` proves the dry run executes nothing |
 | **Whether the archive is bootable** | `backup-common.sh` → `bx_boot_listing_counts`, used by `backup-verify.sh` section 3: patterns over the archive listing for a UKI, a `vmlinuz`/`Image`/`kernel*.img` or a kernel-install `<machine-id>/<version>/linux`, a `grub.cfg`, systemd-boot entries, and Pi `config.txt`+`cmdline.txt`. A bootloader they do not know produces a **false FAIL**: *"archive has NO bootloader config"* | Add a pattern for your bootloader's config file (or kernel name, e.g. `zImage`) and a synthetic listing to `tests/lib-fixture-test.sh`. | The fixture test; then `backup-verify.sh` after one real archive — section 3 must PASS |
 | **Which initramfs tool** | `restore-rebuild-boot.sh` — `update-initramfs` / `dracut` / `mkinitcpio` by `command -v`; otherwise a warning | Add your generator. | `restore-rebuild-boot.sh --dry-run` shows the `would:` line |
@@ -455,8 +455,13 @@ sudo ./borg-restore.sh --dry-run /mnt/target /mnt/backup/borg-backup  # preview:
 sudo ./backintime-restore.sh /mnt/target /mnt/backup/backintime       # BIT snapshot
 ```
 
-After extracting files, both method scripts fix up the new disk's ids in
-`fstab` and `crypttab` **and in every kernel command-line carrier** — BLS and
+Before anything is rewritten, both method scripts check the new disk's
+partition types — the ESP (at `/boot/efi`, `/efi`, or `/boot` itself) must be
+typed *EFI System*, and a separate vfat `/boot` next to it *XBOOTLDR* — and
+print the `sgdisk` fix, because a wrong type restores every file and still
+does not boot. After extracting files, they fix up the new disk's ids in
+`fstab` and `crypttab` — field by field, in the form each entry already uses
+(`UUID=`, `PARTUUID=`, `LABEL=`) — **and in every kernel command-line carrier** — BLS and
 systemd-boot entries, `/etc/kernel/cmdline` and `cmdline.d`,
 `GRUB_CMDLINE_LINUX` and its drop-ins, `extlinux.conf`, `syslinux.cfg`, a Pi
 `cmdline.txt`, `refind_linux.conf`, `limine.conf` — rewriting `root=`,
@@ -661,8 +666,12 @@ says where each decision lives.
   host the count prune, the `MIN_KEEP` floor and the aborted-snapshot cleanup
   ran for real; the free-space branch deleted real directories only on the
   loop-device drive (the production drive is 87% free). Same code path.
-- **The boot-firmware partition is only recognised at `/boot/efi`, `/efi` or
-  `/boot/firmware`** (`BX_ESP_PATHS`). `BACKUP_EXTRA_SOURCES` is the stopgap.
+- **The boot-firmware partition is only recognised at `/boot/efi`, `/efi`,
+  `/boot/firmware`, or `/boot` itself when `/boot` is a vfat partition typed EFI
+  System** (`BX_ESP_PATHS`, `bx_boot_is_esp`). The ESP-at-`/boot` case is
+  detected and checked by the restore scripts and the boot rebuild but has
+  not been restored on metal. `BACKUP_EXTRA_SOURCES` is the stopgap for
+  anything else.
 - **The command-line rewrite on restore is exercised only against synthetic
   trees** (`tests/cmdline-fixture-test.sh`, every carrier kind). A real
   restore onto a fresh disk is the ⚠️ "bare-metal restore" row (under test now).
@@ -753,7 +762,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.6.4
+- **Version:** 3.7.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

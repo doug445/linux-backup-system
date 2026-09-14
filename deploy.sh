@@ -472,6 +472,9 @@ blank_hotplug_disks() {
         { [ "$HOTPLUG" = 1 ] || [ "$TRAN" = usb ]; } || continue
         disk_is_blank "/dev/$NAME" && echo "/dev/$NAME"
     done < <(lsblk -dPo NAME,TRAN,HOTPLUG,TYPE 2>/dev/null)
+    # A non-blank last disk left the loop's status at 1; callers run under
+    # set -e -o pipefail and died there (an SD card listed last did it).
+    return 0
 }
 
 # On a host that already has a drive configured: a blank drive that has just
@@ -651,7 +654,9 @@ prepare_backup_drive() { # prepare_backup_drive [PRESELECTED_DEV]
     done
 
     luks_part=$(lsblk -rnpo NAME,FSTYPE "$dev" | awk '$2=="crypto_LUKS"{print $1; exit}' || true)
-    fs_part=$(lsblk -rnpo NAME,FSTYPE,TYPE "$dev" | awk '$2!="" && $2!="crypto_LUKS" && $2!="swap"{print $1; exit}' || true)
+    # FSTYPE last: lsblk -r collapses an empty column, so with FSTYPE in the
+    # middle a disk with only a partition table read TYPE ("disk") as its fs.
+    fs_part=$(lsblk -rnpo NAME,TYPE,FSTYPE "$dev" | awk '$3!="" && $3!="crypto_LUKS" && $3!="swap"{print $1; exit}' || true)
 
     # ----- A) already LUKS-encrypted: unlock and adopt -----------------------
     if [ -n "$luks_part" ]; then
@@ -1087,9 +1092,11 @@ EOF
 configure_timeshift() {
     local cfg=/etc/timeshift/timeshift.json fs_uuid dev luks_uuid="" out
     fs_uuid=$(findmnt -n -o UUID --target "$BACKUP_MOUNT" 2>/dev/null || true)
-    dev=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//")
+    # "|| true": with no drive connected BACKUP_MOUNT may not exist, findmnt
+    # fails, and under set -e -o pipefail that aborted the whole deploy.
+    dev=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
     if [[ "$dev" == /dev/mapper/* ]]; then
-        local backing; backing=$(cryptsetup status "${dev#/dev/mapper/}" 2>/dev/null | awk "/device:/{print \$2}")
+        local backing; backing=$(cryptsetup status "${dev#/dev/mapper/}" 2>/dev/null | awk "/device:/{print \$2}" || true)
         luks_uuid=$(cryptsetup luksUUID "$backing" 2>/dev/null || true)
     fi
     mkdir -p /etc/timeshift
