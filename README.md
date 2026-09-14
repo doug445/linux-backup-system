@@ -32,6 +32,14 @@ layout is derived at run time. It replaces the older `BIT_deploy` and
 `borg-backup` projects, which were Back-In-Time-centric and carried one host's
 paths hardcoded.
 
+> ### ⚠️ Testing only unless your setup is all green
+>
+> **Unless your distro, root filesystem and boot layout are all ✅ in the
+> *Bare-metal restore* column of [Tested / untested](#tested--untested), this
+> suite is for testing only. Do not use it in production until all are green.**
+> A backup you have never restored is a hope, not a backup; a ⚠️ or ❌ restore
+> row means nobody has yet booted that setup from a restored disk.
+
 > ### Status: ✅ verified on metal, ⚠️ undergoing testing now, ❌ written but not yet verified
 >
 > "Universal" is the goal and the design; the proof is per setup. The
@@ -133,12 +141,21 @@ disposable box gets the on-site layers and nothing more.
 
 ## Tested / untested
 
-Green ✅ means a real backup **and** a `backup-verify` pass have been confirmed
-on that setup. Yellow ⚠️ means that setup is **undergoing testing now** — it is
-deployed on real hardware and being run, but the backup-plus-verify pass has
-not been recorded yet. A red ❌ means the code paths exist and dry-run clean but
-that exact combination has **not** been verified yet — run it there and confirm
-before trusting it.
+Two columns, two different claims:
+
+- **Backup + verify** — ✅ a real backup **and** a `backup-verify` pass have been
+  confirmed on that setup; ⚠️ it is deployed on real hardware and being run,
+  but that pass is not recorded yet; ❌ the code paths exist and dry-run clean,
+  and that exact combination has **not** been verified.
+- **Bare-metal restore** — ✅ a backup of that setup has been restored onto a
+  **different, blank disk** by the suite's own restore scripts, the disk has
+  **booted** (unlocked, logged in, network up), and the restored files were
+  compared against the archive — with [`testbed/testbed.sh`](#the-restore-test-bed),
+  which proves the source machine's disks were not written; ⚠️ that restore is
+  under test now; ❌ not yet restored and booted.
+
+**Unless every row that describes your machine is ✅ in the Bare-metal restore
+column, use the suite for testing only — not in production.**
 
 **Verified on** — the machines behind the ✅ rows:
 
@@ -148,52 +165,91 @@ before trusting it.
 | Linux Mint 22.3 (x86_64) | 2014 MacBook Pro, i7-4870HQ, 16GB RAM, NVMe 2TB, AX210 Wi-Fi | ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI | backups + `backup-verify` 2026-09-11; Timeshift retention (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot cleanup) 2026-09-12, on a loop-device drive and then a real count prune on the production drive |
 | Fedora 44 (x86_64) | 2019 System76 laptop (Clevo-based, 32 GB RAM, two NVMe) | btrfs root, systemd-boot, UKI, Secure Boot | backups + `backup-verify` |
 | EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, SATA SSD) | ext4 root on LUKS2, plain vfat `/boot` (XBOOTLDR) + ESP at `/efi`, systemd-boot Type #1 entries, dracut; USB NVMe backup drive | deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL; the two warnings are the deliberately unencrypted test drive and a 477 GiB drive under the 2x recommendation) — 2026-09-14, 3.7.0 |
-| Manjaro (x86_64) | 2019 ASUS ZenBook UX534FTC (i7-10510U, 16 GB RAM, 2 TB NVMe) | btrfs root (`@`/`@home`, snapper) on LUKS2 opened by sd-encrypt, XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs from mkinitcpio, Secure Boot with sbctl keys; 2 TB USB SATA SSD backup drive (LUKS2, adopted from an earlier borgmatic set-up) | deploy over the retired borgmatic install, unlock-on-connect via the attach unit, borg + Back In Time dry runs, LUKS headers, root replica — 2026-09-14, 3.9.0; **⚠️ the full borg + Back In Time + `backup-verify` pass is pending**: the USB controller dropped mid-send (both ports dead until a power cycle), which is also what turned the detach unit and the dead-mount handling into a real test |
+| Manjaro (x86_64) | 2019 ASUS ZenBook UX534FTC (i7-10510U, 16 GB RAM, 2 TB NVMe) | btrfs root (`@`/`@home`/`@cache`/`@log`, snapper, swapfile) on LUKS2 opened by sd-encrypt, XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs from mkinitcpio, Secure Boot with sbctl keys; 2 TB USB SATA SSD backup drive (LUKS2) | **total system restore ✅ — success**, 2026-09-14, 3.9.0: restored onto a blank 2 TB USB NVMe and booted into a fully working system with Secure Boot on (Wi-Fi, DNS, Bluetooth up), the original disk untouched. Backups: deploy over a retired borgmatic install, unlock-on-connect, incremental btrfs replicas, borg archive, LUKS headers |
 
 **Distros**
 
-| Distro | Status |
-|---|:--:|
-| Fedora | ✅ |
-| Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ |
-| Debian / Ubuntu / Linux Mint | ✅ |
-| Arch / Manjaro / EndeavourOS | ✅ |
-| openSUSE (Leap / Tumbleweed) | ❌ |
-| **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) |
+| Distro | Backup + verify | Bare-metal restore |
+|---|:--:|:--:|
+| Fedora | ✅ | ❌ |
+| Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ | ✅ over a fresh Asahi install (never bare metal — see the FAQ) |
+| Debian / Ubuntu / Linux Mint | ✅ | ❌ |
+| Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro · ❌ Arch, EndeavourOS |
+| openSUSE (Leap / Tumbleweed) | ❌ | ❌ |
+| **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ |
 
 **Root filesystems** (this picks the local-snapshot engine — see Layers)
 
-| Root fs | Local-snapshot engine | Status |
-|---|---|:--:|
-| btrfs | btrfs send/receive (`borg-backup.sh`) | ✅ |
-| ext4 | Timeshift (`timeshift-backup.sh`) | ✅ |
-| xfs / f2fs / anything else | Timeshift | ❌ |
+| Root fs | Local-snapshot engine | Backup + verify | Bare-metal restore |
+|---|---|:--:|:--:|
+| btrfs (subvolumes, swapfile) | btrfs send/receive (`borg-backup.sh`) | ✅ | ✅ |
+| ext4 | Timeshift (`timeshift-backup.sh`) | ✅ | ❌ |
+| xfs / f2fs / anything else | Timeshift | ❌ | ❌ |
+| root on LUKS2, unlocked by sd-encrypt (`rd.luks.name=` + `crypttab.initramfs`) | — | ✅ | ✅ |
+| root on LVM-on-LUKS | — | ✅ | ❌ |
 
 **Boot layouts**
 
-| Setup | Status |
-|---|:--:|
-| systemd-boot (Type #1 entries, no UKI) | ✅ |
-| UKI (unified kernel image) | ✅ |
-| GRUB (EFI) | ✅ |
-| GRUB (legacy BIOS) | ❌ |
-| Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ |
-| Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ |
-| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ |
-| Plain `/boot` (unencrypted /boot) | ✅ |
-| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ |
-| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ |
-| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ |
-| SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ❌ |
-| Bare-metal restore **executing** the boot rebuild (not just its dry run) — x86_64 and non-Apple aarch64 | ⚠️ |
-| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ |
+| Setup | Backup + verify | Bare-metal restore |
+|---|:--:|:--:|
+| systemd-boot (Type #1 entries, no UKI) | ✅ | ❌ |
+| systemd-boot + UKI (unified kernel image), rebuilt by mkinitcpio presets | ✅ | ✅ |
+| UKI rebuilt by dracut or kernel-install | ✅ | ❌ |
+| **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed | ✅ | ✅ |
+| Secure Boot through shim (Fedora, Ubuntu, openSUSE) | ✅ | ❌ |
+| GRUB (EFI) | ✅ | ❌ |
+| GRUB (legacy BIOS) | ❌ | ❌ |
+| Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ | ❌ |
+| ESP at `/efi` + vfat XBOOTLDR `/boot` | ✅ | ✅ |
+| Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ | ❌ |
+| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ | ❌ |
+| Plain `/boot` (unencrypted /boot) | ✅ | ✅ |
+| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ | ❌ |
+| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ |
+| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ |
+| SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ❌ | ❌ |
+| Restore from an **installed system** onto a second disk, the original disk still installed — no NVRAM writes, nothing written to the original disk | — | ✅ |
+| Restore from a live USB | — | ❌ |
+| Apple Silicon (Asahi) restore — **never bare metal**: reinstall with the Asahi installer from macOS, then restore over the fresh install (see [FAQ](#can-i-run-it-on-apple-silicon)) | ✅ | ✅ |
 
-A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware,
-and ✅ when it has produced one real backup on each layer and has passed
-`backup-verify.sh` — with the
+A ❌ row turns ⚠️ when that setup is deployed and being run on real hardware.
+In the Backup + verify column it turns ✅ when it has produced one real backup on
+each layer and has passed `backup-verify.sh`, with the
 [troubleshooting report](#troubleshooting-logs-dry-runs-and-the-report) from
-that machine kept as the evidence. Every backup and the installer take
-`--dry-run` first, so the plan can be inspected without touching anything.
+that machine kept as the evidence. In the Bare-metal restore column it turns ✅
+when [`testbed.sh collect`](#the-restore-test-bed) has returned `VERDICT: PASS`
+for it, and its state directory is kept as the evidence. Every backup, the
+installer and the restore take `--dry-run` first.
+
+### The restore test bed
+
+`testbed/testbed.sh` turns "the restore should work" into a verdict, on any
+machine, with two spare drives: the backup drive and a **test drive** that is
+wiped on every run.
+
+```bash
+cp testbed/testbed.conf.example /mnt/backup/testbed/testbed.conf   # the two drives' serials, once
+sudo testbed/testbed.sh plan                                # the test drive laid out like THIS machine
+sudo TB_WIPE=<test-drive-serial> testbed/testbed.sh all     # fingerprint, wipe, partition, LUKS, backup, restore, logger
+# reboot, pick the test drive in the firmware menu (passphrase: test), wait two minutes, boot back
+sudo testbed/testbed.sh collect                             # boot report, fingerprint diff, byte comparison → VERDICT
+sudo testbed/testbed.sh revert                              # undo every test-only change
+```
+
+It mirrors the host: ESP location, a separate vfat or ext4 `/boot`, swap and
+`/home` partitions, LUKS with the host's own version and KDF (so a GRUB machine
+can still open it), the btrfs subvolumes fstab mounts. The test archive goes to
+its own repository (`borg-testbed-<host>`), keeping every home's configuration,
+keys, shell setup and Claude Code state but no bulk data; the host config is not
+touched. The restore runs from a frozen copy of the suite. `fingerprint`
+records the machine's own disks — partition tables, exact LUKS headers, every
+file on `/boot` and the ESP, firmware boot entries — before and after, and the
+verdict fails if anything but the expected (systemd-boot's random seed, a
+firmware reordering its boot menu) changed. The booted test drive leaves its
+report on the host's unencrypted boot partition, the one place it writes; every
+step is recorded in a ledger with its revert. Test drives always get the
+passphrase `test`; the suite's real restore scripts never carry one. Not
+mirrored yet: root on LVM or mdadm, a separate encrypted `/boot` partition.
 
 ## Scheduling policy
 
@@ -613,7 +669,8 @@ backintime-restore.sh         BIT restore + UUID fixup + universal boot rebuild 
 restore-rebuild-boot.sh       universal boot-chain rebuild (GRUB/systemd-boot/UKI/encrypted-boot)  --dry-run
 backup-tray.py backup-tray.desktop                 tray: every layer, run/log/verify/report by hand
 *.service *.timer 99-borg-backup.rules             systemd units + udev attach/detach rule template
-tests/                        lib fixtures, command lines, report redaction, deploy dry-run — what CI runs
+testbed/                      bare-metal restore test bed: plan, wipe, restore, boot report, byte comparison, verdict, revert
+tests/                        lib fixtures, command lines, report redaction, deploy dry-run, loop-device replicas — what CI runs
 docs/ABOUT.md                 the long-form description
 ```
 

@@ -25,6 +25,10 @@ distro, root filesystem and boot layout the suite detects the right things,
 writes a real backup, and that `backup-verify.sh` then agrees a restore would
 boot.
 
+**Unless a setup is ✅ in the README's *Bare-metal restore* column, the suite is
+for testing only on it — not production.** The restore test bed
+(`testbed/testbed.sh`, see the README) is how a row turns green.
+
 Every ❌ row in the README's status tables is a setup the code claims to handle
 and that has not been confirmed on metal by me; a ⚠️ row is one undergoing
 testing now. **Each row turns ⚠️ while it is being tested and ✅ once it is
@@ -48,7 +52,8 @@ have.
 | **Limine** (CachyOS's default) | ❌ — written, fixture-tested only | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
 | **rEFInd** | ❌ — written, fixture-tested only | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
 | **SELinux restore relabel** (Fedora, RHEL) | ❌ — written, fixture-tested only | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
-| **Bare-metal restore executing the boot rebuild** | ⚠️ under test | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
+| Bare-metal restore — Manjaro, btrfs on LUKS2 (sd-encrypt), systemd-boot + mkinitcpio UKIs, Secure Boot with sbctl keys | ✅ total system restore, booted fully working | a report on another distro or boot layout |
+| **Bare-metal restore on every other setup** — each ❌ in the README's *Bare-metal restore* column | ❌ **most wanted** | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
 
 ### Wanted: setups the restore does not handle yet
