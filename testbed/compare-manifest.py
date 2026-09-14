@@ -27,8 +27,11 @@
 """compare-manifest.py MANIFEST ROOT — every regular file in a borg archive listing
 ("type<TAB>size<TAB>path") against a restored tree, hard-link aware: borg lists the
 data under the first name and size 0 under every other name of the same inode."""
-import gzip, os, sys
+import gzip
+import os
+import sys
 from collections import defaultdict
+
 man, root = sys.argv[1], sys.argv[2].rstrip("/")
 entries = []
 with gzip.open(man, "rt", errors="surrogateescape") as f:
@@ -45,7 +48,7 @@ for size, path in entries:
         missing.append(path); continue
     stats[path] = st; by_inode[(st.st_dev, st.st_ino)].append((size, path))
 identical = hardlink_ok = 0; differ = []; restored_bytes = 0
-for key, group in by_inode.items():
+for group in by_inode.values():
     actual = stats[group[0][1]].st_size
     restored_bytes += actual
     listed = [s for s, _ in group if s > 0]
