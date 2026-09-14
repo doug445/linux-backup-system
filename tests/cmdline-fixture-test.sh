@@ -286,6 +286,39 @@ expect "after the mapping nothing in the boot chain points at the old disk" "" "
 grep -q "root=/dev/mapper/luks-$OLDC" "$Z/etc/kernel/cmdline" && grep -q "rd.luks.name=NEWC-0000-0000-0000-000000000000=luks-$OLDC" "$Z/etc/kernel/cmdline" \
     && ok "the mapper NAME is kept (fstab's /dev/mapper path still matches), only the id changed" || bad "cmdline: $(cat "$Z/etc/kernel/cmdline")"
 
+echo "== optional crypttab drives; UKI embedded command lines; extra expected ids"
+mk "$T/ct/etc/crypttab" "data1 UUID=$OL none discard,nofail,noauto\ndata2 UUID=$OB /k nofail\nroot UUID=$NL none discard\n# old UUID=$OR none noauto\n"
+cl_crypttab_optional "$T/ct/etc/crypttab" data1 && ok "noauto,nofail entry is optional" || bad "data1 not optional"
+cl_crypttab_optional "$T/ct/etc/crypttab" data2 && ok "nofail alone is optional" || bad "data2 not optional"
+cl_crypttab_optional "$T/ct/etc/crypttab" root && bad "a plain entry was called optional" || ok "a plain entry is required"
+cl_crypttab_optional "$T/ct/etc/crypttab" old && bad "a commented-out entry matched" || ok "commented-out entries never match"
+cl_crypttab_optional "$T/ct/etc/crypttab" absent && bad "an absent name matched" || ok "an absent name is not optional"
+
+# A minimal PE with a .cmdline section, laid out the way systemd-stub/ukify write it.
+python3 - "$T/uki.efi" "rd.luks.name=$OL=luks-root root=/dev/mapper/luks-root resume=UUID=$OS resume_offset=42 quiet" <<'PY'
+import struct, sys
+path, cmd = sys.argv[1], sys.argv[2].encode() + b"\0"
+pe = 0x80; optsz = 0xF0; nsec = 2
+secoff = pe + 24 + optsz; dataoff = 0x400
+d = bytearray(dataoff + 0x1000)
+d[0:2] = b"MZ"; struct.pack_into("<I", d, 0x3c, pe)
+d[pe:pe+4] = b"PE\0\0"; struct.pack_into("<HH", d, pe+4, 0x8664, nsec); struct.pack_into("<H", d, pe+20, optsz)
+struct.pack_into("<8sIIII", d, secoff,      b".text\0\0\0", 0x10, 0x1000, 0x10, dataoff)
+struct.pack_into("<8sIIII", d, secoff + 40, b".cmdline",    len(cmd), 0x2000, 0x200, dataoff + 0x10)
+d[dataoff+0x10:dataoff+0x10+len(cmd)] = cmd
+open(path, "wb").write(d)
+PY
+expect "cmdline read from the PE section table (NUL stripped)" "rd.luks.name=$OL=luks-root root=/dev/mapper/luks-root resume=UUID=$OS resume_offset=42 quiet" "$(cl_uki_cmdline "$T/uki.efi")"
+printf 'not a PE file\n' > "$T/notpe.efi"
+expect "a non-PE file yields nothing" "" "$(cl_uki_cmdline "$T/notpe.efi")"
+mkdir -p "$T/uk/boot/EFI/Linux" "$T/uk/efi/EFI/Linux"; : > "$T/uk/boot/EFI/Linux/a.efi"; : > "$T/uk/efi/EFI/Linux/B.EFI"; : > "$T/uk/boot/EFI/Linux/notes.txt"
+expect "UKIs under /boot and /efi, either case, nothing else" "$T/uk/boot/EFI/Linux/a.efi $T/uk/efi/EFI/Linux/B.EFI " "$(cl_ukis "$T/uk" | tr '\n' ' ')"
+
+mk "$T/xe/etc/fstab" "/dev/mapper/root / btrfs subvol=@ 0 0\n"
+mk "$T/xe/etc/kernel/cmdline" "root=/dev/mapper/root resume=UUID=$NR resume_offset=5\n"
+expect "without extra ids the root fs is reported undeclared" "uuid $NR" "$(cl_carrier_mismatches "$T/xe" | cut -f3,4 | tr '\t' ' ')"
+expect "CL_EXTRA_EXPECTED declares it (uppercase given)" "" "$(CL_EXTRA_EXPECTED="${NR^^}" cl_carrier_mismatches "$T/xe")"
+
 grep -qE '\(\([A-Z_]+\+\+\)\)' "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script uses ((X++)) under set -e (exits when X is 0)" || ok "no ((X++)) under set -e in the restore scripts"
 
 echo
