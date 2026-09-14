@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -38,6 +38,9 @@
 #   - LUKS already opened if applicable
 #   - Borg backup drive mounted (unlock LUKS first if needed)
 #   - Live USB must have: borgbackup, cryptsetup
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -euo pipefail
 
 # The repo is encryption=none (the LUKS drive encrypts it). On a fresh live

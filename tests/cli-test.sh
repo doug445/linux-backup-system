@@ -33,6 +33,9 @@
 # which must appear truncated by default and whole under --no-redact. And that
 # restore-rebuild-boot.sh --dry-run executes nothing (every action line is a
 # "would:" line). No disk is touched.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$HERE/.."
@@ -250,6 +253,37 @@ sed -n '/^efi_boot_entry()/,/^}/p' "$ROOT/restore-rebuild-boot.sh" | grep -q 'NO
 for f in borg-restore.sh backintime-restore.sh; do
     grep -q 'mount -o remount,bind,ro "$TARGET/sys/firmware/efi/efivars"' "$ROOT/$f" && grep -q 'env RESTORE_NO_NVRAM="$RESTORE_NO_NVRAM"' "$ROOT/$f" \
         && ok "$f: efivars read-only in the chroot and the mode passed in when run from an installed system" || bad "$f: NVRAM guard missing"
+done
+
+echo "== any shell: bash shebang via env, re-exec guard, library guard, helpers that parse in bash, zsh and fish"
+bad_sb=$(for f in $(cd "$ROOT" && git ls-files '*.sh' 2>/dev/null || ls ./*.sh tests/*.sh); do head -1 "$ROOT/$f" | grep -qx '#!/usr/bin/env bash' || echo "$f"; done)
+[ -z "$bad_sb" ] && ok "every script starts #!/usr/bin/env bash (no /bin/bash: NixOS, Guix)" || bad "shebangs: $bad_sb"
+noguard=$(for f in $(cd "$ROOT" && git ls-files '*.sh' 2>/dev/null); do
+    first_set=$(grep -n '^set -' "$ROOT/$f" | head -1 | cut -d: -f1); g=$(grep -n 'BASH_VERSION:-}" \] ||' "$ROOT/$f" | head -1 | cut -d: -f1)
+    { [ -n "$g" ] && { [ -z "$first_set" ] || [ "$g" -lt "$first_set" ]; }; } || echo "$f"; done)
+[ -z "$noguard" ] && ok "every script checks for bash before its first set -o (dash dies on pipefail)" || bad "no guard before set: $noguard"
+if command -v zsh >/dev/null; then
+    out=$(cd "$ROOT" && zsh ./deploy.sh --help 2>&1); grep -q Usage <<<"$out" && ok "zsh ./deploy.sh --help re-execs under bash" || bad "zsh deploy.sh: $out"
+    (cd "$ROOT" && zsh ./borg-backup.sh --bogus-flag >/dev/null 2>&1); expect "zsh ./borg-backup.sh --bogus-flag -> 2 (ran as bash)" 2 "$?"
+    out=$(cd "$ROOT" && zsh -c '. ./backup-common.sh; echo sourced-rc=$?' 2>&1)
+    grep -q 'needs bash' <<<"$out" && grep -q 'sourced-rc=1' <<<"$out" && ok "sourcing the library from zsh refuses with a message" || bad "zsh source: $out"
+fi
+for sh_ in dash "busybox sh"; do
+    command -v ${sh_%% *} >/dev/null || continue
+    out=$(cd "$ROOT" && $sh_ ./deploy.sh --help 2>&1); grep -q Usage <<<"$out" && ok "$sh_ ./deploy.sh --help re-execs under bash" || bad "$sh_ deploy.sh: $out"
+done
+# helper_sh's heredocs contain lines that are just "}", so extract whole
+# function ranges by their neighbours, not by the first closing brace.
+awk '/^helper_sh\(\)/{f=1} /^add_fish_function\(\)/{f=0} f' "$ROOT/deploy.sh" > "$T/helpers.sh"
+for n in timeback bitback snapback; do
+    bash -c ". '$T/helpers.sh'; helper_sh $n '/mnt/my backup'" > "$T/h-$n.sh"
+    bash -n "$T/h-$n.sh" && ok "$n: bash parses it" || bad "$n: bash -n failed"
+    if command -v zsh >/dev/null; then zsh -n "$T/h-$n.sh" && ok "$n: zsh parses it" || bad "$n: zsh -n failed"; fi
+    grep -q "mountpoint -q '/mnt/my backup'" "$T/h-$n.sh" || [ "$n" = snapback ] && ok "$n: a mount path with a space stays one argument" || bad "$n: unquoted mount"
+    if command -v fish >/dev/null; then
+        bash -c ". '$T/helpers.sh'; helper_fish $n '/mnt/my backup'" > "$T/h-$n.fish"
+        fish --no-execute "$T/h-$n.fish" 2>"$T/fish.err" && ok "$n: fish parses its .fish file" || bad "$n: fish: $(cat "$T/fish.err")"
+    fi
 done
 
 echo "== version stamp"

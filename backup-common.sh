@@ -38,6 +38,8 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
+# Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
+[ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
 BX_VERSION="3.9.0"
 
 # ---------------------------------------------------------------------------
@@ -349,6 +351,21 @@ bx_includes() {
     local i inc=()
     read -ra inc <<<"${BACKUP_EXTRA_INCLUDES:-}"
     for i in "${inc[@]}"; do printf '%s\n' "${i%/}"; done
+    return 0
+}
+
+# bx_borg_patterns SOURCE... — borg --pattern arguments, one per line, in the
+# order borg must see them: sources under a blanket-excluded tree first
+# (BACKUP_EXTRA_SOURCES=/mnt/data), then BACKUP_EXTRA_INCLUDES, then every
+# exclude. The one place this order is decided: borg-backup.sh and the restore
+# test bed build the same archive from it.
+bx_borg_patterns() {
+    local s i e
+    for s in "$@"; do
+        case "$s" in /mnt/*|/media/*|/run/*|/tmp/*) printf -- '--pattern=+%s\n' "$s" ;; esac
+    done
+    while IFS= read -r i; do [ -n "$i" ] && printf -- '--pattern=+%s\n' "$i"; done < <(bx_includes)
+    while IFS= read -r e; do [ -n "$e" ] && printf -- '--pattern=-%s\n' "$e"; done < <(bx_excludes)
     return 0
 }
 

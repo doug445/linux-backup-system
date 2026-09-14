@@ -32,6 +32,9 @@
 # config loading and defaults, the free-space predicates and the wrong-drive
 # guard. No disk, no root, no network — pure logic, so it runs everywhere.
 # shellcheck disable=SC2034  # variables set here are read by the sourced library functions
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -328,6 +331,11 @@ many=$(for i in $(seq 1 5000); do printf '/x/%s/* ' "$i"; done)
 echo "== extra includes: literal, one per line, trailing slash dropped"
 expect "includes printed as given" "/home/*/.config /home/*/.ssh " "$(cd / && BACKUP_EXTRA_INCLUDES="/home/*/.config /home/*/.ssh/" bx_includes | tr '\n' ' ')"
 expect "no includes: nothing" "" "$(BACKUP_EXTRA_INCLUDES="" bx_includes)"
+
+echo "== borg pattern order: extra source, includes, excludes"
+pat=$(BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_INCLUDES="/home/*/.config" BACKUP_EXTRA_EXCLUDES="/home/*/*" bx_borg_patterns / /home /mnt/data | tr '\n' ' ')
+case "$pat" in "--pattern=+/mnt/data --pattern=+/home/*/.config --pattern=-/dev/*"*) ok "source re-include, then includes, then the first exclude" ;; *) bad "pattern order: $pat" ;; esac
+grep -q -- '--pattern=-/home/\*/\* ' <<<"$pat " && ok "the extra exclude is in the list" || bad "extra exclude missing"
 
 echo "== capacity check knob"
 BACKUP_MOUNT="$T/absent"; CAPACITY_CHECK=off

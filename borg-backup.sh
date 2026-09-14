@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -38,6 +38,9 @@
 #   sudo borg-backup.sh --dry-run    detect + log every action, change nothing
 #                                    (borg runs with --dry-run; no snapshot,
 #                                     send, prune, compact or delete happens)
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 # --- shared library + per-host config ---------------------------------------
@@ -305,13 +308,10 @@ BORG_OPTS=(--verbose --filter AME --list --show-rc --compression lz4
 # source that lives under a blanket-excluded tree (BACKUP_EXTRA_SOURCES=
 # /mnt/data under /mnt/*) is re-included FIRST — borg takes the first match —
 # where --exclude '/mnt/*' used to archive it as an empty directory.
-for _src in "${SOURCES[@]}"; do
-    case "$_src" in /mnt/*|/media/*|/run/*|/tmp/*) BORG_OPTS+=("--pattern=+$_src") ;; esac
-done
-# BACKUP_EXTRA_INCLUDES re-enter excluded trees; before the excludes, since
-# borg takes the first match. A directory pattern carries its subtree.
-while IFS= read -r _in; do [ -n "$_in" ] && BORG_OPTS+=("--pattern=+$_in"); done < <(bx_includes)
-while IFS= read -r _ex; do [ -n "$_ex" ] && BORG_OPTS+=("--pattern=-$_ex"); done < <(bx_excludes)
+# Order (backup-common.sh bx_borg_patterns): sources under an excluded tree,
+# BACKUP_EXTRA_INCLUDES, then every exclude — borg takes the first match.
+mapfile -t _pat < <(bx_borg_patterns "${SOURCES[@]}")
+BORG_OPTS+=("${_pat[@]}")
 # --stats is incompatible with --dry-run in borg; use one or the other.
 if (( DRY )); then BORG_OPTS+=(--dry-run); else BORG_OPTS+=(--stats); fi
 

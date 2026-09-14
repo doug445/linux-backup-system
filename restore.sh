@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -33,6 +33,9 @@
 #
 # Or with pre-mounted target:
 #   sudo ./restore.sh /mnt/target
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 # The borg repo is encryption=none (the LUKS drive encrypts it); without these

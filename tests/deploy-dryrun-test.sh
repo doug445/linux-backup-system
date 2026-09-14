@@ -28,6 +28,9 @@
 # no backup drive: it must detect the host, print the plan and change nothing.
 # Needs root (it refuses otherwise). It never installs a package or writes a
 # file in dry-run mode, which is exactly what this test proves.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$HERE/.."

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -40,6 +40,9 @@
 #   BACKUP_MOUNT=/path/to/backup  — force a specific backup mount path
 #   FORCE_BORG=1                  — overwrite existing borg scripts even if present
 #   SCHEDULE_MODE=adhoc|scheduled — override the drive-type detection
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -1543,26 +1546,38 @@ fi
 # Step 8: Add shell functions
 log "Adding shell functions..."
 
-BITBACK_FUNC="bitback() {
-    if ! mountpoint -q $BACKUP_MOUNT 2>/dev/null; then echo \"ERROR: $BACKUP_MOUNT not mounted\"; return 1; fi
-    case \"\${1:-}\" in
+# The helpers, per shell. bash and zsh share one POSIX-ish body; fish has its
+# own syntax and gets functions/*.fish files — bash syntax in a fish config
+# would break every new fish shell. MOUNT is quoted: a mount path with a space
+# split the old `mountpoint -q $BACKUP_MOUNT`.
+helper_sh() { # helper_sh NAME MOUNT — the bash/zsh function body
+    local m="$2"
+    case "$1" in
+        bitback) cat <<EOF
+bitback() {
+    if ! mountpoint -q '$m' 2>/dev/null; then echo "ERROR: $m not mounted"; return 1; fi
+    case "\${1:-}" in
         list) pkexec backintime --config /root/.config/backintime/config show ;;
         log)  sudo tail -50 /var/log/backintime-backup.log ;;
         *)    sudo /usr/local/sbin/backintime-backup.sh ;;
     esac
-}"
-
-TIMEBACK_FUNC="timeback() {
+}
+EOF
+        ;;
+        timeback) cat <<EOF
+timeback() {
     local BORG_REPO
-    BORG_REPO=\$(. /etc/backup-system.conf 2>/dev/null; echo \"\${BORG_REPO:-$BACKUP_MOUNT/borg-backup}\")
-    if ! mountpoint -q $BACKUP_MOUNT 2>/dev/null; then echo \"ERROR: $BACKUP_MOUNT not mounted\"; return 1; fi
-    case \"\${1:-}\" in
-        list) sudo borg list \"\$BORG_REPO\" ;; info) sudo borg info \"\$BORG_REPO\" ;;
+    BORG_REPO=\$(. /etc/backup-system.conf 2>/dev/null; echo "\${BORG_REPO:-$m/borg-backup}")
+    if ! mountpoint -q '$m' 2>/dev/null; then echo "ERROR: $m not mounted"; return 1; fi
+    case "\${1:-}" in
+        list) sudo borg list "\$BORG_REPO" ;; info) sudo borg info "\$BORG_REPO" ;;
         log) sudo tail -50 /var/log/borg-backup.log ;; *) sudo /usr/local/sbin/borg-backup.sh ;;
     esac
-}"
-
-SNAPBACK_FUNC='snapback() {
+}
+EOF
+        ;;
+        snapback) cat <<'EOF'
+snapback() {
     case "${1:-}" in
         list)     sudo snapper -c root list; echo; sudo snapper -c home list ;;
         create)   sudo snapper -c root create -d "manual"; sudo snapper -c home create -d "manual"; echo "Snapshots created." ;;
@@ -1570,15 +1585,105 @@ SNAPBACK_FUNC='snapback() {
         diff)     sudo snapper -c root diff "${2:?Usage: snapback diff <snapshot#>}..0" ;;
         *)        echo "Usage: snapback [list|create|rollback N|diff N]" ;;
     esac
-}'
+}
+EOF
+        ;;
+    esac
+}
+helper_fish() { # helper_fish NAME MOUNT — a fish function file
+    local m="$2"
+    case "$1" in
+        bitback) cat <<EOF
+function bitback --description 'Back In Time layer: run | list | log (linux-backup-system)'
+    if not mountpoint -q '$m' 2>/dev/null
+        echo "ERROR: $m not mounted"; return 1
+    end
+    switch "\$argv[1]"
+        case list
+            pkexec backintime --config /root/.config/backintime/config show
+        case log
+            sudo tail -50 /var/log/backintime-backup.log
+        case '*'
+            sudo /usr/local/sbin/backintime-backup.sh
+    end
+end
+EOF
+        ;;
+        timeback) cat <<EOF
+function timeback --description 'Borg layer: run | list | info | log (linux-backup-system)'
+    set -l repo (bash -c '. /etc/backup-system.conf 2>/dev/null; echo "\${BORG_REPO:-$m/borg-backup}"')
+    if not mountpoint -q '$m' 2>/dev/null
+        echo "ERROR: $m not mounted"; return 1
+    end
+    switch "\$argv[1]"
+        case list
+            sudo borg list \$repo
+        case info
+            sudo borg info \$repo
+        case log
+            sudo tail -50 /var/log/borg-backup.log
+        case '*'
+            sudo /usr/local/sbin/borg-backup.sh
+    end
+end
+EOF
+        ;;
+        snapback) cat <<'EOF'
+function snapback --description 'Snapper: list | create | rollback N | diff N (linux-backup-system)'
+    switch "$argv[1]"
+        case list
+            sudo snapper -c root list; echo; sudo snapper -c home list
+        case create
+            sudo snapper -c root create -d manual; sudo snapper -c home create -d manual; echo "Snapshots created."
+        case rollback diff
+            if test (count $argv) -lt 2
+                echo "Usage: snapback $argv[1] <snapshot#>"; return 2
+            end
+            if test "$argv[1]" = rollback
+                sudo snapper -c root undochange "$argv[2]..0"
+            else
+                sudo snapper -c root diff "$argv[2]..0"
+            end
+        case '*'
+            echo "Usage: snapback [list|create|rollback N|diff N]"
+    end
+end
+EOF
+        ;;
+    esac
+}
+
+# add_fish_function NAME — ~/.config/fish/functions/NAME.fish, owned by the
+# deploy (marker on line 1): rewritten when it changed, a foreign file warned
+# about and left alone.
+add_fish_function() {
+    local name="$1" dir="$USER_HOME/.config/fish/functions" f body marker
+    f="$dir/$name.fish"; marker="# $name — added by backup-system deploy"
+    body="$marker
+$(helper_fish "$name" "$BACKUP_MOUNT")"
+    if [ -f "$f" ] && ! head -1 "$f" | grep -qF -- "$marker"; then
+        warn "  $f exists and was not written by this deploy — left alone"
+        return 0
+    fi
+    if [ -f "$f" ] && [ "$(cat "$f")" = "$body" ]; then log "  $name.fish is current — unchanged"; return 0; fi
+    mkdir -p "$dir"; printf '%s\n' "$body" > "$f"
+    chown "$SUDO_USER:" "$dir" "$f" 2>/dev/null || true
+    log "  wrote $f"
+}
 
 for rc in "$USER_HOME/.bashrc" "$USER_HOME/.zshrc"; do
-    add_shell_function "$rc" "timeback" "$TIMEBACK_FUNC"
-    add_shell_function "$rc" "bitback" "$BITBACK_FUNC"
+    add_shell_function "$rc" "timeback" "$(helper_sh timeback "$BACKUP_MOUNT")"
+    add_shell_function "$rc" "bitback" "$(helper_sh bitback "$BACKUP_MOUNT")"
     if [ "$HAS_SNAPPER" = true ]; then
-        add_shell_function "$rc" "snapback" "$SNAPBACK_FUNC"
+        add_shell_function "$rc" "snapback" "$(helper_sh snapback "$BACKUP_MOUNT")"
     fi
 done
+# fish: when the user has a fish configuration or fish is their login shell.
+if [ -d "$USER_HOME/.config/fish" ] || getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f7 | grep -q 'fish$'; then
+    add_fish_function timeback
+    add_fish_function bitback
+    [ "$HAS_SNAPPER" = true ] && add_fish_function snapback
+fi
 
 # Step 9: Verify BIT config
 log "Verifying BIT config..."

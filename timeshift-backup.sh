@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -38,6 +38,9 @@
 #
 # Retention knobs (KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB) come from the config
 # and can be overridden in the environment: KEEP=5 timeshift-backup.sh --prune-only
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 # --- shared library + per-host config ---------------------------------------

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # linux-backup-system — restore-verified multi-layer Linux backups for every distro and boot layout
 # https://github.com/doug445/linux-backup-system
@@ -41,6 +41,9 @@
 #   - encrypted /boot: enables GRUB cryptodisk; warns if GRUB < 2.12 with argon2
 #
 # Usage:  restore-rebuild-boot.sh [--dry-run]
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 DRY=          # empty, not 0: ${DRY:+...} treats the string "0" as set

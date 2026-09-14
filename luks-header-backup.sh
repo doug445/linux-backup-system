@@ -36,6 +36,9 @@
 # same device being readable:
 #   /root/luks-headers          (on the root filesystem)
 #   $BACKUP_MOUNT/luks-headers  (on the backup drive)
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 
 # Per-host config: source the shared library and /etc/backup-system.conf so a

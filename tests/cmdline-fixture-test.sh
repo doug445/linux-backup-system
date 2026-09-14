@@ -28,6 +28,9 @@
 # system: every carrier kind, the restore-time id rewrite, mapper names left
 # alone, consistency against fstab/crypttab, stale-id detection with a stubbed
 # blkid, dry mode, idempotence, CRLF and uppercase ids. No disk, no root.
+# Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
+# shebang is ignored when a script is handed to another shell by name.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
