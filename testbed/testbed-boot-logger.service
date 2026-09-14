@@ -4,7 +4,10 @@ After=network-online.target NetworkManager.service bluetooth.service
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+# simple, not oneshot: the logger waits for the boot to finish (is-system-running
+# --wait), and a oneshot still starting holds that boot open — each waited on the
+# other until shutdown killed the logger, and no report was ever written.
+Type=simple
 ExecStart=/usr/local/sbin/testbed-boot-logger.sh
 TimeoutStartSec=20min
 

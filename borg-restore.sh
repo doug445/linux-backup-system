@@ -419,6 +419,19 @@ _disk_of() {
     done
     echo "/dev/$kn"
 }
+# The dm-crypt mapper under a device — itself, or below LVM — or nothing.
+_crypt_under() {
+    local kn sl
+    kn=$(basename "$(readlink -f "$1" 2>/dev/null)") || return 0
+    while [ -n "$kn" ]; do
+        case "$(cat "/sys/block/$kn/dm/uuid" 2>/dev/null)" in CRYPT-*) cat "/sys/block/$kn/dm/name"; return 0 ;; esac
+        sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1 || true)
+        kn=$sl
+    done
+    return 0
+}
+# An LVM mapper name's volume group: mint--vg-root → mint-vg ("--" is an escaped "-").
+_dm_vg() { awk '{gsub(/--/, "\001"); split($0, a, "-"); gsub(/\001/, "-", a[1]); print a[1]}' <<<"$1"; }
 TARGET_DISKS=" "
 for _d in "${BTRFS_RAW_DEV:-$TARGET_ROOT_DEV}" "${BOOT_DEV:-}" "${EFI_DEV:-}"; do
     [ -n "$_d" ] || continue
@@ -532,7 +545,8 @@ log "--- OLD fstab ---"
 cat "$FSTAB"
 echo ""
 
-cp "$FSTAB" "$FSTAB.bak.$(date +%s)"
+FSTAB_ORIG="$FSTAB.bak.$(date +%s)"   # the ids as the source had them (the crypttab pairing reads them)
+cp "$FSTAB" "$FSTAB_ORIG"
 
 # Extract old ids from fstab and point each at its new device — by field, in
 # the form the entry already uses (UUID=, PARTUUID=, LABEL=, PARTLABEL=). A
@@ -595,6 +609,7 @@ cat "$FSTAB"
 ###############################################################################
 # Step 5: Update crypttab with new LUKS UUIDs
 ###############################################################################
+declare -A OPEN_AS=()   # crypttab name → the other name its new container is open under here
 if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
     log "Updating crypttab..."
     log "--- OLD crypttab ---"
@@ -623,6 +638,63 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
         fi
     done
 
+    # Containers opened under a name the restored crypttab does not use, while the
+    # old ids still exist. On an installed system (a second disk, a test bed) the
+    # running system holds the crypttab names (sdb3_crypt, boot_crypt), the new
+    # disk's containers get other names, and the old disk is still installed —
+    # neither the name match above nor the pairing below reached them, and
+    # crypttab kept unlocking the OLD disk. Pair each by what it carries: the
+    # restored mount above it, and the crypttab entry that carried that mount on
+    # the source (by mapper path, the LVM metadata backup, or the old id's device).
+    _entry_for_mount() {
+        local k v n vg kn pv
+        IFS=$'\t' read -r k v < <(cl_fstab_ref "$FSTAB_ORIG" "$1") || true
+        [ -n "$v" ] || return 0
+        case "$k" in
+            PATH)
+                case "$v" in /dev/mapper/*) n=${v#/dev/mapper/} ;; /dev/*/*) n="" ; vg=$(basename "$(dirname "$v")") ;; *) return 0 ;; esac
+                if [ -n "$n" ] && [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$n")" ]; then echo "$n"; return 0; fi
+                [ -n "$n" ] && vg=$(_dm_vg "$n")
+                # the volume group's physical volume, as its restored metadata backup names it
+                pv=$(sed -n 's/^[[:space:]]*device = "\([^"]*\)".*/\1/p' "$TARGET/etc/lvm/backup/$vg" 2>/dev/null | head -1)
+                n=${pv#/dev/mapper/}
+                [ "$pv" != "$n" ] && [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$n")" ] && echo "$n"
+                ;;
+            UUID|PARTUUID|LABEL|PARTLABEL)
+                kn=$(blkid -t "$k=$v" -o device 2>/dev/null | head -1)
+                [ -n "$kn" ] || return 0
+                n=$(_crypt_under "$kn")
+                [ -n "$n" ] && [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$n")" ] && echo "$n"
+                ;;
+        esac
+        return 0
+    }
+    for mapper_name in "${!LUKS_MAP[@]}"; do
+        [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$mapper_name")" ] && continue
+        while read -r _m; do
+            _m=$(printf '%b' "$_m")
+            case "$_m" in "$TARGET"|"$TARGET"/*) ;; *) continue ;; esac
+            _m=${_m#"$TARGET"}; _m=${_m:-/}
+            _name=$(_entry_for_mount "$_m")
+            [ -n "$_name" ] && [ -z "${OPEN_AS[$_name]:-}" ] || continue
+            c_kind=""; c_old=""; c_new=""
+            IFS=$'\t' read -r c_kind c_old < <(cl_crypttab_ref "$CRYPTTAB" "$_name") || true
+            case "$c_kind" in
+                UUID) c_new="${LUKS_MAP[$mapper_name]}" ;;
+                PARTUUID|LABEL|PARTLABEL) c_new=$(blkid -s "$c_kind" -o value "${LUKS_DEV[$mapper_name]:-}" 2>/dev/null || true) ;;
+                *) continue ;;
+            esac
+            [ -n "$c_new" ] || continue
+            OPEN_AS[$_name]=$mapper_name
+            if [ "$(tr '[:upper:]' '[:lower:]' <<<"$c_old")" != "$(tr '[:upper:]' '[:lower:]' <<<"$c_new")" ]; then
+                case "$c_kind" in UUID|PARTUUID) echo "$c_old $c_new" >> "$LUKS_ID_MAP" ;; esac
+                cl_table_set_ref "$CRYPTTAB" 2 "$c_kind" "$c_old" "$c_new"
+                log "  Updated $_name $c_kind: $c_old → $c_new (carries $_m; its new container is open here as '$mapper_name')"
+            fi
+            break
+        done < <(lsblk -rno MOUNTPOINTS "/dev/mapper/$mapper_name" 2>/dev/null | grep .)
+    done
+
     # Entries no open mapper matched BY NAME. Fedora names its mapper
     # luks-<OLD-UUID>; on the new disk the container is opened as
     # luks-<NEW-UUID> or cryptroot, nothing matched, crypttab kept the old
@@ -633,6 +705,7 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
     for mapper_name in "${!LUKS_MAP[@]}"; do
         [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$mapper_name")" ] && _matched="$_matched$mapper_name "
     done
+    for _name in "${!OPEN_AS[@]}"; do _matched="$_matched${OPEN_AS[$_name]} "; done
     _unmatched_maps=()
     for mapper_name in "${!LUKS_MAP[@]}"; do
         case "$_matched" in *" $mapper_name "*) ;; *) _unmatched_maps+=("$mapper_name") ;; esac
@@ -677,6 +750,21 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
 
     log "--- NEW crypttab ---"
     cat "$CRYPTTAB"
+
+    # Which entries now name a target container that is open under ANOTHER name
+    # (also on a --fixup-only re-run, where crypttab is already right).
+    OPEN_AS=()
+    while read -r _name; do
+        IFS=$'\t' read -r c_kind c_old < <(cl_crypttab_ref "$CRYPTTAB" "$_name") || true
+        [ "$c_kind" = UUID ] || continue
+        for mapper_name in "${!LUKS_MAP[@]}"; do
+            [ "$(tr '[:upper:]' '[:lower:]' <<<"${LUKS_MAP[$mapper_name]}")" = "$(tr '[:upper:]' '[:lower:]' <<<"$c_old")" ] || continue
+            [ "$mapper_name" != "$_name" ] && OPEN_AS[$_name]=$mapper_name
+        done
+    done < <(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CRYPTTAB")
+    for _name in "${!OPEN_AS[@]}"; do
+        warn "crypttab entry '$_name' is this disk's container, open here as '${OPEN_AS[$_name]}' (the running system holds '$_name') — the boot rebuild is told explicitly"
+    done
 elif [ -f "$CRYPTTAB" ]; then
     log "crypttab exists but no LUKS devices detected — leaving unchanged"
 else
@@ -854,7 +942,30 @@ log "Preparing chroot environment..."
 cleanup_chroot() {
     local m
     for m in sys/firmware/efi/efivars run dev/pts dev proc sys; do umount "$TARGET/$m" 2>/dev/null || true; done
+    release_crypttab
 }
+# Debian's initramfs hook (cryptsetup-initramfs) finds the root container's
+# crypttab entry by the name the container is OPEN under. Open here under another
+# name (see OPEN_AS), it finds none, and the initramfs cannot unlock the root — the
+# restored disk stops at "waiting for encrypted source device". For the rebuild
+# only, such entries carry the 'initramfs' option (included whatever they are open
+# as); the restored crypttab is put back right after.
+CRYPTTAB_HELD=""
+release_crypttab() {
+    [ -n "$CRYPTTAB_HELD" ] && [ -f "$CRYPTTAB_HELD" ] || return 0
+    cat "$CRYPTTAB_HELD" > "$CRYPTTAB"; rm -f "$CRYPTTAB_HELD"; CRYPTTAB_HELD=""
+    log "crypttab put back as restored (the rebuild-only 'initramfs' option removed)"
+}
+if [ ${#OPEN_AS[@]} -gt 0 ] && [ -f "$TARGET/usr/share/initramfs-tools/hooks/cryptroot" ]; then
+    _early=" $(_crypt_under "${BTRFS_RAW_DEV:-$TARGET_ROOT_DEV}") "
+    mountpoint -q "$TARGET/usr" && _early="$_early$(_crypt_under "$(findmnt -no SOURCE "$TARGET/usr" | sed 's/\[.*//')") "
+    for _name in "${!OPEN_AS[@]}"; do
+        case "$_early" in *" ${OPEN_AS[$_name]} "*) ;; *) continue ;; esac
+        if [ -z "$CRYPTTAB_HELD" ]; then CRYPTTAB_HELD=$(mktemp /tmp/restore-crypttab.XXXXXX); cp "$CRYPTTAB" "$CRYPTTAB_HELD"; fi
+        awk -v n="$_name" 'BEGIN{OFS="\t"} $1 !~ /^#/ && $1==n { if (NF < 4 || $4 == "") $4 = "initramfs"; else if (("," $4 ",") !~ /,initramfs,/) $4 = $4 ",initramfs" } {print}' "$CRYPTTAB_HELD" > "$CRYPTTAB"
+        log "crypttab '$_name': 'initramfs' for the rebuild only — the initramfs hook looks the root container up by its open name, and here it is open as '${OPEN_AS[$_name]}'"
+    done
+fi
 trap cleanup_chroot EXIT
 
 mkdir -p "$TARGET/dev" "$TARGET/proc" "$TARGET/sys" "$TARGET/run"
@@ -900,6 +1011,27 @@ fi
 log "Cleaning up chroot mounts..."
 cleanup_chroot
 trap - EXIT
+
+# LVM restored from an installed system: the running system holds the volume
+# group's name, so the new disk's group is called something else, and
+# grub-mkconfig wrote THAT name into root=. The restored system mounts the name
+# its fstab gives; the group itself can only be renamed once it is unmounted.
+VG_RENAME=""
+IFS=$'\t' read -r _rk _rv < <(cl_fstab_ref "$FSTAB" /) || true
+if [ "${_rk:-}" = PATH ] && [[ "$TARGET_ROOT_DEV" == /dev/mapper/* ]] && [[ "${_rv:-}" == /dev/mapper/* ]] \
+   && [ "$TARGET_ROOT_DEV" != "$_rv" ] && lvs "$TARGET_ROOT_DEV" >/dev/null 2>&1; then
+    _tvg=$(_dm_vg "${TARGET_ROOT_DEV#/dev/mapper/}"); _svg=$(_dm_vg "${_rv#/dev/mapper/}")
+    if [ "$_tvg" != "$_svg" ]; then
+        _te=${_tvg//-/--}; _se=${_svg//-/--}
+        for _g in "$TARGET/boot/grub/grub.cfg" "$TARGET/boot/grub2/grub.cfg"; do
+            [ -f "$_g" ] && grep -qF "/dev/mapper/$_te-" "$_g" || continue
+            sed -i "s#/dev/mapper/$_te-#/dev/mapper/$_se-#g" "$_g"
+            log "  ${_g#"$TARGET"}: /dev/mapper/$_te-* → /dev/mapper/$_se-* (the volume group the restored system mounts)"
+        done
+        VG_RENAME="$_tvg → $_svg"
+        warn "the volume group is called '$_tvg' here but '$_svg' in the restored system — before booting it, unmount the target and run:  vgchange -an $_tvg && vgrename $_tvg $_svg  (on a machine with its own '$_svg', add --devices <the new disk's physical volume> to both)"
+    fi
+fi
 
 ###############################################################################
 # Step 7: Comprehensive verification
@@ -1004,7 +1136,7 @@ done < <(cl_ukis "$TARGET")
 for grub_cfg in "$TARGET/boot/grub/grub.cfg" "$TARGET/boot/grub2/grub.cfg"; do
     if [ -f "$grub_cfg" ]; then
         log "Verifying GRUB config ($grub_cfg)..."
-        for uuid in $(grep -oP '(?:root=UUID=|resume=UUID=|search.*--fs-uuid.*?)\K[0-9a-fA-F-]+' "$grub_cfg" 2>/dev/null | sort -u); do
+        for uuid in $(grep -oP '(?:root=UUID=|resume=UUID=|search.*--fs-uuid\s+(?:--\S+\s+)*|search\.fs_uuid\s+)\K[0-9a-fA-F]+(?:-[0-9a-fA-F]+)+' "$grub_cfg" 2>/dev/null | sort -u); do
             if blkid -U "$uuid" >/dev/null 2>&1; then
                 log "  OK: GRUB UUID=$uuid found"
             else
@@ -1041,6 +1173,30 @@ else
     error "  FAIL: No initramfs images or UKIs found!"
     ERRORS=$((ERRORS + 1))
 fi
+
+# Debian family: the initramfs must carry a crypttab entry for the container
+# under the root, or the boot stops waiting for an encrypted source device.
+_rc=$(_crypt_under "${BTRFS_RAW_DEV:-$TARGET_ROOT_DEV}")
+if [ -n "$_rc" ] && [ -f "$TARGET/usr/share/initramfs-tools/hooks/cryptroot" ] && command -v unmkinitramfs >/dev/null 2>&1; then
+    _ruuid=$(cryptsetup luksUUID "$(cryptsetup status "$_rc" 2>/dev/null | awk '/device:/{print $2}')" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+    _img=$(ls -1 "$TARGET"/boot/initrd.img-* 2>/dev/null | sort -V | tail -1 || true)
+    if [ -n "$_img" ] && [ -n "$_ruuid" ]; then
+        _ud=$(mktemp -d /tmp/restore-initrd.XXXXXX)
+        if unmkinitramfs "$_img" "$_ud" 2>/dev/null; then
+            _ict=$(find "$_ud" -path '*/cryptroot/crypttab' 2>/dev/null | head -1)
+            if [ -n "$_ict" ] && grep -qi "UUID=$_ruuid" "$_ict"; then
+                log "  OK: ${_img#"$TARGET"} unlocks the root container (UUID=$_ruuid as '$(grep -i "UUID=$_ruuid" "$_ict" | awk '{print $1; exit}')')"
+            else
+                error "  FAIL: ${_img#"$TARGET"} carries no crypttab entry for the root container UUID=$_ruuid — the restored disk cannot unlock its root"
+                ERRORS=$((ERRORS + 1))
+            fi
+        else
+            warn "  could not unpack ${_img#"$TARGET"} to check it unlocks the root container"
+        fi
+        rm -rf "$_ud"
+    fi
+fi
+[ -n "$VG_RENAME" ] && { warn "  volume group to rename before booting the restored disk: $VG_RENAME"; WARNINGS=$((WARNINGS + 1)); }
 
 # Verify kernels
 if [ "$VMLINUZ_COUNT" -gt 0 ] || [ "$UKI_COUNT" -gt 0 ]; then

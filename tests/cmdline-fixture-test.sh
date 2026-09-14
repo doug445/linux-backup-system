@@ -286,6 +286,31 @@ expect "after the mapping nothing in the boot chain points at the old disk" "" "
 grep -q "root=/dev/mapper/luks-$OLDC" "$Z/etc/kernel/cmdline" && grep -q "rd.luks.name=NEWC-0000-0000-0000-000000000000=luks-$OLDC" "$Z/etc/kernel/cmdline" \
     && ok "the mapper NAME is kept (fstab's /dev/mapper path still matches), only the id changed" || bad "cmdline: $(cat "$Z/etc/kernel/cmdline")"
 
+# Debian/Ubuntu/Mint: the initramfs is built from /etc/crypttab itself. An entry
+# still naming the old disk's root container (the new disk opened under another
+# name, the old disk installed) must be flagged; a noauto/nofail data drive not.
+D="$T/deb"
+mk "$D/etc/crypttab" "sdb3_crypt UUID=$OLDC /etc/crypto_keyfile.bin luks,discard\nboot_crypt UUID=NEWBOOT /etc/crypto_keyfile.bin luks,discard\nluks-7ac9a064-f5fc-4f23-8a52-a78a0d1ee580 UUID=7ac9a064-f5fc-4f23-8a52-a78a0d1ee580 none nofail,noauto\n"
+mk "$D/etc/fstab" "/dev/mapper/mint--vg-root / ext4 errors=remount-ro 0 1\n"
+off=$(CL_REF_DISK_CMD=fake_disk cl_refs_off_target "$D" "/dev/sdb")
+grep -q "crypttab(sdb3_crypt)	UUID	$OLDC	/dev/nvme0n1" <<<"$off" && ok "/etc/crypttab root container on the installed old disk is flagged (Debian initramfs)" || bad "/etc/crypttab root container not flagged: $off"
+grep -q "boot_crypt" <<<"$off" && bad "an entry already on the target was flagged" || ok "/etc/crypttab entry on the target is not flagged"
+grep -q "7ac9a064" <<<"$off" && bad "a noauto/nofail data drive in /etc/crypttab was flagged" || ok "/etc/crypttab noauto/nofail data drive is not flagged"
+
+# Ubuntu's ESP stub in front of an encrypted /boot names the LUKS container twice:
+# `cryptomount -u <id>` and the dashless `cryptouuid/<id>` device.
+U="$T/ubustub"
+mk "$U/boot/efi/EFI/ubuntu/grub.cfg" "cryptomount -u c70a3576-b2f1-4b4a-8729-b08225afa9f5\nsearch.fs_uuid 364eff9f-ac71-4dcb-9b18-b7bbbc34d4f9 root cryptouuid/c70a3576b2f14b4a8729b08225afa9f5 \nset prefix=(\$root)'/grub'\nconfigfile \$prefix/grub.cfg\n"
+ids=$(cl_ids_in_file "$U/boot/efi/EFI/ubuntu/grub.cfg")
+grep -q "luks	c70a3576-b2f1-4b4a-8729-b08225afa9f5" <<<"$ids" && ok "stub: cryptomount -u id is read as a LUKS reference" || bad "stub cryptomount id not read: $ids"
+[ "$(grep -c 'luks	c70a3576-b2f1-4b4a-8729-b08225afa9f5' <<<"$ids")" = 2 ] && ok "stub: dashless cryptouuid/ id is read (with dashes restored)" || bad "stub cryptouuid id not read: $ids"
+printf 'c70a3576-b2f1-4b4a-8729-b08225afa9f5 2ca341e7-57eb-4e2a-bf92-2bb35eb908bc\n364eff9f-ac71-4dcb-9b18-b7bbbc34d4f9 79d4b45d-b298-4350-a645-762115945fe2\n' > "$T/ubumap"
+cl_rewrite_ids "$U" "$T/ubumap" >/dev/null
+grep -q '^cryptomount -u 2ca341e7-57eb-4e2a-bf92-2bb35eb908bc$' "$U/boot/efi/EFI/ubuntu/grub.cfg" \
+    && grep -q 'search.fs_uuid 79d4b45d-b298-4350-a645-762115945fe2 root cryptouuid/2ca341e757eb4e2abf922bb35eb908bc ' "$U/boot/efi/EFI/ubuntu/grub.cfg" \
+    && ! grep -qi c70a3576 "$U/boot/efi/EFI/ubuntu/grub.cfg" \
+    && ok "stub: cryptomount -u, cryptouuid/ and search.fs_uuid all rewritten to the new disk" || bad "stub not rewritten: $(cat "$U/boot/efi/EFI/ubuntu/grub.cfg")"
+
 echo "== optional crypttab drives; UKI embedded command lines; extra expected ids"
 mk "$T/ct/etc/crypttab" "data1 UUID=$OL none discard,nofail,noauto\ndata2 UUID=$OB /k nofail\nroot UUID=$NL none discard\n# old UUID=$OR none noauto\n"
 cl_crypttab_optional "$T/ct/etc/crypttab" data1 && ok "noauto,nofail entry is optional" || bad "data1 not optional"

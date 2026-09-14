@@ -40,7 +40,7 @@
 # shellcheck disable=SC2034  # read by every script that sources this file
 # Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
 [ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
-BX_VERSION="3.9.0"
+BX_VERSION="4.0.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -315,7 +315,8 @@ bx_backup_sources() {
 # The universal exclude list for a file-level backup (borg and Back In Time
 # read the same one, so the two layers agree on what "everything" is), one
 # anchored path pattern per line. Runtime and cache trees, trash, package and
-# language caches, snapper's snapshot dirs, the local snapshot staging dir,
+# language caches, snapper's snapshot dirs, the local snapshot staging dir, Timeshift's own
+# rsync snapshots on the root disk (/timeshift — a backup of the system inside it),
 # flatpak's image store, and every ACTIVE SWAPFILE (8–16 GiB of churn that
 # also makes `btrfs subvolume snapshot` of the root refuse). Nothing personal:
 # per-host additions go in BACKUP_EXTRA_EXCLUDES.
@@ -324,7 +325,8 @@ bx_excludes() {
         '/var/tmp/*' '/var/cache/*' '/var/log/journal/*' '/snap/*' '/var/lib/snapd/snap/*' \
         '/home/*/.cache/*' '/home/*/.local/share/Trash/*' '/home/*/.npm/_cacache/*' \
         '/home/*/.cargo/registry/*' '/root/.cache/*' '/root/.local/share/Trash/*' \
-        '/var/lib/flatpak/*' '/.snapshots/*' '/home/.snapshots/*' '/.backup-snapshots/*'
+        '/var/lib/flatpak/*' '/.snapshots/*' '/home/.snapshots/*' '/.backup-snapshots/*' \
+        '/timeshift/*'
     local f type _
     { read -r _; while read -r f type _; do [ "$type" = file ] && printf '%s\n' "$f"; done; } < /proc/swaps 2>/dev/null
     [ -n "${BACKUP_MOUNT:-}" ] && printf '%s\n' "${BACKUP_MOUNT}/*"
