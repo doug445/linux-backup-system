@@ -185,7 +185,7 @@ column, use the suite for testing only — not in production.**
 |---|---|:--:|:--:|
 | btrfs (subvolumes, swapfile) | btrfs send/receive (`borg-backup.sh`) | ✅ | ✅ |
 | ext4 | Timeshift (`timeshift-backup.sh`) | ✅ | ✅ |
-| xfs / f2fs / anything else | Timeshift | ❌ | ❌ |
+| xfs / f2fs / anything else | Timeshift | ❌ | ❌ not under test |
 | root on LUKS2, unlocked by sd-encrypt (`rd.luks.name=` + `crypttab.initramfs`) | — | ✅ | ✅ |
 | root on LVM-on-LUKS | — | ✅ | ✅ |
 
@@ -206,8 +206,8 @@ column, use the suite for testing only — not in production.**
 | Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ | ❌ not under test |
 | Plain `/boot` (unencrypted /boot) | ✅ | ✅ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ | ❌ not under test |
-| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ |
-| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ |
+| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ not under test |
+| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ not under test |
 | SELinux restore relabel on Linux Mint (SELinux permissive) — `/.autorelabel` on the restored system: the first boot relabeled every file and rebooted once, then booted clean | ✅ | ✅ |
 | SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ⚠️ | ⚠️ |
 | Restore from an **installed system** onto a second disk, the original disk still installed — no NVRAM writes, nothing written to the original disk | — | ✅ |
