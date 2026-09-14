@@ -233,6 +233,16 @@ grep -v '^#' "$ROOT/99-borg-backup.rules" | grep -q 'UDISKS_AUTO_CLEAR' && bad "
 grep -q '@BACKUP_FS_UUID@' "$ROOT/99-borg-backup.rules" && ok "udev rule covers the filesystem UUID too" || bad "udev rule ignores the inner filesystem UUID"
 grep -q 'BORG_REPO=\\\$(. /etc/backup-system.conf' "$ROOT/deploy.sh" && ok "timeback() resolves BORG_REPO from the config at call time" || bad "timeback() hardcodes the repo path"
 
+echo "== deploy: a running backup is judged by its lock, never by a command line that names the script"
+sed -n '/^backup_lock_held()/,/^}/p' "$ROOT/deploy.sh" > "$T/lockfn.sh"
+out=$(BX_LOCK_FILE="$T/lbs.lock" bash -c "source '$T/lockfn.sh'; : /usr/local/sbin/borg-backup.sh; backup_lock_held && echo held || echo free")
+expect_free=$out
+[ "$expect_free" = free ] && ok "no lock held: free (even though this shell's command line names borg-backup.sh)" || bad "lock guard: $out"
+( exec 9>"$T/lbs.lock"; flock -n 9; sleep 3 ) & lpid=$!; sleep 1
+out=$(BX_LOCK_FILE="$T/lbs.lock" bash -c "source '$T/lockfn.sh'; backup_lock_held && echo held || echo free")
+wait "$lpid"
+[ "$out" = held ] && ok "a held lock: running" || bad "held lock not seen: $out"
+
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
 [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && ok "BX_VERSION=$v is semver" || bad "BX_VERSION '$v'"

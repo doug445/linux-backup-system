@@ -96,8 +96,20 @@ done
 # the running root process shifted bytes of the new file — arbitrary lines
 # (a prune, a subvolume delete) at the wrong moment. Scripts are installed
 # with install(1) (new inode), and never while one of them is running.
-if (( ! DRY )) && pgrep -f '/usr/local/sbin/(borg|backintime|timeshift)-backup\.sh' >/dev/null 2>&1; then
-    err "a backup is running ($(pgrep -af '/usr/local/sbin/(borg|backintime|timeshift)-backup\.sh' | awk '{print $NF}' | sort -u | tr '\n' ' ')) — wait for it to finish, then re-run deploy.sh"
+# "Running" is decided by the lock every layer holds for its whole run, not by
+# matching command lines: `pgrep -f` also matched an editor, a pager, or any
+# shell whose -c string merely named the script — deploy refused to run from
+# the very terminal that had just typed the path.
+backup_lock_held() {
+    local l
+    for l in "${BX_LOCK_FILE:-/var/lock/backup-system.lock}" /var/lock/borg-backup.lock; do   # the second: pre-3.9 borg-backup.sh
+        [ -e "$l" ] || continue
+        flock -n "$l" true 2>/dev/null || return 0
+    done
+    return 1
+}
+if (( ! DRY )) && backup_lock_held; then
+    err "a backup is running (its lock is held) — wait for it to finish, then re-run deploy.sh"
     exit 1
 fi
 
