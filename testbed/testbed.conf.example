@@ -1,0 +1,18 @@
+# testbed.conf — the two drives of the restore test bed. Keep one copy ON THE
+# BACKUP DRIVE (<mount>/testbed/testbed.conf): every machine that plugs the
+# drive in then finds it. Identify drives by their disk serial:
+#   lsblk -dno NAME,SIZE,MODEL,SERIAL,TRAN
+
+# The drive the test restore is written to — WIPED on every `prepare`.
+TB_TARGET_SERIAL=""
+
+# The backup drive the test archive is written to (never wiped).
+TB_BACKUP_SERIAL=""
+
+# Optional per-host additions to what a test archive leaves out:
+# case "$(hostname)" in
+#     bigbox) TB_EXTRA_EXCLUDES="/srv/media/* /var/lib/machines/*" ;;
+# esac
+
+# Optional: USB transfer size during the test (KiB, 0 = leave the kernel's).
+#TB_SECTORS_KB=128

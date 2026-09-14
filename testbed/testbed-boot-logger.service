@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore test bed: boot report onto the source machine's boot partition (test drives only)
+After=network-online.target NetworkManager.service bluetooth.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/testbed-boot-logger.sh
+TimeoutStartSec=20min
+
+[Install]
+WantedBy=multi-user.target

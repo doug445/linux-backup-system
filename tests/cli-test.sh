@@ -42,6 +42,9 @@ ROOT="$HERE/.."
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  PASS  $*"; }
 bad() { fail=$((fail+1)); echo "  FAIL  $*"; }
+# Defined here: without it `expect` is the Tcl program of that name, which
+# silently checks nothing.
+expect() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: expected '$2', got '$3'"; fi; }
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 
 echo "== --help prints the usage block, and only that"
@@ -285,6 +288,24 @@ for n in timeback bitback snapback; do
         fish --no-execute "$T/h-$n.fish" 2>"$T/fish.err" && ok "$n: fish parses its .fish file" || bad "$n: fish: $(cat "$T/fish.err")"
     fi
 done
+
+echo "== restore test bed: help, root refusal, hard-link-aware byte comparison"
+out=$(bash "$ROOT/testbed/testbed.sh" --help 2>&1); rc=$?
+[ "$rc" -eq 0 ] && grep -q 'Usage: sudo testbed/testbed.sh' <<<"$out" && ! grep -qE '^(set -|TB_DIR=)' <<<"$out" && ok "testbed.sh --help prints the usage block only" || bad "testbed --help: rc=$rc"
+grep -q 'passphrase "test"' <<<"$out" && ok "the help states the fixed test-drive passphrase" || bad "help does not state the test passphrase"
+if [ "$(id -u)" -ne 0 ]; then
+    bash "$ROOT/testbed/testbed.sh" status >/dev/null 2>&1; expect "testbed.sh as a normal user refuses (exit 1)" 1 "$?"
+fi
+grep -q 'TB_PASSPHRASE' "$ROOT/borg-restore.sh" "$ROOT/backintime-restore.sh" "$ROOT/restore.sh" "$ROOT/deploy.sh" && bad "a real restore/deploy script references the test passphrase" || ok "no real restore or deploy script carries a passphrase"
+mkdir -p "$T/cm/usr/bin" "$T/cm/etc"
+printf 'data-one\n' > "$T/cm/usr/bin/a"; ln "$T/cm/usr/bin/a" "$T/cm/usr/bin/a-link"
+printf 'changed-longer\n' > "$T/cm/etc/state"; printf 'x\n' > "$T/cm/etc/same"
+{ printf -- '-\t9\tusr/bin/a\n-\t0\tusr/bin/a-link\n-\t6\tetc/state\n-\t2\tetc/same\n-\t5\tetc/gone\nd\t0\tetc\n'; } | gzip > "$T/cm.tsv.gz"
+out=$(python3 "$ROOT/testbed/compare-manifest.py" "$T/cm.tsv.gz" "$T/cm")
+grep -q '| byte-identical size, same name | 2 |' <<<"$out" && ok "compare: same-size files counted" || bad "compare identical: $out"
+grep -q '| hard-link names of a restored inode (borg lists them as 0 bytes) | 1 |' <<<"$out" && ok "compare: a hard link listed as 0 bytes is not a difference" || bad "compare hardlink: $out"
+grep -q '| size differs | 1 |' <<<"$out" && grep -q '/etc/state' <<<"$out" && ok "compare: a changed file is named" || bad "compare differ: $out"
+grep -q '| missing | 1 |' <<<"$out" && grep -q '^/etc/gone$' <<<"$out" && ok "compare: a missing file is named" || bad "compare missing: $out"
 
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
