@@ -328,6 +328,78 @@ bx_excludes() {
     return 0
 }
 
+# Is a source's WHOLE tree on the exclude list ("<mount>/*")? Such a mount is
+# still listed as a source (borg records the empty mount point) but must not
+# get a btrfs replica: send/receive ignores excludes, and Manjaro's @cache
+# subvolume sent 54 GiB of package cache to the drive on every run.
+bx_source_fully_excluded() { # bx_source_fully_excluded MOUNT
+    bx_excludes | grep -qxF -- "${1%/}/*"
+}
+
+# ---------------------------------------------------------------------------
+# btrfs replicas, sent INCREMENTALLY. A send without a parent writes a full
+# copy of the subvolume every run, sharing nothing with the replica before it:
+# a 1.8 TiB drive held two generations of a 600 GiB system, never the KEEP=10
+# the retention promises. The newest local read-only snapshot of a label is
+# kept after a good send as the next run's parent (-p); the receive side
+# needs that same snapshot's replica, complete, on the drive. Missing either
+# one — a new drive, a pruned replica, a first run — means a full send, said
+# so in the log.
+#
+# bx_replica_parent LABEL LOCAL_DIR DEST_DIR — the snapshot name (basename)
+# usable as the parent, or nothing. The newest local snapshot of the label
+# whose replica exists on the drive, read-only and received.
+bx_replica_parent() {
+    local label="$1" ldir="$2" ddir="$3" p n
+    while IFS= read -r p; do
+        [ -d "$p" ] || continue
+        n=$(basename "$p")
+        [ -d "$ddir/$n" ] || continue
+        [ "$(btrfs property get "$ddir/$n" ro 2>/dev/null | sed -n 's/^ro=//p')" = true ] || continue
+        btrfs subvolume show "$ddir/$n" 2>/dev/null | grep -qE 'Received UUID:[[:space:]]+[0-9a-f]{8}-' || continue
+        printf '%s\n' "$n"
+        return 0
+    done < <(ls -1d "$ldir/${label}_"[0-9]* 2>/dev/null | sort -r)
+    return 0
+}
+
+# bx_replica_send LABEL SRC LOCAL_DIR DEST_DIR STAMP [LOGFILE]
+#   Snapshot SRC read-only as LOCAL_DIR/LABEL_STAMP, send it to DEST_DIR
+#   (incremental from bx_replica_parent when there is one), and verify the
+#   replica is read-only. On success the new local snapshot is the only one
+#   of its label left (the next parent) and one line says "incremental from
+#   <parent>" or "full"; returns 0. On failure the half-written replica and
+#   the new local snapshot are removed and the previous parent is kept, so
+#   the next run is still incremental; one line says why; returns 1.
+#   Never pipe btrfs send/receive through tee: the three-way pipe made
+#   receive fail with SIGPIPE.
+bx_replica_send() {
+    local label="$1" src="$2" ldir="$3" ddir="$4" stamp="$5" logf="${6:-/dev/null}"
+    local name="${label}_$stamp" parent ro d pargs=() rc=()
+    parent=$(bx_replica_parent "$label" "$ldir" "$ddir")
+    [ -n "$parent" ] && pargs=(-p "$ldir/$parent")
+    if ! btrfs subvolume snapshot -r "$src" "$ldir/$name" >>"$logf" 2>&1; then
+        echo "could not snapshot $src$(awk 'NR>1 && $2=="file"{f=1} END{if(f) print " (an ACTIVE SWAPFILE on a subvolume makes the kernel refuse to snapshot it)"}' /proc/swaps 2>/dev/null)"
+        return 1
+    fi
+    btrfs send "${pargs[@]}" "$ldir/$name" 2>>"$logf" | btrfs receive "$ddir/" >>"$logf" 2>&1
+    rc=("${PIPESTATUS[@]}")
+    # sed, not grep -P: a grep without PCRE (busybox, --disable-perl-regexp)
+    # returned "" and every replica just written was deleted as incomplete.
+    ro=$(btrfs property get "$ddir/$name" ro 2>/dev/null | sed -n 's/^ro=//p')
+    if [ "${rc[0]}" = 0 ] && [ "${rc[1]}" = 0 ] && [ "$ro" = true ]; then
+        for d in "$ldir/${label}_"[0-9]*; do
+            [ -d "$d" ] && [ "$d" != "$ldir/$name" ] && btrfs subvolume delete "$d" >>"$logf" 2>&1
+        done
+        if [ -n "$parent" ]; then echo "incremental from $parent"; else echo "full"; fi
+        return 0
+    fi
+    echo "send rc=${rc[0]:-?} receive rc=${rc[1]:-?} ro=${ro:-missing}${parent:+ (incremental from $parent)}"
+    [ -d "$ddir/$name" ] && btrfs subvolume delete "$ddir/$name" >>"$logf" 2>&1
+    btrfs subvolume delete "$ldir/$name" >>"$logf" 2>&1
+    return 1
+}
+
 # The boot-firmware partition for this host — the ESP on UEFI machines, the
 # vfat firmware partition on a Raspberry Pi — from live mounts then fstab, so a
 # declared-but-unmounted one is still found. Empty on legacy BIOS. These are

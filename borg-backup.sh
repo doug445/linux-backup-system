@@ -152,6 +152,10 @@ btrfs_sources() {
     local m
     for m in "${SOURCES[@]}"; do
         [ "$(findmnt -no FSTYPE "$m" 2>/dev/null)" = btrfs ] || continue
+        if bx_source_fully_excluded "$m"; then
+            log "no replica for $m — its whole tree is on the exclude list" >&2
+            continue
+        fi
         if [ "$m" = / ]; then echo "root:/"; else echo "$(echo "${m#/}" | tr / _):$m"; fi
     done
 }
@@ -188,57 +192,42 @@ elif bx_is_btrfs; then
                 fi
             done
         done
-        # Clean up any orphaned local snapshots
+        # Local snapshots: keep exactly one per label — the parent the next
+        # incremental send needs (its replica is complete on this drive).
+        # Anything else is a leftover from an interrupted run, a label that
+        # is no longer a source, or a parent whose replica is gone.
+        keep=" "
+        for label in "${LABELS[@]}"; do
+            p=$(bx_replica_parent "$label" "$LOCAL_SNAP_DIR" "$SNAP_DIR")
+            [ -n "$p" ] && keep="$keep$p "
+        done
         for snap in "$LOCAL_SNAP_DIR"/*; do
             [ -d "$snap" ] || continue
-            log "Removing orphaned local snapshot: $(basename "$snap")"
+            case "$keep" in *" $(basename "$snap") "*) continue ;; esac
+            log "Removing local snapshot that is no usable parent: $(basename "$snap")"
             btrfs subvolume delete "$snap" >>"$LOG" 2>&1 || true
         done
     fi
 
-    # Create local read-only snapshot, send/receive to backup drive, then clean.
-    # NOTE: btrfs send/receive MUST NOT pipe through tee — the 3-way pipe causes
-    # receive to fail with SIGPIPE cascading through the pipeline.
+    # Snapshot, send (incremental when the last replica and its local parent
+    # are both there), verify; the library keeps the new snapshot as the next
+    # run's parent.
     for entry in "${BTRFS_SRC[@]}"; do
         label="${entry%%:*}"
         src="${entry#*:}"
-        local_snap="$LOCAL_SNAP_DIR/${label}_$STAMP"
         if (( DRY )); then
-            log "would snapshot $src -> $local_snap, send to $SNAP_DIR/${label}_$STAMP"
+            p=$(bx_replica_parent "$label" "$LOCAL_SNAP_DIR" "$SNAP_DIR")
+            log "would snapshot $src and send ${label}_$STAMP to $SNAP_DIR — ${p:+incremental from $p}${p:-FULL send (no usable parent: first run, new drive, or pruned replica)}"
             continue
         fi
-
-        log "Creating local snapshot: $local_snap"
-        if ! btrfs subvolume snapshot -r "$src" "$local_snap" >>"$LOG" 2>&1; then
-            log "ERROR: Failed to create local snapshot for $label ($src)"
-            if awk 'NR>1 && $2=="file"{print $1}' /proc/swaps 2>/dev/null | grep -q .; then
-                log "       (an ACTIVE SWAPFILE on a subvolume makes the kernel refuse to snapshot it — move swap to a partition or its own subvolume)"
-            fi
-            btrfs_ok=false
-            continue
-        fi
-
-        log "Sending snapshot to backup drive: ${label}_$STAMP"
-        if btrfs send "$local_snap" 2>>"$LOG" | btrfs receive "$SNAP_DIR/" >>"$LOG" 2>&1; then
-            # sed, not grep -P: a grep without PCRE (busybox, --disable-perl-regexp)
-            # returned "" here and every replica just written was deleted as incomplete.
-            ro=$(btrfs property get "$SNAP_DIR/${label}_$STAMP" ro 2>/dev/null | sed -n 's/^ro=//p')
-            if [ "$ro" = "true" ]; then
-                log "Snapshot ${label}_$STAMP sent and verified"
-                LABEL_OK[$label]=1
-            else
-                log "WARNING: Snapshot ${label}_$STAMP appears incomplete (ro=$ro), removing"
-                btrfs subvolume delete "$SNAP_DIR/${label}_$STAMP" >>"$LOG" 2>&1 || true
-                btrfs_ok=false
-            fi
+        log "Sending $label ($src) to the backup drive: ${label}_$STAMP ..."
+        if msg=$(bx_replica_send "$label" "$src" "$LOCAL_SNAP_DIR" "$SNAP_DIR" "$STAMP" "$LOG"); then
+            log "Replica ${label}_$STAMP sent and verified ($msg)"
+            LABEL_OK[$label]=1
         else
-            log "ERROR: btrfs send/receive failed for $label (pipe rc: ${PIPESTATUS[*]})"
-            [ -d "$SNAP_DIR/${label}_$STAMP" ] && btrfs subvolume delete "$SNAP_DIR/${label}_$STAMP" >>"$LOG" 2>&1 || true
+            log "ERROR: replica of $label failed: $msg"
             btrfs_ok=false
         fi
-
-        log "Cleaning up local snapshot: $local_snap"
-        btrfs subvolume delete "$local_snap" >>"$LOG" 2>&1 || true
     done
 
     if [ "$btrfs_ok" = "true" ]; then
