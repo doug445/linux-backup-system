@@ -325,6 +325,10 @@ many=$(for i in $(seq 1 5000); do printf '/x/%s/* ' "$i"; done)
 ( set -o pipefail; BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="$many /home/*" bx_source_fully_excluded /home ) && ok "a long exclude list under pipefail: /home still fully excluded" || bad "SIGPIPE under pipefail turned a match into 'not excluded'"
 ( set -o pipefail; BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="$many" bx_source_fully_excluded /var/cache ) && ok "…and the base list's /var/cache too" || bad "/var/cache lost under pipefail"
 
+echo "== extra includes: literal, one per line, trailing slash dropped"
+expect "includes printed as given" "/home/*/.config /home/*/.ssh " "$(cd / && BACKUP_EXTRA_INCLUDES="/home/*/.config /home/*/.ssh/" bx_includes | tr '\n' ' ')"
+expect "no includes: nothing" "" "$(BACKUP_EXTRA_INCLUDES="" bx_includes)"
+
 echo "== capacity check knob"
 BACKUP_MOUNT="$T/absent"; CAPACITY_CHECK=off
 m=$(bx_check_backup_capacity); rc=$?; expect "CAPACITY_CHECK=off passes" 0 "$rc"; grep -q disabled <<<"$m" && ok "…and says so" || bad "no 'disabled' message: $m"

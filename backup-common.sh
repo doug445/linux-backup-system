@@ -48,7 +48,7 @@ BX_CONFIG="${BX_CONFIG:-/etc/backup-system.conf}"
 # Precedence: environment > /etc/backup-system.conf > built-in default, so a
 # one-off override works from the shell (KEEP=2 timeshift-backup.sh --prune-only)
 # and from a unit's Environment= line, without editing the host config.
-BX_CONFIG_VARS="BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE BACKUP_MOUNT_OPTS SCHEDULE_MODE BACKUP_EXTRA_SOURCES BACKUP_EXTRA_EXCLUDES BACKUP_HOST_ID KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB CAPACITY_HEADROOM_PCT CAPACITY_RECOMMEND_X CAPACITY_CHECK BX_LOCK_WAIT"
+BX_CONFIG_VARS="BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE BACKUP_MOUNT_OPTS SCHEDULE_MODE BACKUP_EXTRA_SOURCES BACKUP_EXTRA_EXCLUDES BACKUP_EXTRA_INCLUDES BACKUP_HOST_ID KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB CAPACITY_HEADROOM_PCT CAPACITY_RECOMMEND_X CAPACITY_CHECK BX_LOCK_WAIT"
 
 bx_load_config() {
     local _v _env=()
@@ -66,6 +66,7 @@ bx_load_config() {
     SCHEDULE_MODE="${SCHEDULE_MODE:-adhoc}"    # adhoc | scheduled
     BACKUP_EXTRA_SOURCES="${BACKUP_EXTRA_SOURCES:-}"
     BACKUP_EXTRA_EXCLUDES="${BACKUP_EXTRA_EXCLUDES:-}"
+    BACKUP_EXTRA_INCLUDES="${BACKUP_EXTRA_INCLUDES:-}"
 
     # The name this host's backups are filed under: borg archive prefix, the
     # Back In Time chain directory, the replica names. deploy.sh pins it in the
@@ -338,6 +339,19 @@ bx_excludes() {
 # still listed as a source (borg records the empty mount point) but must not
 # get a btrfs replica: send/receive ignores excludes, and Manjaro's @cache
 # subvolume sent 54 GiB of package cache to the drive on every run.
+# bx_includes — BACKUP_EXTRA_INCLUDES, one anchored pattern per line: paths
+# re-included INSIDE an excluded tree. They go before every exclude (borg and
+# rsync both take the first matching rule), so BACKUP_EXTRA_EXCLUDES="/home/*/*"
+# with BACKUP_EXTRA_INCLUDES="/home/*/.config /home/*/.ssh" keeps a user's
+# configuration and keys and drops their data. A directory pattern carries its
+# whole subtree. No glob expansion (read -a).
+bx_includes() {
+    local i inc=()
+    read -ra inc <<<"${BACKUP_EXTRA_INCLUDES:-}"
+    for i in "${inc[@]}"; do printf '%s\n' "${i%/}"; done
+    return 0
+}
+
 bx_source_fully_excluded() { # bx_source_fully_excluded MOUNT
     # Not `bx_excludes | grep -q`: grep -q exits at the first match, the
     # writer gets SIGPIPE, and under the callers' `set -o pipefail` a found

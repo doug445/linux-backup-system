@@ -57,6 +57,12 @@ CAPACITY_RECOMMEND_X=2
 # anchored at /: BACKUP_EXTRA_EXCLUDES="/home/*/VMs/* /srv/scratch/*"
 BACKUP_EXTRA_EXCLUDES=""
 
+# Paths re-included INSIDE an excluded tree (they win over every exclude),
+# space-separated. Keep configuration and keys, drop the bulk data:
+#   BACKUP_EXTRA_EXCLUDES="/home/*/*"
+#   BACKUP_EXTRA_INCLUDES="/home/*/.config /home/*/.ssh /home/*/.gnupg /home/*/.local/share/keyrings"
+BACKUP_EXTRA_INCLUDES=""
+
 # Capacity policy: refuse (default) | warn | off. The floor is measured on the
 # whole filesystem of each source, so on a btrfs system disk that also holds
 # 1.5 TiB of VM images beside a 100 GiB system, "warn" lets a 1 TiB drive be
