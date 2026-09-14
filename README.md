@@ -630,6 +630,16 @@ btrfs source to the drive with `btrfs send/receive`, and
 `snapper-replicate.sh` if the host has one. On any other root, Timeshift is
 the equivalent layer.
 
+Replicas are **incremental**. After a good send the newest read-only snapshot
+of each source stays in `/.backup-snapshots` as the next run's parent, so a
+second run costs the drive only what changed; the log says `incremental from
+<parent>` or `full`. A full send happens on the first run, on a new drive, or
+when the parent's replica was pruned, and the dry run says which it will be.
+The kept parent holds the system disk's changed blocks until the next backup,
+the same cost as one snapper snapshot. A source whose whole tree is on the
+exclude list — Manjaro's `@cache` at `/var/cache` — gets no replica, since
+send/receive cannot apply excludes.
+
 ### What does "restore-verified" mean, exactly?
 
 `backup-verify.sh` does not check that backups ran. It checks that what they

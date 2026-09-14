@@ -39,5 +39,6 @@ echo "### lib-fixture-test";   bash tests/lib-fixture-test.sh || rc=1
 echo "### cmdline-fixture-test"; bash tests/cmdline-fixture-test.sh || rc=1
 echo "### cli-test";           bash tests/cli-test.sh || rc=1
 echo "### deploy-dryrun-test"; bash tests/deploy-dryrun-test.sh || rc=1
+echo "### replica-loop-test";  bash tests/replica-loop-test.sh || rc=1
 echo; [ $rc -eq 0 ] && echo "ALL GREEN" || echo "FAILURES"
 exit $rc
