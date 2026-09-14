@@ -241,8 +241,10 @@ setup_target() {
         fi
         if mountpoint -q "$TARGET/boot/efi" 2>/dev/null; then
             log "  /boot/efi mounted"
+        elif mountpoint -q "$TARGET/efi" 2>/dev/null; then
+            log "  /efi mounted"
         else
-            warn "  /boot/efi NOT mounted"
+            warn "  ESP NOT mounted (neither /boot/efi nor /efi)"
         fi
 
         if confirm "Use existing mounts at $TARGET?"; then
@@ -260,14 +262,14 @@ setup_target() {
     echo "  1. Mount root subvol: mount -o subvol=root /dev/nvmeXnYpZ $TARGET"
     echo "  2. Mount home subvol: mount -o subvol=home /dev/nvmeXnYpZ $TARGET/home"
     echo "  3. Mount boot:        mount /dev/sdX2 $TARGET/boot"
-    echo "  4. Mount EFI:         mount /dev/sdX1 $TARGET/boot/efi"
+    echo "  4. Mount EFI:         mount /dev/sdX1 $TARGET/boot/efi   (or $TARGET/efi)"
     echo ""
     echo "For ext4/LUKS/LVM systems:"
     echo "  1. Open LUKS:     cryptsetup open /dev/sdX3 <crypt_name>"
     echo "  2. Activate LVM:  vgchange -ay"
     echo "  3. Mount root:    mount /dev/mapper/<vg_name>-root $TARGET"
     echo "  4. Mount boot:    mount /dev/sdX2 $TARGET/boot"
-    echo "  5. Mount EFI:     mount /dev/sdX1 $TARGET/boot/efi"
+    echo "  5. Mount EFI:     mount /dev/sdX1 $TARGET/boot/efi   (or $TARGET/efi)"
     echo ""
 
     echo -e "${YELLOW}Prepare the target now, then press Enter to continue...${NC}"

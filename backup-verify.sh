@@ -477,6 +477,28 @@ else
 fi
 
 boot_dev="$(boot_luks_dev)"
+info() { printf '  INFO  %s\n' "$*"; }   # informational: never changes the exit code
+
+# What a restore disk must look like for this boot layout: the partition types
+# the firmware and systemd-boot rely on are not in any file-level backup.
+esp_m=""; declare -f bx_esp_mount >/dev/null && esp_m=$(bx_esp_mount)
+if [[ -d /sys/firmware/efi && -n "$esp_m" && "$esp_m" != /boot/firmware ]]; then
+    hdr "6a. Partition layout a restore disk needs (informational)"
+    if [[ "$esp_m" == /boot ]]; then
+        info "the ESP is /boot itself (no separate /efi or /boot/efi): on the new disk, /boot must be"
+        echo "        a vfat partition typed 'EFI System' (sgdisk -t N:ef00), big enough for every kernel + initramfs."
+    else
+        info "ESP at $esp_m: on the new disk, a vfat partition typed 'EFI System' (sgdisk -t N:ef00)."
+        kind=$(bx_dev_parttype_kind "$(findmnt -no SOURCE "$esp_m" 2>/dev/null)")
+        [[ "$kind" == esp || "$kind" == unknown ]] || note "the live ESP at $esp_m is typed '$kind', not EFI System — this firmware boots it anyway, a restore disk may not"
+        if [[ "$(findmnt -no FSTYPE /boot 2>/dev/null)" == vfat ]] && ! uses_grub; then
+            kind=$(bx_dev_parttype_kind "$(findmnt -no SOURCE /boot 2>/dev/null)")
+            info "/boot is a separate vfat partition (XBOOTLDR, typed '$kind' here): on the new disk, type it"
+            echo "        'Linux extended boot' (sgdisk -t N:ea00) or systemd-boot will not see its entries."
+        fi
+    fi
+fi
+
 if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
     hdr "6. Boot chain notes for this layout (informational)"
     if [[ -n "$boot_dev" ]]; then

@@ -78,6 +78,47 @@ ESP=""
 for e in /boot/efi /efi /boot/firmware; do mountpoint -q "$e" 2>/dev/null && { ESP="$e"; break; }; done
 [ -z "$ESP" ] && { for e in /boot/efi /efi; do [ -d "$e/EFI" ] && { ESP="$e"; break; }; done; }
 IS_EFI=false; [ -d /sys/firmware/efi ] && IS_EFI=true
+
+# Partition type as firmware and systemd-boot see it: esp | xbootldr | other | unknown.
+ptkind() {
+    local pt; pt=$(lsblk -dno PARTTYPE "$1" 2>/dev/null | head -1 | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    case "$pt" in
+        c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef) echo esp ;;
+        bc13c2ff-59e6-4262-a352-b275fd6f7172|0xea) echo xbootldr ;;
+        "") echo unknown ;;
+        *) echo other ;;
+    esac
+}
+# /boot itself may be the ESP (systemd-boot on Arch mounts it there): vfat,
+# typed EFI System — or, untyped, holding EFI/ — and no dedicated ESP found.
+BOOT_KIND=""
+# A GRUB system reads its own /boot (any type); the XBOOTLDR check is for systemd-boot.
+USES_GRUB_HINT=false
+{ [ -f /boot/grub2/grub.cfg ] || [ -f /boot/grub/grub.cfg ]; } && USES_GRUB_HINT=true
+if [ "$(findmnt -no FSTYPE /boot 2>/dev/null)" = vfat ]; then
+    BOOT_KIND=$(ptkind "$(findmnt -no SOURCE /boot 2>/dev/null)")
+    if [ -z "$ESP" ] && { [ "$BOOT_KIND" = esp ] || { [ "$BOOT_KIND" = unknown ] && [ -d /boot/EFI ]; }; }; then
+        ESP=/boot
+    fi
+fi
+# Awareness checks for the NEW disk: the firmware only boots an ESP it can
+# recognise, and systemd-boot only reads entries from a /boot typed XBOOTLDR.
+if [ "$IS_EFI" = true ] && [ -n "$ESP" ] && mountpoint -q "$ESP" 2>/dev/null; then
+    esp_kind=$(ptkind "$(findmnt -no SOURCE "$ESP" 2>/dev/null)")
+    case "$esp_kind" in
+        esp)     say "ESP $ESP: partition type EFI System — OK" ;;
+        unknown) warn "ESP $ESP: partition type unreadable — make sure it is 'EFI System' (GPT C12A7328-…, sgdisk -t N:ef00) or the firmware will not boot it" ;;
+        *)       warn "ESP $ESP is NOT typed 'EFI System' ($esp_kind) — the firmware will not find the bootloader. Fix: sgdisk -t N:ef00 <disk>" ;;
+    esac
+fi
+if [ -n "$ESP" ] && [ "$ESP" != /boot ] && [ -n "$BOOT_KIND" ] && mountpoint -q /boot 2>/dev/null; then
+    case "$BOOT_KIND" in
+        xbootldr) say "/boot: separate vfat, partition type XBOOTLDR — OK" ;;
+        # kernel-install may still write there (BOOT_ROOT=/boot), but the
+        # loader only reads entries from an ESP or a partition typed XBOOTLDR.
+        *) [ "$USES_GRUB_HINT" = true ] || warn "/boot is a separate vfat partition next to ESP $ESP but not typed XBOOTLDR ($BOOT_KIND) — systemd-boot will not see the entries on it. Fix: sgdisk -t N:ea00 <disk>" ;;
+    esac
+fi
 # Raspberry Pi firmware boot: the SoC firmware reads config.txt / cmdline.txt /
 # kernel*.img straight from the vfat partition; there is no bootloader to
 # install. UNTESTED ON METAL — see the README status table.

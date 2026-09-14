@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 3.6.4**
+**linux-backup-system 3.7.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -34,8 +34,7 @@ have.
 
 | Setup | Status | What to confirm |
 |---|---|---|
-| Fedora (44 on a 2019 System76 laptop, two NVMe), Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint | ✅ | still worth a report on a different boot layout |
-| **Arch / Manjaro / EndeavourOS** | ⚠️ under test | packages resolve; `backintime` from AUR; a real backup + verify pass |
+| Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint, Arch / Manjaro / EndeavourOS | ✅ | still worth a report on a different boot layout — the machines are listed under *Verified on* in the README |
 | **openSUSE** | ❌ | `zypper` package names; a real backup + verify pass |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — a package manager the map does not know | ❌ **most wanted** | the family token, its non-interactive install command, the package names for borg / Back In Time / Timeshift / the tray, a synthetic `os-release` fixture, and a real backup + verify pass |
 | btrfs root → snapper + send/receive replicas | ✅ | |
@@ -43,11 +42,11 @@ have.
 | **xfs / f2fs / any other root** | ❌ | that the Timeshift layer engages and verifies |
 | systemd-boot, UKI, GRUB EFI, encrypted argon2id `/boot` | ✅ | |
 | **GRUB legacy BIOS** | ❌ | `restore-rebuild-boot.sh` finds the boot disk; a restored machine boots |
-| **Plain (unencrypted) `/boot`** | ⚠️ under test | verify's boot-chain section; a restored machine boots |
+| Plain (unencrypted) `/boot` | ✅ | a restored machine booting is the bare-metal row below |
 | **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
 | **Bare-metal restore executing the boot rebuild** | ⚠️ under test | the `--dry-run` plan has been checked; the real plan has never been *executed* on hardware |
-| Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ M1 Pro, September 2026 (earlier 3.x) | a report from an M2 or later, or with the current release, is still welcome |
+| Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
 
 ### How to file a setup report
 

@@ -34,7 +34,7 @@
 #
 # Prerequisites:
 #   - Target partitions already created, formatted, and mounted at /mnt/target
-#   - /mnt/target/boot and /mnt/target/boot/efi mounted
+#   - /mnt/target/boot and the ESP (/mnt/target/boot/efi or /mnt/target/efi) mounted
 #   - LUKS already opened if applicable
 #   - Borg backup drive mounted (unlock LUKS first if needed)
 #   - Live USB must have: borgbackup, cryptsetup
@@ -92,7 +92,7 @@ Steps before running this script:
                   mkdir -p /mnt/target/home
                   mount -o subvol=home /dev/sdXN /mnt/target/home
   6. Mount boot:   mount /dev/sdX2 /mnt/target/boot
-  7. Mount EFI:    mount /dev/sdX1 /mnt/target/boot/efi
+  7. Mount EFI:    mount /dev/sdX1 /mnt/target/boot/efi   (or /mnt/target/efi — where the source had it)
   8. Open backup:  cryptsetup open /dev/sdY1 backup-crypt
   9. Mount backup: mount /dev/mapper/backup-crypt /mnt/backup
   10. Run restore: ./borg-restore.sh /mnt/target /mnt/backup/borg-backup
@@ -166,7 +166,7 @@ if [ -d "$TARGET/home/.ecryptfs" ]; then
                 log "    OK: $f"
             else
                 error "    MISSING: $f"
-                ((ECRYPTFS_ERRORS++))
+                ECRYPTFS_ERRORS=$((ECRYPTFS_ERRORS + 1))
             fi
         done
 
@@ -175,7 +175,7 @@ if [ -d "$TARGET/home/.ecryptfs" ]; then
             log "    OK: .Private/ has $private_count top-level encrypted files"
         else
             error "    EMPTY: .Private/ directory has no files!"
-            ((ECRYPTFS_ERRORS++))
+            ECRYPTFS_ERRORS=$((ECRYPTFS_ERRORS + 1))
         fi
 
         wp_size=$(stat -c%s "$ecryptfs_dir/.ecryptfs/wrapped-passphrase" 2>/dev/null || echo 0)
@@ -183,7 +183,7 @@ if [ -d "$TARGET/home/.ecryptfs" ]; then
             log "    OK: wrapped-passphrase size=$wp_size bytes (expected ~58)"
         else
             error "    BAD: wrapped-passphrase size=$wp_size bytes (expected ~58)"
-            ((ECRYPTFS_ERRORS++))
+            ECRYPTFS_ERRORS=$((ECRYPTFS_ERRORS + 1))
         fi
 
         sig_count=$(wc -l < "$ecryptfs_dir/.ecryptfs/Private.sig" 2>/dev/null || echo 0)
@@ -191,7 +191,7 @@ if [ -d "$TARGET/home/.ecryptfs" ]; then
             log "    OK: Private.sig has 2 signature lines"
         else
             error "    BAD: Private.sig has $sig_count lines (expected 2)"
-            ((ECRYPTFS_ERRORS++))
+            ECRYPTFS_ERRORS=$((ECRYPTFS_ERRORS + 1))
         fi
 
         mnt_path=$(cat "$ecryptfs_dir/.ecryptfs/Private.mnt" 2>/dev/null || true)
@@ -267,20 +267,57 @@ if mountpoint -q "$TARGET/boot" 2>/dev/null; then
     log "Boot device: $BOOT_DEV → UUID=$BOOT_UUID"
 fi
 
-# Detect /boot/efi
-EFI_UUID=""
-if mountpoint -q "$TARGET/boot/efi" 2>/dev/null; then
-    EFI_DEV=$(findmnt -n -o SOURCE "$TARGET/boot/efi")
+# Detect the ESP: /boot/efi (GRUB) or /efi (systemd-boot with XBOOTLDR at
+# /boot, the kernel-install layout). Checking /boot/efi alone left an /efi
+# host's fstab naming the old ESP, and the restored system hung at boot.
+EFI_UUID=""; EFI_MNT=""
+for _e in /boot/efi /efi; do
+    mountpoint -q "$TARGET$_e" 2>/dev/null || continue
+    EFI_MNT="$_e"
+    EFI_DEV=$(findmnt -n -o SOURCE "$TARGET$_e")
     EFI_UUID=$(blkid -s UUID -o value "$EFI_DEV" 2>/dev/null) || true
-    log "EFI device:  $EFI_DEV → UUID=$EFI_UUID"
+    log "EFI device:  $EFI_DEV ($_e) → UUID=$EFI_UUID"
+    break
+done
+# No dedicated ESP: /boot itself may be the ESP (systemd-boot on Arch mounts it
+# there). Its fstab entry is then the /boot one, rewritten below as /boot.
+_pt() { lsblk -dno PARTTYPE "$1" 2>/dev/null | head -1 | tr -d ' ' | tr '[:upper:]' '[:lower:]'; }
+_ESP_T=c12a7328-f81f-11d2-ba4b-00a0c93ec93b; _XBL_T=bc13c2ff-59e6-4262-a352-b275fd6f7172
+if [ -z "$EFI_MNT" ] && [ -n "${BOOT_DEV:-}" ] && [ "$(findmnt -n -o FSTYPE "$TARGET/boot" 2>/dev/null)" = vfat ]; then
+    case "$(_pt "$BOOT_DEV")" in
+        "$_ESP_T"|0xef) EFI_MNT=/boot; EFI_DEV="$BOOT_DEV"; EFI_UUID="$BOOT_UUID"
+                        log "ESP is /boot itself ($BOOT_DEV, typed EFI System)" ;;
+        "")             [ -d "$TARGET/boot/EFI" ] && { EFI_MNT=/boot; EFI_DEV="$BOOT_DEV"; EFI_UUID="$BOOT_UUID"
+                        warn "ESP appears to be /boot itself ($BOOT_DEV holds EFI/) — its partition type could not be read"; } ;;
+    esac
+fi
+# Awareness: the NEW disk's partition types. The firmware boots only a
+# partition typed EFI System; systemd-boot reads entries only from the ESP or
+# a partition typed XBOOTLDR. Wrong types restore every file and still do not
+# boot. Checked here, before anything is rewritten, so they can be fixed now.
+if [ -n "${EFI_DEV:-}" ]; then
+    case "$(_pt "$EFI_DEV")" in
+        "$_ESP_T"|0xef) log "  ESP partition type: EFI System — OK" ;;
+        "") warn "  ESP $EFI_DEV: partition type unreadable — make sure it is 'EFI System' (sgdisk -t N:ef00)" ;;
+        *)  warn "  ESP $EFI_DEV is NOT typed 'EFI System' — the firmware will not boot it. Fix now: sgdisk -t N:ef00 <disk>" ;;
+    esac
+fi
+if [ -n "$EFI_MNT" ] && [ "$EFI_MNT" != /boot ] && [ -n "${BOOT_DEV:-}" ] \
+   && [ "$(findmnt -n -o FSTYPE "$TARGET/boot" 2>/dev/null)" = vfat ] \
+   && [ ! -d "$TARGET/boot/grub" ] && [ ! -d "$TARGET/boot/grub2" ]; then
+    case "$(_pt "$BOOT_DEV")" in
+        "$_XBL_T"|0xea) log "  /boot partition type: XBOOTLDR — OK" ;;
+        *) warn "  /boot ($BOOT_DEV) is a vfat partition next to the ESP but NOT typed XBOOTLDR — systemd-boot will not see its entries. Fix now: sgdisk -t N:ea00 <disk>" ;;
+    esac
 fi
 
 # Detect swap (LVM swap, partition swap, or zram)
-SWAP_UUID=""
+SWAP_UUID=""; SWAP_DEV=""
 for dev in /dev/mapper/vg*-swap* /dev/mapper/*-swap* /dev/sd*[0-9] /dev/nvme*p[0-9]; do
     [ -b "$dev" ] || continue
     dev_type=$(blkid -s TYPE -o value "$dev" 2>/dev/null || true)
     if [ "$dev_type" = "swap" ]; then
+        SWAP_DEV="$dev"
         SWAP_UUID=$(blkid -s UUID -o value "$dev" 2>/dev/null) || true
         log "Swap device: $dev → UUID=$SWAP_UUID"
         break
@@ -290,7 +327,7 @@ done
 # Detect LUKS UUIDs (for crypttab)
 HAS_LUKS=false
 log "Detecting LUKS devices..."
-declare -A LUKS_MAP
+declare -A LUKS_MAP LUKS_DEV
 
 if command -v dmsetup &>/dev/null; then
     while IFS= read -r line; do
@@ -322,6 +359,7 @@ if command -v dmsetup &>/dev/null; then
                 luks_uuid=$(cryptsetup luksUUID "$underlying" 2>/dev/null) || true
                 if [ -n "$luks_uuid" ]; then
                     LUKS_MAP["$mapper_name"]="$luks_uuid"
+                    LUKS_DEV["$mapper_name"]="$underlying"
                     HAS_LUKS=true
                     log "LUKS: $mapper_name ← $underlying → UUID=$luks_uuid"
                 fi
@@ -339,7 +377,7 @@ echo "  Root filesystem:  ${ROOT_UUID:-NOT DETECTED} ($TARGET_ROOT_FSTYPE)"
 echo "  /home:            ${HOME_UUID:-same as root or not separate}"
 [ -n "$HOME_SUBVOL" ] && echo "  Home subvol:      $HOME_SUBVOL"
 echo "  /boot:            ${BOOT_UUID:-NOT DETECTED}"
-echo "  /boot/efi:        ${EFI_UUID:-NOT DETECTED}"
+echo "  ESP ${EFI_MNT:-/boot/efi or /efi}: ${EFI_UUID:-NOT DETECTED}"
 echo "  Swap:             ${SWAP_UUID:-NOT DETECTED (zram or none)}"
 echo "  LUKS in use:      $HAS_LUKS"
 for name in "${!LUKS_MAP[@]}"; do
@@ -361,6 +399,12 @@ fi
 ###############################################################################
 log "Reading old UUIDs from restored fstab..."
 
+# lib-cmdline.sh: fstab/crypttab parsing and the kernel command-line rewrite.
+for _c in "$SCRIPT_DIR/lib-cmdline.sh" /usr/local/sbin/lib-cmdline.sh; do
+    # shellcheck disable=SC1090
+    [ -r "$_c" ] && { . "$_c"; break; }
+done
+declare -f cl_rewrite_ids >/dev/null || fatal "lib-cmdline.sh not found next to this script or in /usr/local/sbin — cannot rewrite kernel command lines; the restored system would not boot"
 FSTAB="$TARGET/etc/fstab"
 CRYPTTAB="$TARGET/etc/crypttab"
 
@@ -372,49 +416,54 @@ echo ""
 
 cp "$FSTAB" "$FSTAB.bak.$(date +%s)"
 
-# Extract old UUIDs from fstab
-OLD_ROOT_UUID=$(grep -oP 'UUID=\K[0-9a-fA-F-]+(?=\s+/\s)' "$FSTAB" || true)
-OLD_HOME_UUID=$(grep -oP 'UUID=\K[0-9a-fA-F-]+(?=\s+/home\s)' "$FSTAB" || true)
-OLD_BOOT_UUID=$(grep -oP 'UUID=\K[0-9a-fA-F-]+(?=\s+/boot\s)' "$FSTAB" || true)
-OLD_EFI_UUID=$(grep -oP 'UUID=\K[0-9a-fA-F-]+(?=\s+/boot/efi\s)' "$FSTAB" || true)
-OLD_SWAP_UUID=$(grep -oP 'UUID=\K[0-9a-fA-F-]+(?=\s+\S*swap)' "$FSTAB" || true)
+# Extract old ids from fstab and point each at its new device — by field, in
+# the form the entry already uses (UUID=, PARTUUID=, LABEL=, PARTLABEL=). A
+# substring match on "UUID=" also matched inside "PARTUUID=" and wrote a
+# filesystem UUID where a partition UUID belongs.
+# fix_fstab_ref WHAT MOUNT|swap NEWDEV — sets FIX_OLD/FIX_NEW to the swapped
+# ids when they are UUIDs or PARTUUIDs (the kernel command-line map needs them).
+fix_fstab_ref() {
+    local what="$1" mnt="$2" dev="$3" kind="" old="" new=""
+    FIX_OLD=""; FIX_NEW=""
+    IFS=$'\t' read -r kind old < <(cl_fstab_ref "$FSTAB" "$mnt") || true
+    [ -n "$old" ] || return 0
+    if [ "$kind" = PATH ]; then
+        case "$old" in
+            /dev/mapper/*|/dev/[a-z]*-*/*) log "  $what: fstab names $old (a mapper/LVM path, stable across disks) — left as-is" ;;
+            /dev/*) warn "  $what: fstab names $old for $mnt — a kernel device name, not an id; check it is right on the new disk" ;;
+            *)      log "  $what: fstab names $old (a file, no id to update)" ;;
+        esac
+        return 0
+    fi
+    if [ -z "$dev" ]; then
+        warn "  $what: fstab has $kind=$old for $mnt but no new device is mounted there — left as-is"
+        return 0
+    fi
+    new=$(blkid -s "$kind" -o value "$dev" 2>/dev/null || true)
+    if [ -z "$new" ]; then
+        warn "  $what: $dev has no $kind — fstab entry $kind=$old for $mnt left as-is; fix it by hand before rebooting"
+        return 0
+    fi
+    [ "$new" = "$old" ] && { log "  $what: $kind=$old already correct"; return 0; }
+    cl_table_set_ref "$FSTAB" 1 "$kind" "$old" "$new"
+    log "  Updated $what ($mnt) $kind: $old → $new"
+    case "$kind" in UUID|PARTUUID) FIX_OLD="$old"; FIX_NEW="$new" ;; esac
+}
 
-log "Old UUIDs: root=${OLD_ROOT_UUID:-?} home=${OLD_HOME_UUID:-?} boot=${OLD_BOOT_UUID:-?} efi=${OLD_EFI_UUID:-?} swap=${OLD_SWAP_UUID:-?}"
+log "Old fstab references: root=$(cl_fstab_ref "$FSTAB" / | tr '\t' '=') home=$(cl_fstab_ref "$FSTAB" /home | tr '\t' '=') boot=$(cl_fstab_ref "$FSTAB" /boot | tr '\t' '=') esp=$(cl_fstab_ref "$FSTAB" "${EFI_MNT:-/boot/efi}" | tr '\t' '=') swap=$(cl_fstab_ref "$FSTAB" swap | tr '\t' '=')"
 
 log "Updating fstab..."
-
-# Update root UUID
-if [ -n "$ROOT_UUID" ] && [ -n "$OLD_ROOT_UUID" ] && [ "$ROOT_UUID" != "$OLD_ROOT_UUID" ]; then
-    # For btrfs, root and home may share the same UUID — update all occurrences
-    sed -i "s|UUID=$OLD_ROOT_UUID|UUID=$ROOT_UUID|g" "$FSTAB"
-    log "  Updated root UUID: $OLD_ROOT_UUID → $ROOT_UUID"
-elif [ -n "$ROOT_UUID" ] && [ -z "$OLD_ROOT_UUID" ]; then
-    log "  Root uses /dev/mapper path (no UUID in fstab) — no UUID update needed"
+# Root first: on btrfs the same UUID also names /home and every other
+# subvolume, and cl_table_set_ref rewrites all of those lines at once.
+fix_fstab_ref root / "${BTRFS_RAW_DEV:-$TARGET_ROOT_DEV}";   OLD_ROOT_UUID="$FIX_OLD"; ROOT_UUID="${FIX_NEW:-$ROOT_UUID}"
+fix_fstab_ref /home /home "${HOME_RAW_DEV:-${HOME_DEV:-}}";   OLD_HOME_UUID="$FIX_OLD"; HOME_UUID="${FIX_NEW:-$HOME_UUID}"
+fix_fstab_ref /boot /boot "${BOOT_DEV:-}";                    OLD_BOOT_UUID="$FIX_OLD"; BOOT_UUID="${FIX_NEW:-$BOOT_UUID}"
+if [ -n "$EFI_MNT" ] && [ "$EFI_MNT" != /boot ]; then
+    fix_fstab_ref ESP "$EFI_MNT" "${EFI_DEV:-}";              OLD_EFI_UUID="$FIX_OLD";  EFI_UUID="${FIX_NEW:-$EFI_UUID}"
+else
+    OLD_EFI_UUID=""
 fi
-
-# Update /home UUID (if it's a separate partition with different UUID)
-if [ -n "$HOME_UUID" ] && [ -n "$OLD_HOME_UUID" ] && [ "$HOME_UUID" != "$OLD_HOME_UUID" ] && [ "$HOME_UUID" != "$ROOT_UUID" ]; then
-    sed -i "s|UUID=$OLD_HOME_UUID|UUID=$HOME_UUID|g" "$FSTAB"
-    log "  Updated /home UUID: $OLD_HOME_UUID → $HOME_UUID"
-fi
-
-# Update /boot UUID
-if [ -n "$BOOT_UUID" ] && [ -n "$OLD_BOOT_UUID" ] && [ "$BOOT_UUID" != "$OLD_BOOT_UUID" ]; then
-    sed -i "s|UUID=$OLD_BOOT_UUID|UUID=$BOOT_UUID|g" "$FSTAB"
-    log "  Updated /boot UUID: $OLD_BOOT_UUID → $BOOT_UUID"
-fi
-
-# Update /boot/efi UUID
-if [ -n "$EFI_UUID" ] && [ -n "$OLD_EFI_UUID" ] && [ "$EFI_UUID" != "$OLD_EFI_UUID" ]; then
-    sed -i "s|UUID=$OLD_EFI_UUID|UUID=$EFI_UUID|g" "$FSTAB"
-    log "  Updated /boot/efi UUID: $OLD_EFI_UUID → $EFI_UUID"
-fi
-
-# Update swap UUID
-if [ -n "$SWAP_UUID" ] && [ -n "$OLD_SWAP_UUID" ] && [ "$SWAP_UUID" != "$OLD_SWAP_UUID" ]; then
-    sed -i "s|UUID=$OLD_SWAP_UUID|UUID=$SWAP_UUID|g" "$FSTAB"
-    log "  Updated swap UUID: $OLD_SWAP_UUID → $SWAP_UUID"
-fi
+fix_fstab_ref swap swap "${SWAP_DEV:-}";                      OLD_SWAP_UUID="$FIX_OLD"; SWAP_UUID="${FIX_NEW:-$SWAP_UUID}"
 
 # Comment out backup partition entry (if uncommented)
 if grep -v '^\s*#' "$FSTAB" | grep -q 'backup-crypt'; then
@@ -437,11 +486,22 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
     LUKS_ID_MAP="$(mktemp /tmp/restore-luksmap.XXXXXX)"
     for mapper_name in "${!LUKS_MAP[@]}"; do
         new_luks_uuid="${LUKS_MAP[$mapper_name]}"
-        old_luks_uuid=$(grep -oP "^${mapper_name}\s+UUID=\K[0-9a-fA-F-]+" "$CRYPTTAB" || true)
-        if [ -n "$old_luks_uuid" ] && [ "$old_luks_uuid" != "$new_luks_uuid" ]; then
-            echo "$old_luks_uuid $new_luks_uuid" >> "$LUKS_ID_MAP"   # for the command-line rewrite below
-            sed -i "s|UUID=$old_luks_uuid|UUID=$new_luks_uuid|g" "$CRYPTTAB"
-            log "  Updated $mapper_name LUKS UUID: $old_luks_uuid → $new_luks_uuid"
+        c_kind=""; c_old=""; c_new=""
+        IFS=$'\t' read -r c_kind c_old < <(cl_crypttab_ref "$CRYPTTAB" "$mapper_name") || true
+        [ -n "$c_old" ] || continue
+        case "$c_kind" in
+            UUID) c_new="$new_luks_uuid" ;;
+            PARTUUID|LABEL|PARTLABEL) c_new=$(blkid -s "$c_kind" -o value "${LUKS_DEV[$mapper_name]:-}" 2>/dev/null || true) ;;
+            *) warn "  $mapper_name: crypttab names $c_old (a path, not an id) — left as-is; check it is right on the new disk"; continue ;;
+        esac
+        if [ -z "$c_new" ]; then
+            warn "  $mapper_name: no new $c_kind found for ${LUKS_DEV[$mapper_name]:-its device} — crypttab left as-is; fix it by hand"
+            continue
+        fi
+        if [ "$c_old" != "$c_new" ]; then
+            case "$c_kind" in UUID|PARTUUID) echo "$c_old $c_new" >> "$LUKS_ID_MAP" ;; esac   # for the command-line rewrite below
+            cl_table_set_ref "$CRYPTTAB" 2 "$c_kind" "$c_old" "$c_new"
+            log "  Updated $mapper_name $c_kind: $c_old → $c_new"
         fi
     done
 
@@ -469,11 +529,6 @@ fi
 # not enough: a carrier still naming the old disk stops in the initramfs.
 # lib-cmdline.sh rewrites reference positions only and never a mapper name.
 ###############################################################################
-for _c in "$SCRIPT_DIR/lib-cmdline.sh" /usr/local/sbin/lib-cmdline.sh; do
-    # shellcheck disable=SC1090
-    [ -r "$_c" ] && { . "$_c"; break; }
-done
-declare -f cl_rewrite_ids >/dev/null || fatal "lib-cmdline.sh not found next to this script or in /usr/local/sbin — cannot rewrite kernel command lines; the restored system would not boot"
 ID_MAP="$(mktemp /tmp/restore-idmap.XXXXXX)"
 {
     [ -n "$OLD_ROOT_UUID" ] && [ -n "$ROOT_UUID" ] && echo "$OLD_ROOT_UUID $ROOT_UUID"
@@ -546,34 +601,31 @@ echo "============================================================"
 ERRORS=0
 WARNINGS=0
 
-# Verify fstab UUIDs
-log "Verifying fstab UUIDs..."
-while IFS= read -r line; do
-    uuid=$(echo "$line" | grep -oP 'UUID=\K[0-9a-fA-F-]+' || true)
-    if [ -n "$uuid" ]; then
-        if blkid -U "$uuid" >/dev/null 2>&1; then
-            log "  OK: UUID=$uuid found"
-        else
-            error "  FAIL: UUID=$uuid NOT FOUND on any device!"
-            ((ERRORS++))
-        fi
+# Verify fstab and crypttab references, by field and kind (a PARTUUID is
+# looked up as a PARTUUID, a LABEL as a LABEL; paths are not checked here)
+log "Verifying fstab references..."
+while IFS=$'\t' read -r kind val; do
+    [ "$kind" = PATH ] && continue
+    if cl_ref_exists "$kind" "$val"; then
+        log "  OK: $kind=$val found"
+    else
+        error "  FAIL: $kind=$val NOT FOUND on any device!"
+        ERRORS=$((ERRORS + 1))
     fi
-done < <(grep -v '^\s*#' "$FSTAB" | grep -v '^\s*$')
+done < <(cl_table_refs "$FSTAB" 1)
 
-# Verify crypttab UUIDs
+# Verify crypttab references
 if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
-    log "Verifying crypttab UUIDs..."
-    while IFS= read -r line; do
-        uuid=$(echo "$line" | grep -oP 'UUID=\K[0-9a-fA-F-]+' || true)
-        if [ -n "$uuid" ]; then
-            if blkid -U "$uuid" >/dev/null 2>&1; then
-                log "  OK: LUKS UUID=$uuid found"
-            else
-                error "  FAIL: LUKS UUID=$uuid NOT FOUND!"
-                ((ERRORS++))
-            fi
+    log "Verifying crypttab references..."
+    while IFS=$'\t' read -r kind val; do
+        [ "$kind" = PATH ] && continue
+        if cl_ref_exists "$kind" "$val"; then
+            log "  OK: LUKS $kind=$val found"
+        else
+            error "  FAIL: LUKS $kind=$val NOT FOUND!"
+            ERRORS=$((ERRORS + 1))
         fi
-    done < <(grep -v '^\s*#' "$CRYPTTAB" | grep -v '^\s*$')
+    done < <(cl_table_refs "$CRYPTTAB" 2)
 fi
 
 # Verify every kernel command-line carrier names a device that exists NOW
@@ -582,7 +634,7 @@ stale=$(cl_stale_ids "$TARGET")
 if [ -n "$stale" ]; then
     while IFS=$'\t' read -r k f rk id; do
         error "  FAIL: $k ${f#"$TARGET"} references $rk $id which does not exist — the restored system would not boot"
-        ((ERRORS++))
+        ERRORS=$((ERRORS + 1))
     done <<<"$stale"
 else
     log "  OK: every carrier ($(cl_find_carriers "$TARGET" | wc -l)) references ids present on this disk"
@@ -597,7 +649,7 @@ for grub_cfg in "$TARGET/boot/grub/grub.cfg" "$TARGET/boot/grub2/grub.cfg"; do
                 log "  OK: GRUB UUID=$uuid found"
             else
                 error "  FAIL: GRUB UUID=$uuid NOT FOUND!"
-                ((ERRORS++))
+                ERRORS=$((ERRORS + 1))
             fi
         done
         break
@@ -606,26 +658,36 @@ done
 
 # Verify initramfs — both naming conventions
 log "Verifying initramfs..."
-INITRD_COUNT=0
-for f in "$TARGET"/boot/initrd.img-* "$TARGET"/boot/initramfs-*.img; do
+# Every layout: /boot/initrd.img-* (Debian), /boot/initramfs-*.img (Fedora,
+# mkinitcpio), the kernel-install Type #1 layout <boot|esp>/<machine-id>/<ver>/
+# {linux,initrd} (systemd-boot on Arch/Fedora/Debian), and UKIs, which carry
+# kernel and initramfs in one file. Checking the first two alone reported "no
+# kernels" on every kernel-install host.
+INITRD_COUNT=0; VMLINUZ_COUNT=0; UKI_COUNT=0
+for f in "$TARGET"/boot/initrd.img-* "$TARGET"/boot/initramfs-*.img "$TARGET"/boot/*/*/initrd "$TARGET"/efi/*/*/initrd "$TARGET"/boot/efi/*/*/initrd; do
     [ -f "$f" ] || continue
     echo "$f" | grep -q 'fallback' && continue
-    ((INITRD_COUNT++))
+    INITRD_COUNT=$((INITRD_COUNT + 1))
 done
-if [ "$INITRD_COUNT" -gt 0 ]; then
-    log "  OK: Found $INITRD_COUNT initramfs image(s)"
+for f in "$TARGET"/boot/vmlinuz-* "$TARGET"/boot/*/*/linux "$TARGET"/efi/*/*/linux "$TARGET"/boot/efi/*/*/linux; do
+    [ -f "$f" ] && VMLINUZ_COUNT=$((VMLINUZ_COUNT + 1))
+done
+for f in "$TARGET"/boot/EFI/Linux/*.efi "$TARGET"/efi/EFI/Linux/*.efi "$TARGET"/boot/efi/EFI/Linux/*.efi; do
+    [ -f "$f" ] && UKI_COUNT=$((UKI_COUNT + 1))
+done
+if [ "$INITRD_COUNT" -gt 0 ] || [ "$UKI_COUNT" -gt 0 ]; then
+    log "  OK: Found $INITRD_COUNT initramfs image(s), $UKI_COUNT UKI(s)"
 else
-    error "  FAIL: No initramfs images found!"
-    ((ERRORS++))
+    error "  FAIL: No initramfs images or UKIs found!"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # Verify kernels
-VMLINUZ_COUNT=$(ls "$TARGET"/boot/vmlinuz-* 2>/dev/null | wc -l)
-if [ "$VMLINUZ_COUNT" -gt 0 ]; then
-    log "  OK: Found $VMLINUZ_COUNT kernel(s)"
+if [ "$VMLINUZ_COUNT" -gt 0 ] || [ "$UKI_COUNT" -gt 0 ]; then
+    log "  OK: Found $VMLINUZ_COUNT kernel(s), $UKI_COUNT UKI(s)"
 else
-    error "  FAIL: No kernels in /boot!"
-    ((ERRORS++))
+    error "  FAIL: No kernels in /boot or the ESP!"
+    ERRORS=$((ERRORS + 1))
 fi
 
 # Verify ecryptfs (if applicable)
@@ -639,19 +701,22 @@ if [ -d "$TARGET/home/.ecryptfs" ]; then
                 log "  OK: $username/$f"
             else
                 error "  FAIL: $username/$f missing!"
-                ((ERRORS++))
+                ERRORS=$((ERRORS + 1))
             fi
         done
     done
 fi
 
 # Verify essential config files
-for f in "$TARGET/etc/default/grub" "$TARGET/etc/fstab"; do
+# /etc/default/grub only matters on a GRUB system.
+_cfgs=("$TARGET/etc/fstab")
+{ [ -d "$TARGET/boot/grub" ] || [ -d "$TARGET/boot/grub2" ]; } && _cfgs+=("$TARGET/etc/default/grub")
+for f in "${_cfgs[@]}"; do
     if [ -f "$f" ]; then
         log "  OK: $(basename "$f") exists"
     else
         warn "  $(basename "$f") not found"
-        ((WARNINGS++))
+        WARNINGS=$((WARNINGS + 1))
     fi
 done
 

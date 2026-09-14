@@ -213,6 +213,19 @@ mkdir -p "$T/pifw"; printf 'arm_64bit=1\n' > "$T/pifw/config.txt"
 if [ ! -d /sys/firmware/efi ]; then BX_PI_FW="$T/pifw" bx_pi_firmware_boot; expect "config.txt without EFI -> Pi firmware boot" 0 "$?"
 else BX_PI_FW="$T/pifw" bx_pi_firmware_boot; expect "EFI machine is never Pi firmware boot" 1 "$?"; fi
 BX_PI_FW="$T/nope" bx_pi_firmware_boot; r=$?; [ -f /boot/config.txt ] || expect "no config.txt -> not Pi" 1 "$r"
+expect "parttype: GPT EFI System -> esp"        esp      "$(bx_parttype_kind c12a7328-f81f-11d2-ba4b-00a0c93ec93b)"
+expect "parttype: uppercase GUID -> esp"         esp      "$(bx_parttype_kind C12A7328-F81F-11D2-BA4B-00A0C93EC93B)"
+expect "parttype: MBR 0xef -> esp"               esp      "$(bx_parttype_kind 0xef)"
+expect "parttype: XBOOTLDR -> xbootldr"          xbootldr "$(bx_parttype_kind bc13c2ff-59e6-4262-a352-b275fd6f7172)"
+expect "parttype: Linux filesystem -> other"     other    "$(bx_parttype_kind 0fc63daf-8483-4772-8e79-3d69d8477de4)"
+expect "parttype: empty -> other"                other    "$(bx_parttype_kind '')"
+for f in borg-restore.sh backintime-restore.sh restore-rebuild-boot.sh; do
+    grep -q 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' "$HERE/../$f" && grep -q 'bc13c2ff-59e6-4262-a352-b275fd6f7172' "$HERE/../$f" \
+        && ok "$f checks the ESP and XBOOTLDR partition types" || bad "$f lacks the ESP/XBOOTLDR partition-type check"
+done
+grep -q 'EFI_MNT=/boot' "$HERE/../borg-restore.sh" && grep -q 'EFI_MNT=/boot' "$HERE/../backintime-restore.sh" \
+    && ok "restore scripts recognise /boot as the ESP" || bad "a restore script does not recognise /boot as the ESP"
+grep -q 'ESP=/boot' "$HERE/../restore-rebuild-boot.sh" && ok "boot rebuild recognises /boot as the ESP" || bad "boot rebuild does not recognise /boot as the ESP"
 expect "esp path list carries /boot/firmware" 0 "$(grep -qx '/boot/firmware' <<<"$(tr '|' '\n' <<<"$BX_ESP_PATHS")"; echo $?)"
 
 echo "== capacity policy (pure arithmetic)"

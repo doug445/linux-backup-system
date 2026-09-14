@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.6.4"
+BX_VERSION="3.7.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -210,7 +210,8 @@ bx_snapshot_engine() {
 bx_backup_sources() {
     echo /
     local m
-    for m in /home /boot /boot/efi /efi /boot/firmware $BACKUP_EXTRA_SOURCES; do
+    # ${...:-}: deploy.sh runs under set -u without bx_load_config.
+    for m in /home /boot /boot/efi /efi /boot/firmware ${BACKUP_EXTRA_SOURCES:-}; do
         [ "$m" = / ] && continue
         mountpoint -q "$m" 2>/dev/null && echo "$m"
     done | sort -u
@@ -223,9 +224,48 @@ bx_backup_sources() {
 # matching lists in backup-verify.sh and restore-rebuild-boot.sh.
 BX_ESP_PATHS='/efi|/boot/efi|/boot/firmware'
 bx_esp_mount() {
-    { findmnt -rno TARGET,FSTYPE 2>/dev/null | awk '$2=="vfat"{print $1}'
-      awk '$1 !~ /^#/ && $3=="vfat"{print $2}' /etc/fstab 2>/dev/null
-    } | grep -xE "$BX_ESP_PATHS" | head -1
+    local m
+    m=$({ findmnt -rno TARGET,FSTYPE 2>/dev/null | awk '$2=="vfat"{print $1}'
+          awk '$1 !~ /^#/ && $3=="vfat"{print $2}' /etc/fstab 2>/dev/null
+        } | grep -xE "$BX_ESP_PATHS" | head -1)
+    # No ESP at a dedicated path: /boot itself may be the ESP (systemd-boot on
+    # Arch mounts it there). Only when /boot is vfat and is not an XBOOTLDR.
+    [ -z "$m" ] && bx_boot_is_esp && m=/boot
+    [ -n "$m" ] && echo "$m"
+}
+
+# bx_parttype_kind PARTTYPE — classify a partition type as the boot firmware
+# and systemd-boot see it: esp (GPT EFI System, or MBR type 0xef), xbootldr
+# (GPT Linux extended boot), other. Case-insensitive; pure (fixture-tested).
+bx_parttype_kind() {
+    case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+        c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef) echo esp ;;
+        bc13c2ff-59e6-4262-a352-b275fd6f7172|0xea) echo xbootldr ;;
+        *) echo other ;;
+    esac
+}
+
+# bx_dev_parttype_kind DEV — the same, for a block device (lsblk PARTTYPE).
+# "unknown" when the type cannot be read (not a partition, lsblk too old).
+bx_dev_parttype_kind() {
+    local pt; pt=$(lsblk -dno PARTTYPE "$1" 2>/dev/null | head -1 | tr -d ' ' || true)
+    [ -n "$pt" ] && bx_parttype_kind "$pt" || echo unknown
+}
+
+# Is /boot the ESP itself (no separate /efi or /boot/efi)? Yes when /boot is a
+# vfat mount whose partition is typed EFI System — or, where the type cannot be
+# read, when it holds an EFI/ directory and no separate ESP is mounted. An
+# XBOOTLDR /boot (vfat too, next to an ESP at /efi) is never the ESP.
+bx_boot_is_esp() {
+    local src kind
+    [ "$(findmnt -no FSTYPE /boot 2>/dev/null)" = vfat ] || return 1
+    src=$(findmnt -no SOURCE /boot 2>/dev/null)
+    kind=$(bx_dev_parttype_kind "$src")
+    case "$kind" in
+        esp) return 0 ;;
+        unknown) [ -d /boot/EFI ] && ! mountpoint -q /efi 2>/dev/null && ! mountpoint -q /boot/efi 2>/dev/null ;;
+        *) return 1 ;;
+    esac
 }
 
 # Raspberry Pi firmware boot: no UEFI, no GRUB, no systemd-boot. The SoC's
