@@ -174,7 +174,7 @@ column, use the suite for testing only — not in production.**
 | Fedora | ✅ | ⚠️ |
 | Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ | ✅ over a fresh Asahi install (never bare metal — see the FAQ) |
 | Debian / Ubuntu / Linux Mint | ✅ | ⚠️ |
-| Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro · ⚠️ Arch, EndeavourOS |
+| Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro, ⚠️ EndeavourOS, ❌ Arch |
 | openSUSE (Leap / Tumbleweed) | ❌ | ❌ not under test |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ not under test |
 
@@ -205,8 +205,8 @@ column, use the suite for testing only — not in production.**
 | Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ | ❌ not under test |
 | Plain `/boot` (unencrypted /boot) | ✅ | ✅ |
 | Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ | ❌ not under test |
-| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ⚠️ | ⚠️ |
-| rEFInd — `refind-install`, or binary + firmware boot entry | ⚠️ | ⚠️ |
+| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ |
+| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ |
 | SELinux restore relabel (Fedora, RHEL) — `/.autorelabel` on the restored system | ⚠️ | ⚠️ |
 | Restore from an **installed system** onto a second disk, the original disk still installed — no NVRAM writes, nothing written to the original disk | — | ✅ |
 | Restore from a live USB | — | ⚠️ |
