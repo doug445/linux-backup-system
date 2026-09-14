@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.8.0"
+BX_VERSION="3.9.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -48,7 +48,7 @@ BX_CONFIG="${BX_CONFIG:-/etc/backup-system.conf}"
 # Precedence: environment > /etc/backup-system.conf > built-in default, so a
 # one-off override works from the shell (KEEP=2 timeshift-backup.sh --prune-only)
 # and from a unit's Environment= line, without editing the host config.
-BX_CONFIG_VARS="BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE BACKUP_MOUNT_OPTS SCHEDULE_MODE BACKUP_EXTRA_SOURCES KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB CAPACITY_HEADROOM_PCT CAPACITY_RECOMMEND_X"
+BX_CONFIG_VARS="BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE BACKUP_MOUNT_OPTS SCHEDULE_MODE BACKUP_EXTRA_SOURCES BACKUP_EXTRA_EXCLUDES BACKUP_HOST_ID KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB CAPACITY_HEADROOM_PCT CAPACITY_RECOMMEND_X CAPACITY_CHECK BX_LOCK_WAIT"
 
 bx_load_config() {
     local _v _env=()
@@ -65,12 +65,39 @@ bx_load_config() {
     BACKUP_MOUNT_OPTS="${BACKUP_MOUNT_OPTS:-}" # mount -o opts for the drive (fs-specific)
     SCHEDULE_MODE="${SCHEDULE_MODE:-adhoc}"    # adhoc | scheduled
     BACKUP_EXTRA_SOURCES="${BACKUP_EXTRA_SOURCES:-}"
+    BACKUP_EXTRA_EXCLUDES="${BACKUP_EXTRA_EXCLUDES:-}"
+
+    # The name this host's backups are filed under: borg archive prefix, the
+    # Back In Time chain directory, the replica names. deploy.sh pins it in the
+    # config so a later hostname change does not orphan the chain (a renamed
+    # host used to start a second full copy that nothing ever pruned). Falls
+    # back to the live hostname; `hostname` itself is absent on minimal Arch.
+    BACKUP_HOST_ID="${BACKUP_HOST_ID:-$(hostname 2>/dev/null || uname -n 2>/dev/null)}"
+    [ -n "$BACKUP_HOST_ID" ] || BACKUP_HOST_ID=$(uname -n 2>/dev/null || echo linux)
 
     # Retention (all layers): count-based + free-space based, never time-based.
     KEEP="${KEEP:-10}"                  # normal count to keep, any age
     MIN_KEEP="${MIN_KEEP:-3}"           # hard floor, never prune below this
     MIN_FREE_PCT="${MIN_FREE_PCT:-10}"  # keep at least this % of the drive free
     MIN_FREE_GIB="${MIN_FREE_GIB:-0}"   # and at least this many GiB free (0 = ignore)
+    # Counts must be whole numbers and KEEP can never undercut the floor:
+    # `head -n -0` prints EVERY line, so KEEP=0 deleted every snapshot,
+    # including the one just written; KEEP=2 with MIN_KEEP=3 pruned to 2.
+    local _v
+    for _v in KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB; do
+        case "${!_v}" in ''|*[!0-9]*) echo "backup-system.conf: $_v='${!_v}' is not a whole number — using the default" >&2
+            case "$_v" in KEEP) KEEP=10 ;; MIN_KEEP) MIN_KEEP=3 ;; MIN_FREE_PCT) MIN_FREE_PCT=10 ;; MIN_FREE_GIB) MIN_FREE_GIB=0 ;; esac ;;
+        esac
+    done
+    [ "$MIN_KEEP" -ge 1 ] || MIN_KEEP=1
+    if [ "$KEEP" -lt "$MIN_KEEP" ]; then
+        echo "backup-system.conf: KEEP=$KEEP is below the MIN_KEEP=$MIN_KEEP floor — keeping $MIN_KEEP" >&2
+        KEEP=$MIN_KEEP
+    fi
+    # How long a backup waits for another layer's run to finish (seconds).
+    # The tray and the timers can start two layers at once; the second queues
+    # rather than racing the first's free-space prune (0 = do not wait, skip).
+    BX_LOCK_WAIT="${BX_LOCK_WAIT:-7200}"
 
     # Capacity: the drive must hold one full copy of everything in the backup
     # sources plus this much spare room, or the suite refuses to use it; and
@@ -78,6 +105,32 @@ bx_load_config() {
     # Linux filesystems it backs up (not the whole disk).
     CAPACITY_HEADROOM_PCT="${CAPACITY_HEADROOM_PCT:-20}"
     CAPACITY_RECOMMEND_X="${CAPACITY_RECOMMEND_X:-2}"
+    # refuse (default) | warn | off. The floor is measured with df on the
+    # whole filesystem of each source, which on btrfs counts snapper snapshots
+    # and every subvolume of that filesystem, backed up or not; a host whose
+    # system disk holds 1.5 TiB of VM images beside a 100 GiB system needs
+    # "warn" to use a 1 TiB drive that would hold it fine.
+    CAPACITY_CHECK="${CAPACITY_CHECK:-refuse}"
+}
+
+# ---------------------------------------------------------------------------
+# One lock for every layer. borg, Back In Time and Timeshift each end with a
+# free-space prune; two running at once watch the drive fill from the other's
+# writes and delete each other's history down to MIN_KEEP. A second Back In
+# Time run also rm -rf's the first one's in-progress snapshot. The tray and
+# the two Persistent= timers can start two layers within a second.
+#   bx_lock            wait BX_LOCK_WAIT seconds for the lock (0 = skip)
+# Returns 1 when the lock could not be taken; the caller logs and exits 0.
+# ---------------------------------------------------------------------------
+BX_LOCK_FILE="${BX_LOCK_FILE:-/var/lock/backup-system.lock}"
+bx_lock() {
+    local wait="${BX_LOCK_WAIT:-0}"
+    # Called directly, never in a pipeline: the fd must open in the caller.
+    exec 9>"$BX_LOCK_FILE" || return 1
+    if flock -n 9; then return 0; fi
+    [ "$wait" -gt 0 ] 2>/dev/null || return 1
+    echo "another backup layer is running (lock $BX_LOCK_FILE) — waiting up to ${wait}s" >&2
+    flock -w "$wait" 9
 }
 
 # ---------------------------------------------------------------------------
@@ -171,6 +224,7 @@ bx_capacity_verdict() {
 # refuse, 0 otherwise; the line explains either way.
 bx_check_backup_capacity() {
     local drive="${1:-}" used linux v floor rec
+    if [ "${CAPACITY_CHECK:-refuse}" = off ]; then echo "capacity: check disabled (CAPACITY_CHECK=off)"; return 0; fi
     if [ -z "$drive" ]; then
         drive=$(df -B1 --output=size "$BACKUP_MOUNT" 2>/dev/null | tail -1 | tr -dc '0-9')
         [ -n "$drive" ] || { echo "capacity: $BACKUP_MOUNT is not mounted — cannot size it"; return 1; }
@@ -178,7 +232,10 @@ bx_check_backup_capacity() {
     used=$(bx_sources_used_bytes); linux=$(bx_sources_total_bytes)
     read -r v floor rec < <(bx_capacity_verdict "$drive" "$used" "$linux")
     case "$v" in
-        refuse) echo "capacity: REFUSED — drive holds $(bx_human_bytes "$drive"), but a full backup of $(bx_human_bytes "$used") plus ${CAPACITY_HEADROOM_PCT}% spare needs $(bx_human_bytes "$floor")$([ "$linux" -gt 0 ] && echo "; recommended: ${CAPACITY_RECOMMEND_X}x the $(bx_human_bytes "$linux") of Linux filesystems = $(bx_human_bytes "$rec")")"; return 1 ;;
+        refuse) if [ "${CAPACITY_CHECK:-refuse}" = warn ]; then
+                    echo "capacity: WARNING (CAPACITY_CHECK=warn) — drive holds $(bx_human_bytes "$drive"), a full backup of $(bx_human_bytes "$used") plus ${CAPACITY_HEADROOM_PCT}% spare needs $(bx_human_bytes "$floor"); continuing"; return 0
+                fi
+                echo "capacity: REFUSED — drive holds $(bx_human_bytes "$drive"), but a full backup of $(bx_human_bytes "$used") plus ${CAPACITY_HEADROOM_PCT}% spare needs $(bx_human_bytes "$floor")$([ "$linux" -gt 0 ] && echo "; recommended: ${CAPACITY_RECOMMEND_X}x the $(bx_human_bytes "$linux") of Linux filesystems = $(bx_human_bytes "$rec")") — CAPACITY_CHECK=warn in the config overrides"; return 1 ;;
         warn)   echo "capacity: OK but small — drive $(bx_human_bytes "$drive") holds the $(bx_human_bytes "$used") of data (floor $(bx_human_bytes "$floor")); recommended ${CAPACITY_RECOMMEND_X}x the $(bx_human_bytes "$linux") of Linux filesystems = $(bx_human_bytes "$rec")" ;;
         *)      echo "capacity: OK — drive $(bx_human_bytes "$drive") for $(bx_human_bytes "$used") of data (floor $(bx_human_bytes "$floor")$([ "$linux" -gt 0 ] && echo ", recommended $(bx_human_bytes "$rec") = ${CAPACITY_RECOMMEND_X}x the Linux filesystems"))" ;;
     esac
@@ -200,21 +257,75 @@ bx_snapshot_engine() {
     else echo none; fi
 }
 
-# Absolute source paths to feed a file-level backup (borg / BIT). Always "/",
-# plus every SEPARATE on-disk mount that a bootable restore needs: a distinct
-# /home, /boot, and the ESP wherever it lives (/efi or /boot/efi). A /boot that
-# is just a directory on root is already inside "/" and is not listed again.
-# btrfs subvolumes have distinct st_dev, so a separate /home must be listed for
-# borg --one-file-system to descend into it. Extra mounts can be added via
-# BACKUP_EXTRA_SOURCES in the config.
+# Absolute source paths to feed a file-level backup (borg / BIT): "/" plus
+# EVERY separately mounted local filesystem the machine is made of — not a
+# whitelist. openSUSE mounts /var, /opt, /srv, /root, /usr/local and the GRUB
+# module dirs as their own subvolumes; older installs put /var, /usr or /opt
+# on their own partitions; a ZFS root is twenty datasets. Each has its own
+# st_dev, so borg --one-file-system archived them as empty directories and the
+# btrfs replicas never included them. Anything not local — the backup drive,
+# removable media, network shares, snap/flatpak images, runtime mounts — is
+# left out, as are bind mounts of a directory already inside a listed source.
+# Extra paths can be added via BACKUP_EXTRA_SOURCES in the config.
+#
+# BX_MOUNT_TABLE: a file of `TARGET FSTYPE SOURCE OPTIONS` lines in
+# `findmnt -rno` form stands in for the live mount table (fixture tests).
+_bx_mount_table() {
+    if [ -n "${BX_MOUNT_TABLE:-}" ]; then cat "$BX_MOUNT_TABLE"; else findmnt -rno TARGET,FSTYPE,SOURCE,OPTIONS 2>/dev/null; fi
+}
 bx_backup_sources() {
-    echo /
-    local m
-    # ${...:-}: deploy.sh runs under set -u without bx_load_config.
-    for m in /home /boot /boot/efi /efi /boot/firmware ${BACKUP_EXTRA_SOURCES:-}; do
-        [ "$m" = / ] && continue
-        mountpoint -q "$m" 2>/dev/null && echo "$m"
-    done | sort -u
+    local t f src opts dev sub subvol seen=" " m bm="${BACKUP_MOUNT:-/mnt/backup}"
+    {
+        echo /
+        # ${...:-}: deploy.sh runs under set -u without bx_load_config.
+        while read -r t f src opts; do
+            [ -n "$t" ] && [ "$t" != / ] || continue
+            case "$f" in
+                ext2|ext3|ext4|xfs|btrfs|f2fs|zfs|bcachefs|jfs|nilfs2|reiserfs|vfat|exfat|ntfs|ntfs3) ;;
+                *) continue ;;   # tmpfs, overlay, squashfs, nfs/cifs/fuse, proc/sys — not this machine's disk
+            esac
+            case "$t" in
+                "$bm"|"$bm"/*|/run/*|/mnt|/mnt/*|/media|/media/*|/tmp|/tmp/*|/var/tmp|/var/tmp/*|/snap/*|/var/lib/snapd/snap/*|/proc/*|/sys/*|/dev/*) continue ;;
+                */.snapshots|*/.snapshots/*) continue ;;   # snapper's own subvolume, never a source
+            esac
+            # Bind mount of a directory: SOURCE carries the directory in
+            # brackets (/dev/x[/@/srv/data]) that is not the mounted subvolume
+            # (subvol=/@). Its files are already inside the parent source.
+            dev=${src%%\[*}; sub=""; case "$src" in *"["*) sub=${src#*\[}; sub=${sub%]} ;; esac
+            subvol=""; case ",$opts," in *,subvol=*) subvol=${opts#*subvol=}; subvol=${subvol%%,*} ;; esac
+            if [ -n "$sub" ] && [ "$f" != btrfs ]; then continue; fi                 # ext4 bind of a subdir
+            if [ "$f" = btrfs ] && [ -n "$sub" ] && [ -n "$subvol" ] && [ "$sub" != "$subvol" ]; then continue; fi
+            # Same filesystem (same device + same subvolume) mounted twice: once.
+            case "$seen" in *" ${dev}[${sub}] "*) continue ;; esac
+            seen="$seen${dev}[${sub}] "
+            printf '%s\n' "$t"
+        done < <(_bx_mount_table)
+        for m in ${BACKUP_EXTRA_SOURCES:-}; do
+            [ "$m" = / ] && continue
+            if [ -n "${BX_MOUNT_TABLE:-}" ]; then grep -qE "^$m " "$BX_MOUNT_TABLE" && printf '%s\n' "$m"
+            else mountpoint -q "$m" 2>/dev/null && printf '%s\n' "$m"; fi
+        done
+    } | awk '!seen[$0]++' | { read -r first; echo "$first"; sort -u; }
+}
+
+# The universal exclude list for a file-level backup (borg and Back In Time
+# read the same one, so the two layers agree on what "everything" is), one
+# anchored path pattern per line. Runtime and cache trees, trash, package and
+# language caches, snapper's snapshot dirs, the local snapshot staging dir,
+# flatpak's image store, and every ACTIVE SWAPFILE (8–16 GiB of churn that
+# also makes `btrfs subvolume snapshot` of the root refuse). Nothing personal:
+# per-host additions go in BACKUP_EXTRA_EXCLUDES.
+bx_excludes() {
+    printf '%s\n' '/dev/*' '/proc/*' '/sys/*' '/tmp/*' '/run/*' '/mnt/*' '/media/*' \
+        '/var/tmp/*' '/var/cache/*' '/var/log/journal/*' '/snap/*' '/var/lib/snapd/snap/*' \
+        '/home/*/.cache/*' '/home/*/.local/share/Trash/*' '/home/*/.npm/_cacache/*' \
+        '/home/*/.cargo/registry/*' '/root/.cache/*' '/root/.local/share/Trash/*' \
+        '/var/lib/flatpak/*' '/.snapshots/*' '/home/.snapshots/*' '/.backup-snapshots/*'
+    local f type _
+    { read -r _; while read -r f type _; do [ "$type" = file ] && printf '%s\n' "$f"; done; } < /proc/swaps 2>/dev/null
+    [ -n "${BACKUP_MOUNT:-}" ] && printf '%s\n' "${BACKUP_MOUNT}/*"
+    local e; for e in ${BACKUP_EXTRA_EXCLUDES:-}; do printf '%s\n' "$e"; done
+    return 0
 }
 
 # The boot-firmware partition for this host — the ESP on UEFI machines, the
@@ -301,6 +412,30 @@ bx_boot_listing_counts() { # bx_boot_listing_counts LISTING_FILE
         "$(grep -icE '^(boot|efi)/(.*/)?(limine\.conf|refind\.conf|extlinux\.conf|syslinux\.cfg)$' "$f")"
 }
 
+# Kernels in a listing that have no initramfs beside them, one path per line.
+# A plain kernel cannot mount a LUKS, LVM or btrfs-subvolume root without one;
+# dracut running out of memory on the last update leaves vmlinuz-X without
+# initramfs-X.img, and "the archive has a kernel" passed. Pairs by the
+# version suffix in every naming scheme this suite meets: Debian
+# vmlinuz-V + initrd.img-V, Fedora/Asahi vmlinuz-V + initramfs-V.img, Arch
+# vmlinuz-linux + initramfs-linux.img, openSUSE vmlinuz-V + initrd-V, Alpine
+# vmlinuz-lts + initramfs-lts, kernel-install <id>/<ver>/linux + initrd.
+bx_kernels_without_initrd() { # bx_kernels_without_initrd LISTING_FILE
+    local f="$1" k dir base v
+    grep -E '^(boot|efi)/(.*/)?(vmlinuz|vmlinux|Image|kernel)-[^/]+$|^(boot|efi)/[0-9a-f]{32}/[^/]+/linux$' "$f" 2>/dev/null \
+    | while IFS= read -r k; do
+        dir=${k%/*}; base=${k##*/}
+        if [ "$base" = linux ]; then
+            grep -qxF "$dir/initrd" "$f" || printf '%s\n' "$k"
+            continue
+        fi
+        v=${base#*-}
+        grep -qxF -e "$dir/initramfs-$v.img" -e "$dir/initrd.img-$v" -e "$dir/initrd-$v" -e "$dir/initramfs-$v" "$f" \
+            || printf '%s\n' "$k"
+    done
+    return 0
+}
+
 # Is /boot its own filesystem (vs a directory on root)?
 bx_boot_is_mount() { mountpoint -q /boot 2>/dev/null; }
 
@@ -322,9 +457,15 @@ bx_backup_drive_present() {
 # sysfs only, so it works unprivileged.
 bx_dev_is_live() { # bx_dev_is_live /dev/xxx
     local dev="$1" node kn s
+    case "$dev" in /*) ;; *) return 0 ;; esac   # nas:/export, //srv/share — not a block device, nothing to yank
     [ -e "$dev" ] || return 1
     node=$(readlink -f "$dev" 2>/dev/null || true); kn=$(basename "${node:-$dev}")
-    if [ -d "/sys/block/$kn/slaves" ]; then
+    # Every whole disk has a slaves/ directory too — EMPTY. Only a non-empty
+    # one marks a stacked device; treating the empty one as "dm device with
+    # no live slave" declared every filesystem or LUKS container that sits
+    # directly on a whole disk (cryptsetup luksFormat /dev/sdb, the common
+    # external-drive form) dead, and every backup script refused to run.
+    if [ -d "/sys/block/$kn/slaves" ] && [ -n "$(ls -A "/sys/block/$kn/slaves" 2>/dev/null)" ]; then
         for s in "/sys/block/$kn/slaves"/*; do
             [ -e "$s" ] || continue
             bx_dev_is_live "/dev/$(basename "$s")" && return 0
@@ -337,8 +478,10 @@ bx_dev_is_live() { # bx_dev_is_live /dev/xxx
 # Is MOUNT a mount whose backing block device still exists? A dead mount (drive
 # unplugged) still answers `mountpoint -q` yes; this does not.
 bx_mount_is_live() { # bx_mount_is_live MOUNT
-    local m="$1" src
+    local m="$1" src fst
     mountpoint -q "$m" 2>/dev/null || return 1
+    fst=$(findmnt -no FSTYPE --target "$m" 2>/dev/null || true)
+    case "$fst" in nfs|nfs4|cifs|smb3|fuse.sshfs|fuse.*|9p|virtiofs|ceph|glusterfs) return 0 ;; esac  # a NAS cannot be unplugged
     src=$(findmnt -no SOURCE --target "$m" 2>/dev/null | sed 's/\[.*//' || true)
     [ -n "$src" ] || return 1
     bx_dev_is_live "$src"

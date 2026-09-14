@@ -66,8 +66,29 @@ cl_find_carriers() {
     for f in "$root"/etc/default/grub.d/*.cfg; do
         [ -f "$f" ] && printf 'grubd\t%s\n' "$f"
     done
-    for f in "$root/boot/extlinux/extlinux.conf" "$root/extlinux/extlinux.conf"; do
+    for f in "$root/boot/extlinux/extlinux.conf" "$root/boot/extlinux.conf" "$root/extlinux/extlinux.conf"; do
         [ -f "$f" ] && { printf 'extlinux\t%s\n' "$f"; break; }
+    done
+    # Debian's initramfs-tools reads the resume device from here, not from the
+    # command line; a stale one costs a 30-90 s "gave up waiting for suspend/
+    # resume device" at every boot.
+    [ -f "$root/etc/initramfs-tools/conf.d/resume" ] && printf 'resumeconf\t%s\n' "$root/etc/initramfs-tools/conf.d/resume"
+    # RHEL 8 / CentOS 8: BLS entries say "options $kernelopts" and the real
+    # command line lives in grubenv (a fixed-size file; a UUID swap keeps its size).
+    for f in "$root/boot/grub2/grubenv" "$root/boot/efi/EFI"/*/grubenv; do
+        [ -f "$f" ] && grep -qs '^kernelopts=' "$f" && printf 'grubenv\t%s\n' "$f"
+    done
+    # The GRUB stub on the ESP (Fedora, RHEL, Ubuntu): the signed grubx64.efi
+    # reads EFI/<distro>/grub.cfg first, and that stub finds the real /boot by
+    # `search --fs-uuid <uuid-of-/boot>` (Fedora) or `search.fs_uuid <uuid>`
+    # (Ubuntu). grub2-mkconfig never regenerates it. Restored verbatim onto a
+    # new disk it names the OLD /boot and GRUB lands at a prompt — with every
+    # other file correct. Only small files: a full grub.cfg there is Debian's
+    # real config with GRUB on the ESP, which grub-mkconfig does regenerate.
+    for f in "$root"/boot/efi/EFI/*/grub.cfg "$root"/efi/EFI/*/grub.cfg "$root"/boot/EFI/*/grub.cfg; do
+        [ -f "$f" ] || continue
+        case "$f" in */EFI/BOOT/*|*/EFI/Boot/*) continue ;; esac
+        [ "$(wc -l < "$f")" -le 40 ] && grep -qsE 'search(\.fs_uuid| .*--fs-uuid)' "$f" && printf 'grubstub\t%s\n' "$f"
     done
     for f in "$root/boot/syslinux/syslinux.cfg" "$root/boot/syslinux.cfg"; do
         [ -f "$f" ] && { printf 'syslinux\t%s\n' "$f"; break; }
@@ -75,11 +96,15 @@ cl_find_carriers() {
     for f in "$root/boot/firmware/cmdline.txt" "$root/boot/cmdline.txt"; do
         [ -f "$f" ] && { printf 'cmdlinetxt\t%s\n' "$f"; break; }
     done
-    # rEFInd reads refind_linux.conf from the directory the kernel is in.
+    # rEFInd reads refind_linux.conf from the directory the kernel is in; a
+    # hand-written refind.conf stanza carries `options "root=UUID=..."` too.
     for f in "$root/boot/refind_linux.conf" \
              "$root"/boot/efi/EFI/*/refind_linux.conf \
              "$root"/efi/EFI/*/refind_linux.conf \
-             "$root"/boot/EFI/*/refind_linux.conf; do
+             "$root"/boot/EFI/*/refind_linux.conf \
+             "$root"/boot/efi/EFI/refind/refind.conf \
+             "$root"/efi/EFI/refind/refind.conf \
+             "$root"/boot/EFI/refind/refind.conf; do
         [ -f "$f" ] && printf 'refind\t%s\n' "$f"
     done
     # Limine looks beside its EFI app, then /boot/limine/, /boot/, /limine/, /.
@@ -99,8 +124,17 @@ cl_find_carriers() {
 
 # The id reference forms this library understands, as one ERE prefix group.
 # Group 1 is the prefix; the id follows. Case-insensitive at the call sites.
-CL_REF_PREFIX='(UUID=|(rd\.)?luks\.uuid=(luks-)?|(rd\.)?luks\.name=|--fs-uuid[= ]+)'
+# /dev/disk/by-uuid/ and by-partuuid/ paths are references too: root= and
+# cryptdevice= in that form were neither reported nor rewritten, so a restore
+# stopped in the initramfs with verify having said the carriers agree.
+# `search --fs-uuid --set=dev <id>` (Fedora's ESP stub) and `search.fs_uuid
+# <id> root` (Ubuntu's) are the two GRUB stub forms.
+CL_REF_PREFIX='(UUID=|(rd\.)?luks\.uuid=(luks-)?|(rd\.)?luks\.name=|--fs-uuid([ ]+--set(=[A-Za-z_]+)?)?[= ]+|search\.fs_uuid[ ]+|/dev/disk/by-uuid/|/dev/disk/by-partuuid/)'
 CL_ID='[0-9a-fA-F]{4,}(-[0-9a-fA-F]{2,}){0,4}'
+# In cl_rewrite_ids the character after the id is captured by the group that
+# follows the prefix; its number is one more than the prefix's own groups
+# (counted here, so adding a form above cannot silently shift it).
+CL_TAIL_GROUP=$(( $(printf '%s' "$CL_REF_PREFIX" | tr -cd '(' | wc -c) + 2 ))
 
 # ---------------------------------------------------------------------------
 # cl_ids_in_file FILE — "kind<TAB>id" for every id referenced in the file:
@@ -110,11 +144,18 @@ CL_ID='[0-9a-fA-F]{4,}(-[0-9a-fA-F]{2,}){0,4}'
 cl_ids_in_file() {
     local f="$1" m
     [ -r "$f" ] || return 0
+    # rd.md.uuid= carries an mdadm array id (8b1c3e8f:1234…), not a
+    # filesystem one; its first field looked like a short UUID and was
+    # reported as stale on every mdadm host.
     grep -vE '^[[:space:]]*#' "$f" 2>/dev/null \
+    | sed -E 's/rd\.md\.uuid=[^ \t"]*//g' \
     | grep -oiE "(PART)?${CL_REF_PREFIX}${CL_ID}" 2>/dev/null \
     | while IFS= read -r m; do
         local low; low=$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')
         case "$low" in
+            /dev/disk/by-partuuid/*)  printf 'partuuid\t%s\n' "${low#/dev/disk/by-partuuid/}" ;;
+            /dev/disk/by-uuid/*)      printf 'uuid\t%s\n' "${low#/dev/disk/by-uuid/}" ;;
+            search.fs_uuid*)          printf 'uuid\t%s\n' "${low##search.fs_uuid }" ;;
             partuuid=*)               printf 'partuuid\t%s\n' "${low#partuuid=}" ;;
             rd.luks.uuid=luks-*)      printf 'luks\t%s\n' "${low#rd.luks.uuid=luks-}" ;;
             rd.luks.uuid=*)           printf 'luks\t%s\n' "${low#rd.luks.uuid=}" ;;
@@ -123,8 +164,30 @@ cl_ids_in_file() {
             rd.luks.name=*)           printf 'luks\t%s\n' "${low#rd.luks.name=}" ;;
             luks.name=*)              printf 'luks\t%s\n' "${low#luks.name=}" ;;
             uuid=*)                   printf 'uuid\t%s\n' "${low#uuid=}" ;;
-            --fs-uuid*)               printf 'uuid\t%s\n' "${low##--fs-uuid[= ]}" ;;
+            --fs-uuid*)               printf 'uuid\t%s\n' "${low##*[= ]}" ;;
         esac
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# cl_luks_name_pairs FILE — "id<TAB>name" for every command-line form that
+# binds a LUKS container id to the mapper NAME the initramfs will create:
+# cryptdevice=UUID=<id>:<name> (Arch encrypt hook), rd.luks.name=<id>=<name>
+# and luks.name=<id>=<name> (systemd/dracut). Those hosts declare the root
+# container on the command line, not in crypttab, so a restore that maps old
+# ids to new ones through crypttab alone never learns the new id for them —
+# the mapper name is the bridge to the container the user opened.
+# ---------------------------------------------------------------------------
+cl_luks_name_pairs() {
+    local f="$1" m
+    [ -r "$f" ] || return 0
+    grep -vE '^[[:space:]]*#' "$f" 2>/dev/null \
+    | grep -oiE "(cryptdevice=UUID=|cryptdevice=/dev/disk/by-uuid/|(rd\.)?luks\.name=)${CL_ID}[:=][A-Za-z0-9_.-]+" 2>/dev/null \
+    | while IFS= read -r m; do
+        m=$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')
+        m=${m#cryptdevice=uuid=}; m=${m#cryptdevice=/dev/disk/by-uuid/}; m=${m#rd.luks.name=}; m=${m#luks.name=}
+        printf '%s\t%s\n' "${m%%[:=]*}" "${m#*[:=]}"
     done
     return 0
 }
@@ -148,13 +211,15 @@ cl_rewrite_ids() { # cl_rewrite_ids ROOT MAPFILE
         case "$old" in \#*) continue ;; esac
         [ "$old" != "$new" ] || continue
         # ERE, GNU sed, case-insensitive: prefix kept (\1), id replaced.
-        expr="${expr}/^[[:space:]]*#/!s/(${CL_REF_PREFIX})${old}($|[^0-9a-fA-F-])/\\1${new}\\6/gI;"
+        # '~' delimits: the prefix group carries '/' (/dev/disk/by-uuid/).
+        expr="${expr}/^[[:space:]]*#/!s~(${CL_REF_PREFIX})${old}($|[^0-9a-fA-F-])~\\1${new}\\${CL_TAIL_GROUP}~gI;"
     done < "$map"
     [ -n "$expr" ] || return 0
     while IFS=$'\t' read -r kind path; do
         [ -f "$path" ] || continue
         tmp="$(mktemp "$(dirname "$path")/.lbs-cl.XXXXXX")" || return 1
-        sed -E "$expr" "$path" > "$tmp"
+        # A sed that fails must never leave an emptied carrier behind.
+        if ! sed -E "$expr" "$path" > "$tmp"; then rm -f "$tmp"; echo "cl_rewrite_ids: sed failed on $path" >&2; return 1; fi
         if cmp -s "$path" "$tmp"; then rm -f "$tmp"; continue; fi
         if [ "${CL_DRY:-0}" = 1 ]; then
             printf '%s\t%s\n' "$kind" "$path"; rm -f "$tmp"; continue
@@ -171,9 +236,13 @@ cl_rewrite_ids() { # cl_rewrite_ids ROOT MAPFILE
 # in crypttab's device column. The set a carrier must agree with.
 # ---------------------------------------------------------------------------
 cl_expected_ids() {
-    local root="${1%/}"
-    { [ -r "$root/etc/fstab" ] && awk '$1 !~ /^#/ && $1 ~ /^(PART)?UUID=/ {sub(/^(PART)?UUID=/, "", $1); print $1}' "$root/etc/fstab"
-      [ -r "$root/etc/crypttab" ] && awk '$1 !~ /^#/ && $2 ~ /^UUID=/ {sub(/^UUID=/, "", $2); print $2}' "$root/etc/crypttab"
+    local root="${1%/}" f
+    # Quoted values, /dev/disk/by-(part)uuid/ paths (openSUSE's YaST writes
+    # crypttab that way) and Arch's crypttab.initramfs all count.
+    { [ -r "$root/etc/fstab" ] && awk '$1 !~ /^#/ {d=$1; gsub(/"/, "", d); sub(/^\/dev\/disk\/by-(part)?uuid\//, "", d); sub(/^(PART)?UUID=/, "", d); if (d ~ /^[0-9a-fA-F]{4,}(-[0-9a-fA-F]{2,}){0,4}$/) print d}' "$root/etc/fstab"
+      for f in "$root/etc/crypttab" "$root/etc/crypttab.initramfs"; do
+          [ -r "$f" ] && awk '$1 !~ /^#/ && NF >= 2 {d=$2; gsub(/"/, "", d); sub(/^\/dev\/disk\/by-(part)?uuid\//, "", d); sub(/^(PART)?UUID=/, "", d); if (d ~ /^[0-9a-fA-F]{4,}(-[0-9a-fA-F]{2,}){0,4}$/) print d}' "$f"
+      done
     } 2>/dev/null | tr '[:upper:]' '[:lower:]' | sort -u
     return 0
 }

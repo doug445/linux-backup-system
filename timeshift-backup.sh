@@ -72,6 +72,15 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')]${DRY:+ [DRY]} $*" | tee -a "$LOG"; 
 
 log "========== TIMESHIFT BACKUP SESSION START$([ "$PRUNE_ONLY" = 1 ] && echo ' (PRUNE ONLY)')${DRY:+ (DRY RUN — no changes)} =========="
 
+# One lock for every layer (backup-common.sh): a borg or Back In Time run at
+# the same time would prune against the space this snapshot is taking.
+if (( ! DRY )); then
+    if ! bx_lock 2>>"$LOG"; then
+        log "Another backup layer is still running (lock ${BX_LOCK_FILE:-/var/lock/backup-system.lock} held); exiting."
+        exit 0
+    fi
+fi
+
 # This layer is for non-btrfs roots only.
 if bx_is_btrfs; then
     log "Root filesystem is btrfs — Timeshift layer not used here (borg-backup.sh does btrfs replicas). Nothing to do."
@@ -86,7 +95,7 @@ if [ "${PIPESTATUS[0]}" -ne 0 ] && (( ! DRY )); then
     exit 4
 fi
 
-log "suite=${BX_VERSION:-?} host=$(hostname) root_fs=$(bx_root_fstype) config=$BX_CONFIG mount=$BACKUP_MOUNT schedule=$SCHEDULE_MODE"
+log "suite=${BX_VERSION:-?} host=${BACKUP_HOST_ID} root_fs=$(bx_root_fstype) config=$BX_CONFIG mount=$BACKUP_MOUNT schedule=$SCHEDULE_MODE"
 log "retention KEEP=$KEEP MIN_KEEP=$MIN_KEEP MIN_FREE_PCT=$MIN_FREE_PCT MIN_FREE_GIB=$MIN_FREE_GIB"
 
 # Backup drive mounted, and the RIGHT drive (fs-UUID guard from config).
@@ -118,7 +127,9 @@ ts_list()     { ls -1d "$TS_DIR"/*/ 2>/dev/null | sed 's#/$##' | sort; }
 # Timeshift writes info.json last; a dir without it is in progress or aborted.
 ts_complete() { [ -f "$1/info.json" ]; }
 # Only complete snapshots count towards KEEP / MIN_KEEP.
-ts_kept()     { local d; for d in $(ts_list); do ts_complete "$d" && echo "$d"; done; }
+# while-read, not for-in: a snapshot path with a space (/run/media/u/My Passport)
+# split into fragments that were never directories, and nothing was pruned.
+ts_kept()     { local d; while IFS= read -r d; do [ -n "$d" ] && ts_complete "$d" && echo "$d"; done < <(ts_list); return 0; }
 ts_running()  { pgrep -x timeshift >/dev/null 2>&1; }
 
 # ts_delete <name>: ask Timeshift (so its index/symlinks stay coherent), then
@@ -141,7 +152,7 @@ ts_delete() {
 if [ "$PRUNE_ONLY" = 1 ]; then
     log "prune-only: not creating a snapshot"
 else
-    COMMENT="$(hostname) $(date '+%Y-%m-%d %H:%M:%S') (linux-backup-system)"
+    COMMENT="${BACKUP_HOST_ID} $(date '+%Y-%m-%d %H:%M:%S') (linux-backup-system)"
     # No --tags: Timeshift files it as "ondemand", which its own scheduler never
     # touches — retention is ours alone (deploy.sh disables Timeshift's schedule).
     TS_ARGS=(--create --scripted --comments "$COMMENT" "${TS_DEV[@]}")
@@ -178,7 +189,8 @@ else
     if ts_running; then
         log "another timeshift instance is running — leaving incomplete snapshots alone"
     else
-        for d in $(ts_list); do
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
             ts_complete "$d" && continue
             name=$(basename "$d")
             if (( DRY )); then
@@ -187,7 +199,7 @@ else
                 log "Removing incomplete snapshot (no info.json): $name"
                 ts_delete "$name" || log "  WARNING: could not remove $name"
             fi
-        done
+        done < <(ts_list)
     fi
 
     total=$(ts_kept | wc -l)
@@ -197,11 +209,12 @@ else
             log "would prune $(( total - KEEP )) oldest snapshot(s) beyond newest $KEEP (of $total): $(ts_kept | head -n -"$KEEP" | xargs -rn1 basename | tr '\n' ' ')"
         else
             log "Pruning old snapshots ($total total, keeping newest $KEEP)..."
-            for old in $(ts_kept | head -n -"$KEEP"); do
+            while IFS= read -r old; do
+                [ -n "$old" ] || continue
                 name=$(basename "$old")
                 log "  Removing: $name"
                 ts_delete "$name" || log "  WARNING: could not remove $name"
-            done
+            done < <(ts_kept | head -n -"$KEEP")
         fi
     else
         log "count prune: $total snapshot(s) <= KEEP=$KEEP, nothing to remove"

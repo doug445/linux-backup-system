@@ -1,12 +1,13 @@
 [Unit]
 Description=Back up LUKS headers for every encrypted device
 Documentation=file:/usr/local/sbin/luks-header-backup.sh
-RequiresMountsFor=/mnt/backup
+# No RequiresMountsFor=: the header backup must run with the drive ABSENT too
+# (the local /root/luks-headers copy); the script handles the missing drive.
 
 [Service]
 Type=oneshot
 # install.sh rewrites this for the host's layout.
-Environment=BACKUP_MOUNT=/mnt/backup
+# No Environment=: the script reads /etc/backup-system.conf.
 ExecStart=/usr/local/sbin/luks-header-backup.sh
 Nice=19
 IOSchedulingClass=idle

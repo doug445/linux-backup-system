@@ -12,5 +12,6 @@ IOSchedulingPriority=7
 CPUSchedulingPolicy=idle
 
 # Prevent backup from hogging resources
-MemoryMax=2G
-CPUQuota=50%
+# MemoryHigh throttles; MemoryMax KILLED borg on a box with millions of files
+# (its files cache alone is ~250 B per file), leaving a checkpoint and a lock.
+MemoryHigh=2G

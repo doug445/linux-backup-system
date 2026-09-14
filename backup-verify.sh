@@ -150,9 +150,12 @@ luks_dev_of_mapper() {
 }
 
 # Backing LUKS device of /boot, if /boot is encrypted. Empty otherwise.
+# --target: a /boot that is a plain directory on an encrypted root (Calamares
+# full-disk encryption, Arch encrypt-hook installs) is encrypted too; a bare
+# `findmnt /boot` returns nothing there and every check below was skipped.
 boot_luks_dev() {
     local src
-    src=$(findmnt -no SOURCE /boot 2>/dev/null) || return 0
+    src=$(findmnt -no SOURCE --target /boot 2>/dev/null) || return 0
     src=${src%%\[*}          # btrfs: "/dev/mapper/x[/subvol]"
     [[ "$src" == /dev/mapper/* ]] || return 0
     luks_dev_of_mapper "${src#/dev/mapper/}"
@@ -186,7 +189,7 @@ keyfile_candidates() {
     done
 }
 
-printf '%shost:%s %s   %sarch:%s %s' "$B" "$N" "$(hostname)" "$B" "$N" "$(uname -m)"
+printf '%shost:%s %s   %sarch:%s %s' "$B" "$N" "$(hostname 2>/dev/null || uname -n)" "$B" "$N" "$(uname -m)"
 is_asahi && printf '   (Asahi / Apple Silicon)'
 printf '\n'
 
@@ -260,19 +263,43 @@ else
 fi
 
 hdr "2. LUKS header backups current and stored off-device"
+# Which devices: the ones this machine actually opens — the backing device of
+# every active dm-crypt mapping — plus the backup volume. Not every
+# crypto_LUKS signature in lsblk: a LUKS USB stick plugged in at verify time is
+# not this machine's disk and must not FAIL the restore check. A mapping whose
+# backing device carries no LUKS signature (detached header) is reported, not
+# silently skipped.
+luks_devs_to_check() {
+    local m d u
+    { lsblk -rno PATH,TYPE 2>/dev/null | awk '$2=="crypt"{print $1}' \
+        | while read -r m; do luks_dev_of_mapper "${m#/dev/mapper/}"; done
+      [[ -n "$backup_dev" ]] && printf '%s\n' "$backup_dev"
+    } | grep -E '^/' | sort -u | while read -r d; do
+        if u=$(cryptsetup luksUUID "$d" 2>/dev/null) && [[ -n "$u" ]]; then printf '%s %s\n' "$d" "$u"
+        else printf '%s -\n' "$d"; fi
+    done
+}
 # Match on the keyslot set encoded in the filename. Sorting filenames and taking
 # the last is wrong: "slots-0-1" sorts before "slots-1", so a lexical sort
 # happily picks a stale header over the current one.
+luks_seen=0
 while read -r dev uuid; do
     [[ -n "$dev" ]] || continue
+    luks_seen=1
+    if [[ "$uuid" == - ]]; then
+        note "$(basename "$dev"): open dm-crypt mapping whose device carries no LUKS header (detached header?) — back that header file up by hand; not checked"
+        continue
+    fi
     live=$(slots_of "$dev" | paste -sd- -)
     short=${uuid:0:8}
     if [[ -z "$live" ]]; then
         bad "$(basename "$dev") (uuid $short): could not read its keyslots"
         continue
     fi
+    checked=0
     for d in "${HEADER_DIRS[@]}"; do
         [[ -d "$d" ]] || continue
+        checked=1
         cur=$(find "$d" -maxdepth 1 -name "*_${short}_slots-${live}_*.header" 2>/dev/null | head -1)
         any=$(find "$d" -maxdepth 1 -name "*_${short}_slots-*.header" 2>/dev/null | wc -l)
         if [[ -n "$cur" ]]; then
@@ -286,7 +313,12 @@ while read -r dev uuid; do
             bad "$(basename "$dev") (uuid $short): NO header backup in $d"
         fi
     done
-done < <(lsblk -rno PATH,FSTYPE,UUID | awk '$2=="crypto_LUKS"{print $1, $3}')
+    # No header directory at all (timer never ran, suite just deployed) used to
+    # print nothing here — and an encrypted root with no header backup anywhere
+    # came out "Restore-ready".
+    (( checked )) || bad "$(basename "$dev") (uuid $short): no header backup directory exists (${HEADER_DIRS[*]}) — run luks-header-backup.sh"
+done < <(luks_devs_to_check)
+(( luks_seen )) || echo "  no LUKS devices in use on this machine — nothing to check"
 
 hdr "3. Borg archive exists, is fresh, and is bootable-complete"
 BORG_REPO=$(find_borg_repo)
@@ -297,7 +329,7 @@ if [[ -d "$BORG_REPO" ]]; then
     arch=$(borg list --lock-wait 30 --last 1 --format '{archive}{NL}' "$BORG_REPO" 2>"$berr")
     rc=$?
     if (( rc != 0 )); then
-        if grep -qi 'lock' "$berr"; then
+        if grep -qiE 'acquire the lock|lock.*timeout|LockTimeout' "$berr"; then
             note "repo is locked (backup running?); archive checks skipped this run"
         else
             bad "borg cannot read $BORG_REPO (rc=$rc): $(tail -1 "$berr")"
@@ -325,11 +357,19 @@ if [[ -d "$BORG_REPO" ]]; then
         # Walking it per-path costs minutes on a large repo.
         listing=$(mktemp /tmp/backup-verify.XXXXXX)
         if borg list --lock-wait 30 --format '{path}{NL}' "$BORG_REPO::$arch" 2>/dev/null > "$listing"; then
-            mapfile -t need < <(printf 'etc/fstab\netc/crypttab\n'; boot_paths)
+            # crypttab only where this host has one: an unencrypted Debian or
+            # Fedora has none, and demanding it failed every such host.
+            mapfile -t need < <(printf 'etc/fstab\n'; [[ -e /etc/crypttab ]] && printf 'etc/crypttab\n'; boot_paths)
             for p in "${need[@]}"; do
-                n=$(grep -cE "^${p}(/|$)" "$listing")
+                case "$p" in
+                    etc/*) n=$(grep -cxF "$p" "$listing") ;;
+                    # a directory needs something IN it: an ESP that was declared
+                    # but not mounted at backup time is exactly the empty "boot/efi"
+                    # entry the old "(/|$)" match accepted
+                    *)     n=$(grep -cE "^${p}/." "$listing") ;;
+                esac
                 if (( n > 0 )); then ok "archive contains /$p ($n entries)"
-                else bad "archive is MISSING /$p — restore would not boot"; fi
+                else bad "archive is MISSING /$p (or it is empty) — restore would not boot"; fi
             done
 
             # A non-empty /boot is not the same as a bootable one. Assert an
@@ -345,6 +385,23 @@ if [[ -d "$BORG_REPO" ]]; then
                 ok "archive has a kernel ($uki UKI, $kern vmlinuz/Image/kernel*.img)"
             else
                 bad "archive contains NO kernel image — restore would not boot"
+            fi
+            # A plain kernel needs its initramfs next to it (a UKI embeds one, the
+            # Pi firmware boots without one). dracut running out of memory on the
+            # last update leaves vmlinuz without initramfs — "has a kernel" passed.
+            if (( kern > 0 && uki == 0 && pifw < 2 )) && declare -f bx_kernels_without_initrd >/dev/null; then
+                initrd=$(grep -cE '^(boot|efi)/(.*/)?(initramfs-[^/]+|initrd\.img-[^/]+|initrd-[^/]+|initrd)$' "$listing")
+                live_initrd=$(find /boot /efi /boot/efi -maxdepth 4 \( -name 'initramfs-*' -o -name 'initrd.img-*' -o -name 'initrd-*' -o -name initrd \) 2>/dev/null | wc -l)
+                unpaired=$(bx_kernels_without_initrd "$listing" | tr '\n' ' ')
+                if (( initrd == 0 && live_initrd > 0 )); then
+                    bad "archive has $kern kernel(s) but NO initramfs — the root filesystem (LUKS/LVM/btrfs subvolume) cannot be mounted without one"
+                elif (( initrd == 0 )); then
+                    note "no initramfs in the archive and none on this host (built-in root driver?) — not checked"
+                elif [[ -n "$unpaired" ]]; then
+                    note "kernel(s) without a matching initramfs: ${unpaired% }"
+                else
+                    ok "every kernel has its initramfs ($initrd)"
+                fi
             fi
             if (( gcfg > 0 || sdb > 0 || uki > 0 || pifw >= 2 || ${oth:-0} > 0 )); then
                 ok "archive has a bootloader config ($gcfg grub.cfg, $sdb sd-boot, $uki UKI, $pifw Pi firmware files, ${oth:-0} Limine/rEFInd/syslinux)"
@@ -367,8 +424,10 @@ if [[ -d "$BORG_REPO" ]]; then
                       etc/default/grub etc/default/grub.d etc/default/limine \
                       boot/loader/entries efi/loader/entries boot/efi/loader/entries \
                       boot/extlinux boot/syslinux boot/firmware/cmdline.txt boot/cmdline.txt \
-                      boot/refind_linux.conf boot/efi/EFI boot/limine.conf boot/limine efi/EFI \
-                      --pattern='-boot/efi/EFI/**/*.efi' --pattern='-efi/EFI/**/*.efi' >/dev/null 2>&1 ) || true
+                      boot/refind_linux.conf boot/efi/EFI boot/limine.conf boot/limine efi/EFI boot/EFI \
+                      etc/initramfs-tools/conf.d/resume etc/crypttab.initramfs boot/grub2/grubenv boot/extlinux.conf \
+                      --pattern='-boot/efi/EFI/**/*.efi' --pattern='-efi/EFI/**/*.efi' \
+                      --pattern='-boot/efi/EFI/**/*.EFI' --pattern='-efi/EFI/**/*.EFI' >/dev/null 2>&1 ) || true
                 nc=$(cl_find_carriers "$xdir" | wc -l)
                 if (( nc == 0 )); then
                     note "archive holds no recognisable kernel command-line carrier (UKI-only, or a form this suite does not know)"
@@ -379,7 +438,13 @@ if [[ -d "$BORG_REPO" ]]; then
                     else
                         rootbad=0
                         while IFS=$'\t' read -r ck cf rk id; do
-                            if grep -qiE "(root=(PART)?UUID=|luks\.uuid=(luks-)?|luks\.name=)$id" "$cf" 2>/dev/null; then rootbad=1
+                            # cryptdevice=UUID=<id>:<name> and rd.luks.name=<id>=<name> declare
+                            # the container on the command line itself (Arch encrypt hook,
+                            # dracut); the restore maps them through the mapper name, so a
+                            # crypttab that does not list them is the normal state, not a fault.
+                            if grep -qiE "(cryptdevice=UUID=|cryptdevice=/dev/disk/by-uuid/|luks\.name=)${id}[:=]" "$cf" 2>/dev/null; then
+                                echo "  INFO  $ck ${cf#"$xdir"}: LUKS $id is declared by the command line (cryptdevice=/rd.luks.name=), not crypttab — the restore maps it by mapper name"
+                            elif grep -qiE "(root=(PART)?UUID=|root=/dev/disk/by-(part)?uuid/|luks\.uuid=(luks-)?|cryptdevice=)$id" "$cf" 2>/dev/null; then rootbad=1
                                 bad "$ck ${cf#"$xdir"}: root/LUKS reference $rk $id is not in the archived fstab/crypttab — restore would stop in the initramfs"
                             else
                                 note "$ck ${cf#"$xdir"}: references $rk $id, not declared by fstab/crypttab (resume=/other — check)"
@@ -508,38 +573,49 @@ fi
 if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
     hdr "6. Boot chain notes for this layout (informational)"
     if [[ -n "$boot_dev" ]]; then
-        boot_kdf=$(cryptsetup luksDump "$boot_dev" 2>/dev/null | awk '/PBKDF:/ {print $2; exit}')
+        # Every keyslot's KDF, not slot 0's: the documented way to keep an
+        # argon2id /boot openable by stock GRUB is a second, pbkdf2 slot, and
+        # taking slot 0 alone called that host unbootable. LUKS1 has no PBKDF
+        # line and is always pbkdf2.
         boot_ver=$(cryptsetup luksDump "$boot_dev" 2>/dev/null | awk '/^Version:/ {print $2; exit}')
+        boot_kdf=$(cryptsetup luksDump "$boot_dev" 2>/dev/null | awk '/PBKDF:/ {print $2}' | sort -u | paste -sd, -)
+        [[ "$boot_ver" == 1 ]] && boot_kdf=pbkdf2
         say_kdf="LUKS${boot_ver:-?}/${boot_kdf:-unknown}"
-        if uses_grub && [[ "$boot_kdf" == argon2* ]]; then
-            gv="$(grub_version)"
-            if [[ -z "$gv" ]]; then
-                note "/boot is encrypted ($boot_dev, $say_kdf), GRUB in use, version unknown."
-                echo "        argon2 needs GRUB >= $GRUB_ARGON2_MIN. Keep that in mind when"
-                echo "        restoring onto a distro whose stock GRUB is older."
-            elif ver_ge "$gv" "$GRUB_ARGON2_MIN"; then
-                ok "/boot encrypted ($say_kdf), GRUB $gv derives argon2 — supported"
-                echo "        Restore onto GRUB >= $GRUB_ARGON2_MIN. A distro's stock GRUB may be"
-                echo "        older than the one built here; check before rebuilding /boot."
-            else
-                bad "/boot is argon2-encrypted but GRUB $gv predates argon2 support (>= $GRUB_ARGON2_MIN)."
-                echo "        This host should not be able to unlock /boot at boot. Either"
-                echo "        GRUB was replaced out of band, or a restore onto this GRUB"
-                echo "        version would leave /boot unreachable."
-            fi
-        elif uses_grub && [[ "$boot_kdf" == pbkdf2 ]]; then
+        gv="$(grub_version)"
+        # argon2 capable: 2.12+, or a distro backport that ships the module
+        # (openSUSE's 2.06 does).
+        grub_argon2_ok=0
+        if [[ -n "$gv" ]] && ver_ge "$gv" "$GRUB_ARGON2_MIN"; then grub_argon2_ok=1
+        elif compgen -G "/usr/lib/grub/*/argon2.mod" >/dev/null 2>&1 || compgen -G "/boot/grub*/*/argon2.mod" >/dev/null 2>&1; then grub_argon2_ok=1; fi
+        if uses_grub && [[ "$boot_kdf" == *pbkdf2* ]]; then
             # The form stock GRUB opens: LUKS1 needs GRUB >= 2.02 (cryptodisk),
             # LUKS2 with pbkdf2 needs GRUB >= 2.06. UNTESTED ON METAL — see the
             # README status table.
-            gv="$(grub_version)"
             if [[ "$boot_ver" == 1 ]]; then
                 note "/boot is encrypted ($boot_dev, $say_kdf), GRUB ${gv:-?}: LUKS1/pbkdf2 opens on any GRUB with cryptodisk (>= 2.02) — untested on metal"
             elif [[ -n "$gv" ]] && ! ver_ge "$gv" "2.06"; then
                 bad "/boot is LUKS2/pbkdf2 but GRUB $gv predates LUKS2 support (>= 2.06) — this GRUB cannot open /boot after a restore"
             else
-                note "/boot is encrypted ($boot_dev, $say_kdf), GRUB ${gv:-?}: LUKS2/pbkdf2 opens on GRUB >= 2.06 — untested on metal"
+                note "/boot is encrypted ($boot_dev, $say_kdf), GRUB ${gv:-?}: a pbkdf2 slot opens on GRUB >= 2.06 — untested on metal"
             fi
+            [[ "$boot_kdf" == *argon2* ]] && echo "        (the argon2 slot(s) need GRUB >= $GRUB_ARGON2_MIN; the pbkdf2 slot is what a stock GRUB uses)"
             echo "        A restore must keep GRUB_ENABLE_CRYPTODISK=y (the boot rebuild sets it)."
+        elif uses_grub && [[ "$boot_kdf" == *argon2* ]]; then
+            if [[ -z "$gv" ]] && (( ! grub_argon2_ok )); then
+                note "/boot is encrypted ($boot_dev, $say_kdf), GRUB in use, version unknown."
+                echo "        argon2 needs GRUB >= $GRUB_ARGON2_MIN. Keep that in mind when"
+                echo "        restoring onto a distro whose stock GRUB is older."
+            elif (( grub_argon2_ok )); then
+                ok "/boot encrypted ($say_kdf), GRUB ${gv:-?} derives argon2 — supported"
+                echo "        Restore onto GRUB >= $GRUB_ARGON2_MIN (or one shipping argon2.mod). A distro's"
+                echo "        stock GRUB may be older than the one built here; check before rebuilding /boot."
+            else
+                bad "/boot is argon2-encrypted (no pbkdf2 slot) but GRUB $gv predates argon2 support (>= $GRUB_ARGON2_MIN, no argon2.mod found)."
+                echo "        This host should not be able to unlock /boot at boot. Either"
+                echo "        GRUB was replaced out of band, or a restore onto this GRUB"
+                echo "        version would leave /boot unreachable. A pbkdf2 keyslot"
+                echo "        (cryptsetup luksAddKey --pbkdf pbkdf2) makes it openable by any GRUB."
+            fi
         elif uses_grub; then
             note "/boot is encrypted ($boot_dev, $say_kdf), GRUB in use."
             echo "        KDF ${boot_kdf:-unknown} is neither argon2 nor pbkdf2 — check GRUB can open it."

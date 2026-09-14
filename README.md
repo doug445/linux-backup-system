@@ -148,6 +148,7 @@ before trusting it.
 | Linux Mint 22.3 (x86_64) | 2014 MacBook Pro, i7-4870HQ, 16GB RAM, NVMe 2TB, AX210 Wi-Fi | ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI | backups + `backup-verify` 2026-09-11; Timeshift retention (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot cleanup) 2026-09-12, on a loop-device drive and then a real count prune on the production drive |
 | Fedora 44 (x86_64) | 2019 System76 laptop (Clevo-based, 32 GB RAM, two NVMe) | btrfs root, systemd-boot, UKI, Secure Boot | backups + `backup-verify` |
 | EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, SATA SSD) | ext4 root on LUKS2, plain vfat `/boot` (XBOOTLDR) + ESP at `/efi`, systemd-boot Type #1 entries, dracut; USB NVMe backup drive | deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL; the two warnings are the deliberately unencrypted test drive and a 477 GiB drive under the 2x recommendation) — 2026-09-14, 3.7.0 |
+| Manjaro (x86_64) | 2019 ASUS ZenBook UX534FTC (i7-10510U, 16 GB RAM, 2 TB NVMe) | btrfs root (`@`/`@home`, snapper) on LUKS2 opened by sd-encrypt, XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs from mkinitcpio, Secure Boot with sbctl keys; 2 TB USB SATA SSD backup drive (LUKS2, adopted from an earlier borgmatic set-up) | deploy over the retired borgmatic install, unlock-on-connect via the attach unit, borg + Back In Time dry runs, LUKS headers, root replica — 2026-09-14, 3.9.0; **⚠️ the full borg + Back In Time + `backup-verify` pass is pending**: the USB controller dropped mid-send (both ports dead until a power cycle), which is also what turned the detach unit and the dead-mount handling into a real test |
 
 **Distros**
 
@@ -230,9 +231,29 @@ layer (borg archives, btrfs/Timeshift replicas, BIT snapshots):
 | `MIN_FREE_GIB` | 0 | and at least this many GiB free (0 = ignore) |
 | `CAPACITY_HEADROOM_PCT` | 20 | the drive must hold the sources' used bytes plus this much, or it is **refused** |
 | `CAPACITY_RECOMMEND_X` | 2 | the drive should be this many times the Linux filesystems it backs up; below it, a warning |
+| `CAPACITY_CHECK` | refuse | `refuse` / `warn` / `off` — the floor is measured on the whole filesystem of each source, so a btrfs system disk that also holds 1.5 TiB of VM images beside a 100 GiB system needs `warn` to use a 1 TiB drive |
+| `BACKUP_HOST_ID` | the hostname at deploy | what this host's backups are filed under (borg archive prefix, Back In Time chain, replica names); pinned so a hostname change never orphans the chain |
+| `BACKUP_EXTRA_EXCLUDES` | empty | extra exclude patterns for the file-level layers, anchored at `/`; borg and Back In Time share one list |
+| `BX_LOCK_WAIT` | 7200 | seconds a layer waits for another layer's run to finish (all three take one lock; 0 = skip) |
 
 Normal runs keep `KEEP`. Only when the drive is genuinely tight does it drop the
-oldest, one at a time, down to `MIN_KEEP`.
+oldest, one at a time, down to `MIN_KEEP`. `KEEP` can never be set below
+`MIN_KEEP` (it is raised), a non-number falls back to the default, and every
+count prune is per set: one btrfs source that can never be snapshotted (a
+swapfile in `@`) no longer switches pruning off for every other set. A delete
+that fails (read-only drive, a locked repo) stops the free-space prune instead
+of looping on it. Two layers never prune at once — borg, Back In Time and
+Timeshift take one lock, and the second one queues.
+
+**What is backed up.** `/` and every separately mounted local filesystem the
+machine is made of — a separate `/home`, `/boot`, the ESP, openSUSE's `/var`,
+`/opt`, `/srv`, `/root` and `/usr/local` subvolumes, a classic separate `/var`
+partition, every ZFS dataset — found from the live mount table, not a list.
+The backup drive itself, removable media, network shares, docker overlays,
+snap images and bind mounts of a directory already inside a source are left
+out, as are active swapfiles. `BACKUP_EXTRA_SOURCES` adds a mount the rule
+would skip (`/mnt/data`), and it is then included even though `/mnt/*` is on
+the exclude list.
 
 Precedence is environment > `/etc/backup-system.conf` > built-in default, so a
 one-off override needs no config edit:
@@ -532,8 +553,9 @@ borg-backup-drive-attach.sh   unlock (if LUKS) + mount on connect, clears a stal
 borg-backup-drive-detach.sh   detach unit (started by the udev remove rule): lazy-unmount + close the mapping after a yank
 patch-snapper-replicate.py    idempotent fixes for snapper-replicate.sh (btrfs snapper hosts)
 restore.sh                    interactive restore launcher (snapper/btrfs/borg/BIT/combined)
-borg-restore.sh               borg restore + UUID fixup + universal boot rebuild   --dry-run
+borg-restore.sh               borg restore + UUID fixup + universal boot rebuild   --dry-run [--files-only | --fixup-only]
 backintime-restore.sh         BIT restore + UUID fixup + universal boot rebuild    --dry-run [--files-only]
+                              (both: RESTORE_HOST=<name> picks the host when a drive holds several)
 restore-rebuild-boot.sh       universal boot-chain rebuild (GRUB/systemd-boot/UKI/encrypted-boot)  --dry-run
 backup-tray.py backup-tray.desktop                 tray: every layer, run/log/verify/report by hand
 *.service *.timer 99-borg-backup.rules             systemd units + udev attach/detach rule template
@@ -781,7 +803,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 3.8.0
+- **Version:** 3.9.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

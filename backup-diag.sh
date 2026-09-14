@@ -92,7 +92,9 @@ run() {
     local rc
     out "**\`$label\`**"; out ""; out '```'
     if command -v timeout >/dev/null 2>&1; then
-        timeout 120 "$@" </dev/null >&3 2>&1; rc=$?
+        # RUN_TIMEOUT: backup-verify.sh lists a whole archive; 120 s cut it off
+        # on any large repo and the readiness section ended in "exit 124".
+        timeout "${RUN_TIMEOUT:-120}" "$@" </dev/null >&3 2>&1; rc=$?
     else
         "$@" </dev/null >&3 2>&1; rc=$?
     fi
@@ -302,7 +304,7 @@ runsh "restore session logs in /tmp" 'ls -la /tmp/borg-restore-*.log /tmp/backin
 section "Restore readiness (backup-verify.sh, read-only)"
 bv=$(sibling backup-verify.sh)
 if [ $IS_ROOT = 1 ] && [ -n "$bv" ]; then
-    run "backup-verify.sh" env BACKUP_MOUNT="${BACKUP_MOUNT:-/mnt/backup}" BORG_REPO="${BORG_REPO:-}" bash "$bv"
+    RUN_TIMEOUT=900 run "backup-verify.sh" env BACKUP_MOUNT="${BACKUP_MOUNT:-/mnt/backup}" BORG_REPO="${BORG_REPO:-}" bash "$bv"
 elif [ -z "$bv" ]; then
     skip "backup-verify.sh not found"
 else
@@ -318,7 +320,11 @@ exec 3>&-
 if [ $REDACT = 1 ]; then
     # Keep 8 characters: enough to correlate lines within one report, not
     # enough to fingerprint the disks.
-    redact() { sed -E 's/([0-9a-fA-F]{8})-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/\1-…/g; s/([0-9a-fA-F]{4})-([0-9a-fA-F]{4})\b/\1-…/g'; }
+    # UUIDs truncated; and the hostname, user names in home/media paths, disk
+    # serials in by-id paths — a report is pasted into a public issue.
+    _host=$(hostname 2>/dev/null || uname -n)
+    redact() { sed -E 's/([0-9a-fA-F]{8})-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/\1-…/g; s/([0-9a-fA-F]{4})-([0-9a-fA-F]{4})\b/\1-…/g' \
+               | sed -E "s/(^|[^A-Za-z0-9_.-])${_host//./\\.}([^A-Za-z0-9_.-]|$)/\1HOST\2/g; s#/home/[^/ ]+#/home/USER#g; s#/run/media/[^/ ]+#/run/media/USER#g; s#/media/[^/ ]+#/media/USER#g; s#(by-id/[a-z]+-)[^ /]+#\1…#g"; }
 else
     redact() { cat; }
 fi

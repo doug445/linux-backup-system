@@ -25,7 +25,9 @@ BACKUP_KEYFILE="/etc/luks-keys/backup-drive.key"
 SCHEDULE_MODE="adhoc"
 
 # Extra absolute mountpoints to include in file-level backups, space-separated.
-# / and a separate /home, /boot and the ESP are detected automatically.
+# Every separately mounted local filesystem (/, /home, /boot, the ESP, an
+# openSUSE /var, a ZFS dataset…) is found automatically; the backup drive,
+# removable media, network shares and bind mounts are left out.
 BACKUP_EXTRA_SOURCES=""
 
 # Retention — applied by every layer (borg, btrfs/Timeshift replicas, BIT).
@@ -44,3 +46,23 @@ MIN_FREE_GIB=0      # and at least this many GiB free (0 = ignore)
 # Silicon disk is mostly another OS), or the suite says so (a warning, not a stop).
 CAPACITY_HEADROOM_PCT=20
 CAPACITY_RECOMMEND_X=2
+
+# The name this host's backups are filed under: the borg archive prefix, the
+# Back In Time chain directory, the replica names. deploy.sh pins the hostname
+# at install time so a later hostname change does not orphan the chain.
+#BACKUP_HOST_ID="myhost"
+
+# Extra exclude patterns for the file-level layers (borg and Back In Time
+# share one list, see bx_excludes in backup-common.sh), space-separated,
+# anchored at /: BACKUP_EXTRA_EXCLUDES="/home/*/VMs/* /srv/scratch/*"
+BACKUP_EXTRA_EXCLUDES=""
+
+# Capacity policy: refuse (default) | warn | off. The floor is measured on the
+# whole filesystem of each source, so on a btrfs system disk that also holds
+# 1.5 TiB of VM images beside a 100 GiB system, "warn" lets a 1 TiB drive be
+# used.
+#CAPACITY_CHECK="refuse"
+
+# How long a layer waits for another layer's run to finish (seconds; 0 = skip
+# instead). The tray and the timers can start two layers at once.
+#BX_LOCK_WAIT=7200

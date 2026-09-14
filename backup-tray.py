@@ -62,8 +62,16 @@ import time
 import gi
 
 gi.require_version("Gtk", "3.0")
-gi.require_version("AppIndicator3", "0.1")
-from gi.repository import AppIndicator3, GLib, Gtk
+# Debian/Ubuntu/Mint ship the maintained Ayatana fork of AppIndicator; the
+# legacy namespace is gone from newer releases and the tray died at import on
+# every login there. Same API, so either one serves.
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+except (ValueError, ImportError):
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3
+from gi.repository import GLib, Gtk
 
 POLL_INTERVAL_MS = 2000
 COOLDOWN_SECONDS = 15  # keep the icon lit through sub-second stages so a run is visible
@@ -110,12 +118,34 @@ def make_icon(name, bg, fg, stroke):
 
 # ── Runtime detection ─────────────────────────────────────────────────────────
 
+# Terminal emulators in preference order, with the argument form each one
+# takes to run a shell command. Fedora Workstation ships Ptyxis (no
+# gnome-terminal, no xterm), GNOME Console is kgx, Sway/Hyprland users have
+# foot or wezterm; xfce4-terminal's -e takes ONE string (its -x takes argv).
+TERMINALS = [
+    ("x-terminal-emulator", ["-e"]),          # Debian alternatives: whatever the user picked
+    ("ptyxis", ["--"]),
+    ("kgx", ["-e"]),
+    ("konsole", ["-e"]),
+    ("gnome-terminal", ["--"]),
+    ("xfce4-terminal", ["-x"]),
+    ("tilix", ["-e"]),
+    ("mate-terminal", ["-x"]),
+    ("lxterminal", ["-e"]),
+    ("qterminal", ["-e"]),
+    ("foot", []),
+    ("wezterm", ["start", "--"]),
+    ("alacritty", ["-e"]),
+    ("kitty", []),
+    ("xterm", ["-e"]),
+]
+
+
 def find_terminal():
-    for term in ["konsole", "gnome-terminal", "xfce4-terminal",
-                 "alacritty", "kitty", "xterm"]:
+    for term, _ in TERMINALS:
         if shutil.which(term):
             return term
-    return "xterm"
+    return ""
 
 
 def load_config():
@@ -201,15 +231,28 @@ ROOT_FS = root_fstype()
 
 def run_in_terminal(cmd_str):
     full_cmd = f'{cmd_str}; echo; read -p "Press Enter to close..."'
-    if TERMINAL == "konsole":
-        argv = ["konsole", "-e", "bash", "-c", full_cmd]
-    elif TERMINAL == "gnome-terminal":
-        argv = ["gnome-terminal", "--", "bash", "-c", full_cmd]
-    elif TERMINAL == "kitty":
-        argv = ["kitty", "bash", "-c", full_cmd]
-    else:
-        argv = [TERMINAL, "-e", "bash", "-c", full_cmd]
-    subprocess.Popen(argv)
+    if not TERMINAL:
+        # Say so on screen: a FileNotFoundError inside a menu handler only
+        # reached stderr, and every menu action looked dead.
+        dlg = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.CLOSE,
+                                text="No terminal emulator found")
+        dlg.format_secondary_text("Install one of: " + ", ".join(t for t, _ in TERMINALS)
+                                  + "\n\nThe command was:\n" + cmd_str)
+        dlg.run()
+        dlg.destroy()
+        return
+    pre = next(args for term, args in TERMINALS if term == TERMINAL)
+    argv = [TERMINAL, *pre, "bash", "-c", full_cmd]
+    try:
+        subprocess.Popen(argv)
+    except OSError as e:
+        dlg = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.CLOSE,
+                                text=f"Could not start {TERMINAL}")
+        dlg.format_secondary_text(str(e))
+        dlg.run()
+        dlg.destroy()
 
 
 def mount_is_live(path):

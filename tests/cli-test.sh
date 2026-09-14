@@ -186,6 +186,53 @@ print(("PASS " if ns["mount_is_live"]("/") is True else "FAIL ") + "a live mount
 PY
 )
 
+echo "== deploy: rc functions and an existing Back In Time config are updated in place, never clobbered"
+# The two helpers, lifted out of deploy.sh and run against scratch files.
+sed -n '/^add_shell_function()/,/^}/p;/^generate_bit_config()/,/^}/p' "$ROOT/deploy.sh" > "$T/deploy-fns.sh"
+printf 'log(){ echo "LOG: $*"; }\nwarn(){ echo "WARN: $*"; }\n' >> "$T/deploy-fns.sh"
+printf '# mine\nalias ll="ls -l"\ntimeback() { sudo borgmatic create; }\n\n# bitback — added by backup-system deploy\nbitback() {\n    old body\n}\n' > "$T/rc"
+out=$(bash -c "source '$T/deploy-fns.sh'
+add_shell_function '$T/rc' timeback 'timeback() {
+    new
+}'
+add_shell_function '$T/rc' bitback 'bitback() {
+    new body
+}'
+add_shell_function '$T/rc' bitback 'bitback() {
+    new body
+}'
+add_shell_function '$T/rc' snapback 'snapback() {
+    s
+}'" 2>&1)
+grep -q 'WARN:.*timeback() is already defined' <<<"$out" && grep -q 'sudo borgmatic create' "$T/rc" && ok "a foreign timeback() is left alone and named" || bad "foreign timeback(): $out"
+grep -q 'Updated bitback()' <<<"$out" && grep -q '    new body' "$T/rc" && ! grep -q 'old body' "$T/rc" && ok "the deploy's own bitback() block is rewritten when its body changed" || bad "bitback update: $out"
+grep -q 'bitback() in rc is current' <<<"$out" && [ "$(grep -c '^bitback()' "$T/rc")" = 1 ] && ok "an unchanged block is left as one copy" || bad "bitback idempotency: $(grep -c '^bitback()' "$T/rc") copies"
+grep -q 'Added snapback()' <<<"$out" && grep -q '^snapback()' "$T/rc" && grep -q '^alias ll=' "$T/rc" && ok "a new function is appended; the rest of the file survives" || bad "snapback add: $out"
+
+printf 'config.version=6\nprofile1.name=Full System Backup\nprofile1.snapshots.path=/mnt/borg-backup/backintime\nprofile1.snapshots.exclude.99.value=/my/custom\nprofile1.schedule.mode=1\n' > "$T/bit.cfg"
+out=$(BX_BIT_CONFIG="$T/bit.cfg" BACKUP_MOUNT=/mnt/backup DRIVE_SETUP_DONE=0 HAS_ECRYPTFS=false HAS_BTRFS=true SUDO_USER=u \
+      bash -c "source '$T/deploy-fns.sh'; generate_bit_config; echo rc=\$?" 2>&1)
+grep -q '^profile1.snapshots.path=/mnt/backup/backintime$' "$T/bit.cfg" && ok "existing BIT config: snapshots.path re-pointed at the backup drive" || bad "BIT path not updated: $(grep snapshots.path "$T/bit.cfg")"
+grep -q '^profile1.schedule.mode=0$' "$T/bit.cfg" && ok "existing BIT config: BIT's own scheduler turned off" || bad "schedule.mode not zeroed"
+grep -q '^profile1.snapshots.exclude.99.value=/my/custom$' "$T/bit.cfg" && [ "$(grep -c '^profile1.name=' "$T/bit.cfg")" = 1 ] && ok "existing BIT config: hand-tuned lines kept, nothing regenerated" || bad "BIT config was regenerated"
+grep -q 'rc=1' <<<"$out" && grep -q 'kept; updated' <<<"$out" && ok "kept config reports rc=1 (caller does not claim to have written it)" || bad "kept-config rc/log: $out"
+out=$(BX_BIT_CONFIG="$T/bit.cfg" BACKUP_MOUNT=/mnt/backup DRIVE_SETUP_DONE=0 HAS_ECRYPTFS=false HAS_BTRFS=true SUDO_USER=u \
+      bash -c "source '$T/deploy-fns.sh'; generate_bit_config; echo rc=\$?" 2>&1)
+grep -q 'left as-is' <<<"$out" && ok "second run: config already current, left as-is" || bad "second run: $out"
+rm -f "$T/bit.cfg"
+out=$(BX_BIT_CONFIG="$T/bit.cfg" BACKUP_MOUNT=/mnt/backup DRIVE_SETUP_DONE=0 HAS_ECRYPTFS=false HAS_BTRFS=true SUDO_USER=u \
+      bash -c "source '$T/deploy-fns.sh'; generate_bit_config; echo rc=\$?" 2>&1)
+grep -q 'rc=0' <<<"$out" && grep -q '^profile1.snapshots.path=/mnt/backup/backintime$' "$T/bit.cfg" && grep -q '/.backup-snapshots/' "$T/bit.cfg" && ok "no config: a fresh one is generated (rc=0) with the btrfs excludes" || bad "fresh BIT config: $out"
+
+echo "== deploy: the verify unit carries the configured BORG_REPO, not the default"
+if grep -q 'Environment=\(BORG_REPO\|BACKUP_MOUNT\)=' "$ROOT"/*.service; then bad "a unit still carries Environment=BORG_REPO/BACKUP_MOUNT (outranks the config): $(grep -l 'Environment=\(BORG_REPO\|BACKUP_MOUNT\)=' "$ROOT"/*.service | tr '\n' ' ')"; else ok "no unit pins BORG_REPO/BACKUP_MOUNT over the config"; fi
+grep -q 'Environment=BORG_REPO' "$ROOT/deploy.sh" && bad "deploy.sh still templates Environment=BORG_REPO" || ok "deploy.sh does not template Environment=BORG_REPO"
+grep -q '^RequiresMountsFor' "$ROOT/luks-header-backup.service" && bad "luks-header-backup.service requires the drive (it must run without it)" || ok "luks-header-backup.service runs with the drive absent"
+grep -q '^MemoryMax=' "$ROOT/borg-backup.service" && bad "borg-backup.service still uses MemoryMax (kills borg on big trees)" || ok "borg-backup.service throttles (MemoryHigh) instead of killing"
+grep -v '^#' "$ROOT/99-borg-backup.rules" | grep -q 'UDISKS_AUTO_CLEAR' && bad "udev rule uses UDISKS_AUTO_CLEAR (not a udisks property)" || ok "udev rule uses real udisks properties"
+grep -q '@BACKUP_FS_UUID@' "$ROOT/99-borg-backup.rules" && ok "udev rule covers the filesystem UUID too" || bad "udev rule ignores the inner filesystem UUID"
+grep -q 'BORG_REPO=\\\$(. /etc/backup-system.conf' "$ROOT/deploy.sh" && ok "timeback() resolves BORG_REPO from the config at call time" || bad "timeback() hardcodes the repo path"
+
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
 [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && ok "BX_VERSION=$v is semver" || bad "BX_VERSION '$v'"
