@@ -66,16 +66,16 @@ used() { btrfs filesystem sync "$T/drive" >/dev/null 2>&1; df -B1M --output=used
 nlocal() { ls -1d "$LOC"/home_* 2>/dev/null | wc -l; }
 
 echo "== first send: full"
-m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000001 "$LOGF"); rc=$?
-expect "rc 0" 0 "$rc"; expect "says full" full "$m"
+m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000001 "$LOGF"); r=$?
+expect "rc 0" 0 "$r"; expect "says full" full "$m"
 expect "replica is read-only" true "$(btrfs property get "$DST/home_20260101_000001" ro | sed -n 's/^ro=//p')"
 expect "one local snapshot kept as the parent" 1 "$(nlocal)"
 u1=$(used)
 
 echo "== second send: incremental from the kept parent"
 head -c 2M /dev/urandom > "$T/sys/@home/small"
-m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000002 "$LOGF"); rc=$?
-expect "rc 0" 0 "$rc"; expect "says incremental" "incremental from home_20260101_000001" "$m"
+m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000002 "$LOGF"); r=$?
+expect "rc 0" 0 "$r"; expect "says incremental" "incremental from home_20260101_000001" "$m"
 expect "still one local snapshot (the new parent)" "$LOC/home_20260101_000002" "$(ls -1d "$LOC"/home_*)"
 u2=$(used); grow=$(( u2 - u1 ))
 [ "$grow" -lt 20 ] && ok "the drive grew by the change only (${grow} MiB, a full send would be ~40)" || bad "the drive grew ${grow} MiB — not incremental"
@@ -85,14 +85,14 @@ cmp -s "$T/sys/@home/small" "$DST/home_20260101_000002/small" && cmp -s "$T/sys/
 echo "== parent replica pruned on the drive: full send, not a broken incremental"
 btrfs subvolume delete "$DST/home_20260101_000002" >/dev/null
 expect "no usable parent" "" "$(bx_replica_parent home "$LOC" "$DST")"
-m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000003 "$LOGF"); rc=$?
-expect "rc 0" 0 "$rc"; expect "falls back to full" full "$m"
+m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000003 "$LOGF"); r=$?
+expect "rc 0" 0 "$r"; expect "falls back to full" full "$m"
 
 echo "== a failed send keeps the previous parent"
 mount -o remount,ro "$T/drive"
-m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000004 "$LOGF"); rc=$?
+m=$(bx_replica_send home "$T/sys/@home" "$LOC" "$DST" 20260101_000004 "$LOGF"); r=$?
 mount -o remount,rw "$T/drive"
-expect "rc 1" 1 "$rc"
+expect "rc 1" 1 "$r"
 grep -q 'receive rc=' <<<"$m" && ok "says why ($m)" || bad "no reason given: $m"
 expect "previous parent still there, no half snapshot" "$LOC/home_20260101_000003" "$(ls -1d "$LOC"/home_*)"
 expect "next run is incremental again" home_20260101_000003 "$(bx_replica_parent home "$LOC" "$DST")"
