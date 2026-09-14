@@ -44,6 +44,11 @@
 set -uo pipefail
 
 DRY=          # empty, not 0: ${DRY:+...} treats the string "0" as set
+# RESTORE_NO_NVRAM=1 (set by the restore scripts when they run from an
+# installed system): write no firmware boot entry — install the loaders at the
+# removable-media fallback path the firmware boots from its boot menu, and
+# leave this machine's boot order alone.
+NO_NVRAM="${RESTORE_NO_NVRAM:-0}"
 [ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "-n" ] && DRY=1
 
 say()  { echo "[rebuild-boot]${DRY:+ [DRY]} $*"; }
@@ -196,6 +201,7 @@ fi
 efi_boot_entry() {
     local label="$1" loader="$2" src kn disk part puuid rel
     [ "$IS_EFI" = true ] || return 0
+    if [ "$NO_NVRAM" = 1 ]; then say "no firmware boot entry for $label (RESTORE_NO_NVRAM=1) — boot it from the firmware boot menu"; return 0; fi
     if ! command -v efibootmgr >/dev/null 2>&1; then
         warn "efibootmgr not installed — no firmware boot entry for $label; install efibootmgr, or pick the disk from the firmware boot menu"
         return 0
@@ -264,7 +270,7 @@ ensure_kernel_cmdline() {
     runsh "mkdir -p /etc/kernel && printf '%s\\n' '$opts' > /etc/kernel/cmdline"
 }
 
-say "distro=$DISTRO_FAMILY arch=$ARCH efi=$IS_EFI esp=${ESP:-none}"
+say "distro=$DISTRO_FAMILY arch=$ARCH efi=$IS_EFI esp=${ESP:-none} no_nvram=$NO_NVRAM"
 say "kernels: ${KVERS[*]:-none}"
 say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT limine=$USES_LIMINE refind=$USES_REFIND pi_firmware=$IS_PI_FW"
 [ ${#KVERS[@]} -eq 0 ] && warn "no kernels found under /lib/modules — cannot rebuild"
@@ -348,6 +354,10 @@ if [ "$USES_GRUB" = true ]; then
             # the restore script.
             say "Fedora family with shim on the ESP — keeping the signed GRUB image, not running $gi"
             say "(if the ESP was empty or damaged: dnf reinstall shim-x64 grub2-efi-x64 restores it)"
+        elif [ -n "$gi" ] && [ "$NO_NVRAM" = 1 ]; then
+            say "RESTORE_NO_NVRAM=1: GRUB installed without a firmware entry, at the removable-media path"
+            run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck --no-nvram
+            run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck --no-nvram --removable
         elif [ -n "$gi" ]; then
             if ! run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck; then
                 # A firmware that refuses NVRAM writes (efivars read-only, some
@@ -381,7 +391,10 @@ fi
 if [ "$USES_SDBOOT" = true ]; then
     say "===== systemd-boot ====="
     if command -v bootctl >/dev/null 2>&1; then
-        if ! run bootctl ${ESP:+--esp-path="$ESP"} install; then
+        if [ "$NO_NVRAM" = 1 ]; then
+            say "RESTORE_NO_NVRAM=1: systemd-boot installed without touching EFI variables (EFI/BOOT/BOOT*.EFI is the entry point)"
+            run bootctl ${ESP:+--esp-path="$ESP"} --no-variables install
+        elif ! run bootctl ${ESP:+--esp-path="$ESP"} install; then
             warn "bootctl install failed — retrying without NVRAM variables (the firmware boots EFI/BOOT/BOOT*.EFI, which bootctl also writes)"
             run bootctl ${ESP:+--esp-path="$ESP"} --no-variables install || true
         fi

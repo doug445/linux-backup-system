@@ -46,6 +46,10 @@ set -euo pipefail
 # call below discards: a silent hang, then "Could not list archives".
 export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
 export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
+# borg's security and cache directories go to a temporary directory: on a live
+# USB /root is tmpfs anyway, on an installed system they would be written to
+# the running system's own disk.
+[ -n "${BORG_BASE_DIR:-}" ] || { BORG_BASE_DIR=$(mktemp -d /tmp/borg-restore-base.XXXXXX); export BORG_BASE_DIR; }
 
 # Full logging — capture everything for debugging
 RESTORE_LOG="/tmp/borg-restore-$(date +%Y%m%d_%H%M%S).log"
@@ -122,6 +126,22 @@ fi
 [ -d "$TARGET" ] || fatal "Target $TARGET does not exist"
 [ -d "$BORG_REPO" ] || fatal "Borg repo $BORG_REPO does not exist"
 mountpoint -q "$TARGET" || fatal "$TARGET is not a mountpoint"
+
+# Restoring from an INSTALLED system (a second disk, a test bed) rather than a
+# live USB: nothing may be written to the running system's own disk. The boot
+# rebuild must not touch firmware boot entries — bootctl/grub-install would
+# put the new disk first in THIS machine's boot order — and borg keeps its
+# security/cache state in a temporary directory, not under /root.
+if [ -z "${RESTORE_NO_NVRAM:-}" ]; then
+    case "$(findmnt -no FSTYPE / 2>/dev/null)" in
+        overlay|squashfs|tmpfs|iso9660|aufs|zram) RESTORE_NO_NVRAM=0 ;;
+        *) if grep -qE '(^| )(boot=casper|rd\.live\.image|archisobasedir=|archisolabel=|boot=live|root=live:)' /proc/cmdline 2>/dev/null; then RESTORE_NO_NVRAM=0; else RESTORE_NO_NVRAM=1; fi ;;
+    esac
+fi
+export RESTORE_NO_NVRAM
+if [ "$RESTORE_NO_NVRAM" = 1 ]; then
+    log "Running from an installed system ($(findmnt -no SOURCE / 2>/dev/null)): firmware boot entries will NOT be written (removable-media fallback loaders only) — pick the restored disk from the firmware boot menu. RESTORE_NO_NVRAM=0 overrides."
+fi
 # Never onto the system this is running from: "/" is a mountpoint too, and so
 # is a bind mount of it.
 [ "$TARGET" != / ] || fatal "refusing to restore onto / — the running system. Boot a live USB and mount the new disk at a target path."
@@ -443,6 +463,13 @@ if command -v dmsetup &>/dev/null; then
 
         if [ -n "$slave" ]; then
             underlying="/dev/$slave"
+            # Only containers on the restore target: on an installed system the
+            # running root's container and the backup drive are open too, and
+            # pairing either with the restored system's entries is wrong.
+            case "$TARGET_DISKS" in
+                *" $(_disk_of "$underlying" 2>/dev/null || true) "*) ;;
+                *) log "LUKS: $mapper_name ($underlying) is not on the target disk(s) — ignored"; continue ;;
+            esac
             if command -v cryptsetup &>/dev/null && cryptsetup isLuks "$underlying" 2>/dev/null; then
                 luks_uuid=$(cryptsetup luksUUID "$underlying" 2>/dev/null) || true
                 if [ -n "$luks_uuid" ]; then
@@ -668,6 +695,58 @@ ID_MAP="$(mktemp /tmp/restore-idmap.XXXXXX)"
     [ -n "$OLD_SWAP_UUID" ] && [ -n "$SWAP_UUID" ] && echo "$OLD_SWAP_UUID $SWAP_UUID"
     [ -n "${LUKS_ID_MAP:-}" ] && [ -s "$LUKS_ID_MAP" ] && cat "$LUKS_ID_MAP"
 } > "$ID_MAP"
+
+# The ROOT container. With the old disk still installed its old id exists on
+# this machine and the running system holds its mapper name, so neither the
+# crypttab pairing nor the mapper-name bridge above reaches it — and the
+# restored disk would boot by unlocking the OLD disk. The container under the
+# target's root filesystem is the new root container, whatever it is called.
+OLD_ROOT_LUKS=$(cl_root_luks_id "$TARGET")
+NEW_ROOT_LUKS=""
+_rsrc=$(findmnt -no SOURCE "$TARGET" 2>/dev/null | sed 's/\[.*//')
+if [[ "$_rsrc" == /dev/mapper/* ]]; then
+    _rb=$(cryptsetup status "${_rsrc#/dev/mapper/}" 2>/dev/null | awk '/device:/{print $2}')
+    [ -n "$_rb" ] && NEW_ROOT_LUKS=$(cryptsetup luksUUID "$_rb" 2>/dev/null || true)
+fi
+if [ -n "$OLD_ROOT_LUKS" ] && [ -n "$NEW_ROOT_LUKS" ]; then
+    if [ "$OLD_ROOT_LUKS" != "$(tr '[:upper:]' '[:lower:]' <<<"$NEW_ROOT_LUKS")" ] && ! grep -qi "^$OLD_ROOT_LUKS " "$ID_MAP"; then
+        echo "$OLD_ROOT_LUKS $NEW_ROOT_LUKS" >> "$ID_MAP"
+        log "Root LUKS container: $OLD_ROOT_LUKS → $NEW_ROOT_LUKS (the container under $TARGET; its mapper name stays as the restored system declares it)"
+    fi
+elif [ -n "$OLD_ROOT_LUKS" ]; then
+    warn "the restored system unlocks its root from LUKS container $OLD_ROOT_LUKS, but $TARGET is not on a LUKS container — its boot will ask for a container that is not there; restore onto an encrypted root, or remove rd.luks/cryptdevice from the command line"
+fi
+
+# Hibernation into a swapfile on the root filesystem: resume=UUID= names that
+# filesystem. fstab names the root by mapper path here, so the root filesystem
+# mapping above never saw the old id; the resume id is it.
+RESUME_ID=""; RESUME_OFF=""
+IFS=$'\t' read -r RESUME_ID RESUME_OFF < <(cl_resume_file_ref "$TARGET") || true
+if [ -n "$RESUME_ID" ] && awk '$1 !~ /^#/ && $3=="swap" && $1 ~ /^\// && $1 !~ /^\/dev\// {f=1} END{exit !f}' "$FSTAB"; then
+    if [ -n "$ROOT_UUID" ] && ! grep -qi "^$RESUME_ID " "$ID_MAP"; then
+        echo "$RESUME_ID $ROOT_UUID" >> "$ID_MAP"
+        log "resume= (swapfile on the root filesystem): $RESUME_ID → $ROOT_UUID"
+    fi
+fi
+
+# crypttab and crypttab.initramfs, by id, for every container mapping — the
+# name-based loop above does not see crypttab.initramfs (mkinitcpio sd-encrypt
+# bakes it into the initramfs; left stale, the restored disk's initramfs asks
+# for the OLD disk's container at every boot).
+for _ct in "$CRYPTTAB" "$TARGET/etc/crypttab.initramfs"; do
+    [ -f "$_ct" ] || continue
+    _changed=0
+    while read -r _o _n _; do
+        [ -n "$_o" ] && [ -n "$_n" ] || continue
+        if awk -v o="$(tr '[:upper:]' '[:lower:]' <<<"$_o")" '$1 !~ /^#/ {d=tolower($2); gsub(/"/,"",d); if (d=="uuid=" o) f=1} END{exit !f}' "$_ct"; then
+            [ "$_changed" = 1 ] || cp "$_ct" "$_ct.bak.$(date +%s)"
+            _changed=1
+            _cur=$(awk -v o="$(tr '[:upper:]' '[:lower:]' <<<"$_o")" '$1 !~ /^#/ {d=$2; gsub(/"/,"",d); if (tolower(d)=="uuid=" o) {sub(/^UUID=/,"",d); print d; exit}}' "$_ct")
+            cl_table_set_ref "$_ct" 2 UUID "$_cur" "$_n"
+            log "  ${_ct#"$TARGET"}: UUID=$_cur → $_n"
+        fi
+    done < "$ID_MAP"
+done
 # Command lines that bind a container id to a mapper NAME — cryptdevice=
 # UUID=<id>:<name> (Arch encrypt hook), rd.luks.name=<id>=<name> (dracut,
 # sd-encrypt) — declare the root container themselves, not in crypttab, so
@@ -716,6 +795,39 @@ fi
 # design, and a live USB without SELinux may not write them back on a borg
 # extract either. /.autorelabel has the restored system relabel every file on
 # its first boot — one slow boot and one extra reboot, on every SELinux target.
+# Swapfiles: an active swapfile is in no file-level backup, so fstab names a
+# file the restored disk does not have. Re-create it (RAM-sized, so
+# hibernation still fits) and point resume_offset= at its new blocks.
+while read -r _swf; do
+    _tgt="$TARGET$_swf"
+    [ -e "$_tgt" ] && { log "swapfile $_swf present in the restore"; continue; }
+    _dir=$(dirname "$_tgt")
+    _p="$_dir"; while [ ! -d "$_p" ]; do _p=$(dirname "$_p"); done
+    _fs=$(findmnt -no FSTYPE --target "$_p" 2>/dev/null)
+    _gib=$(( ( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) + 1048575 ) / 1048576 ))
+    log "re-creating swapfile $_swf (${_gib} GiB, $_fs) — swapfiles are never in a file-level backup"
+    if [ "$_fs" = btrfs ]; then
+        [ -d "$_dir" ] || btrfs subvolume create "$_dir" >/dev/null || mkdir -p "$_dir"
+        if ! btrfs filesystem mkswapfile --size "${_gib}g" "$_tgt" >/dev/null 2>&1; then
+            touch "$_tgt"; chattr +C "$_tgt" 2>/dev/null || true
+            fallocate -l "${_gib}G" "$_tgt" && chmod 600 "$_tgt" && mkswap "$_tgt" >/dev/null || warn "could not create $_swf — fstab's swap line will fail at boot (non-fatal); create it by hand"
+        fi
+        _off=$(btrfs inspect-internal map-swapfile -r "$_tgt" 2>/dev/null || true)
+    else
+        mkdir -p "$_dir"
+        { fallocate -l "${_gib}G" "$_tgt" 2>/dev/null || dd if=/dev/zero of="$_tgt" bs=1M count=$(( _gib * 1024 )) status=none; } \
+            && chmod 600 "$_tgt" && mkswap "$_tgt" >/dev/null || warn "could not create $_swf"
+        _off=$(filefrag -v "$_tgt" 2>/dev/null | awk '$1=="0:" {sub(/\.\./,"",$4); print $4; exit}')
+    fi
+    if [ -n "$RESUME_OFF" ]; then
+        if [ -n "$_off" ]; then
+            while IFS=$'\t' read -r _k _f; do log "  resume_offset=$RESUME_OFF → $_off in $_k ${_f#"$TARGET"}"; done < <(cl_set_resume_offset "$TARGET" "$_off")
+        else
+            warn "could not read the new swapfile's physical offset — resume_offset=$RESUME_OFF is stale; hibernation must not be used until it is fixed"
+        fi
+    fi
+done < <(awk '$1 !~ /^#/ && $3=="swap" && $1 ~ /^\// && $1 !~ /^\/dev\// {print $1}' "$FSTAB")
+
 SELINUX_MODE=$(awk -F= '/^[[:space:]]*SELINUX=/{gsub(/[[:space:]"]/, "", $2); print $2; exit}' "$TARGET/etc/selinux/config" 2>/dev/null || true)
 case "$SELINUX_MODE" in
     enforcing|permissive)
@@ -743,7 +855,12 @@ mount -t sysfs sys "$TARGET/sys"
 # /run too: dracut, lvm and bootctl look for udev's and systemd's state there
 # (arch-chroot and Fedora's chroot recipe both bind it).
 mount --bind /run "$TARGET/run" 2>/dev/null || true
-[ -d /sys/firmware/efi/efivars ] && mount --bind /sys/firmware/efi/efivars "$TARGET/sys/firmware/efi/efivars" 2>/dev/null || true
+if [ -d /sys/firmware/efi/efivars ]; then
+    mount --bind /sys/firmware/efi/efivars "$TARGET/sys/firmware/efi/efivars" 2>/dev/null || true
+    # Read-only when nothing may reach this machine's firmware: a tool that
+    # ignores --no-variables still cannot write a boot entry.
+    [ "$RESTORE_NO_NVRAM" = 1 ] && mount -o remount,bind,ro "$TARGET/sys/firmware/efi/efivars" 2>/dev/null || true
+fi
 # --remove-destination: the restored resolv.conf is usually a dangling symlink
 # into ../run/systemd/resolve/, and a plain cp wrote through it and failed.
 cp --remove-destination /etc/resolv.conf "$TARGET/etc/resolv.conf" 2>/dev/null || true
@@ -763,7 +880,7 @@ fi
 if [ -f "$SCRIPT_DIR/restore-rebuild-boot.sh" ]; then
     log "Rebuilding boot chain in chroot (universal: GRUB / systemd-boot / UKI)..."
     install -m 755 "$SCRIPT_DIR/restore-rebuild-boot.sh" "$TARGET/root/.restore-rebuild-boot.sh"
-    chroot "$TARGET" /root/.restore-rebuild-boot.sh || warn "boot rebuild reported errors - review the log above"
+    chroot "$TARGET" /usr/bin/env RESTORE_NO_NVRAM="$RESTORE_NO_NVRAM" /root/.restore-rebuild-boot.sh || warn "boot rebuild reported errors - review the log above"
     rm -f "$TARGET/root/.restore-rebuild-boot.sh"
 else
     error "restore-rebuild-boot.sh not found next to this script ($SCRIPT_DIR) - boot NOT rebuilt!"
@@ -822,6 +939,19 @@ if [ -n "$stale" ]; then
     done <<<"$stale"
 else
     log "  OK: every carrier ($(cl_find_carriers "$TARGET" | wc -l)) references ids present on this disk"
+fi
+# ...and on the TARGET disk. An id that exists on another disk of this machine
+# (the old disk, still installed) passes the check above and boots the wrong
+# system: the restored disk unlocking and mounting the old root.
+log "Verifying the boot chain references only the target disk(s):${TARGET_DISKS% }"
+offt=$(cl_refs_off_target "$TARGET" "$TARGET_DISKS")
+if [ -n "$offt" ]; then
+    while IFS=$'\t' read -r f rk id d; do
+        error "  FAIL: $f references $rk $id on $d — NOT the restore target; the restored system would boot, unlock or mount the other disk"
+        ERRORS=$((ERRORS + 1))
+    done <<<"$offt"
+else
+    log "  OK: root, /boot, ESP, /home, crypttab.initramfs and every command line resolve onto the target disk(s)"
 fi
 
 # Verify GRUB config UUIDs

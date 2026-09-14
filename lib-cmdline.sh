@@ -361,3 +361,133 @@ cl_stale_ids() {
     done < <(cl_find_carriers "$root")
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# The ROOT's LUKS container, as the restored system's boot declares it.
+#
+# A restore maps old container ids to new ones through crypttab and through
+# mapper names; neither reaches the root container when the machine still has
+# the old disk installed (a second-disk restore, a test bed, a disk swap done
+# in place): its old id still exists on this machine, so nothing looks stale,
+# and the new container cannot be opened under the old mapper name because
+# the running system holds that name. The command line then keeps the OLD id —
+# and the restored disk boots by unlocking, and running from, the OLD disk.
+#
+# cl_root_luks_id ROOT — the old root container id (lowercase), or nothing.
+#   1. root=/dev/mapper/<name> → the id bound to <name> by rd.luks.name= /
+#      luks.name= / cryptdevice=UUID=<id>:<name>, or by a crypttab.initramfs /
+#      crypttab line "<name> UUID=<id>";
+#   2. else exactly one LUKS id across the command lines and crypttab.initramfs
+#      (root=UUID=<fs> on the only container the initramfs opens).
+# ---------------------------------------------------------------------------
+cl_root_luks_id() {
+    local root="${1%/}" name="" id="" f ids
+    local files=()
+    while IFS=$'\t' read -r _k f; do files+=("$f"); done < <(cl_find_carriers "$root")
+    [ ${#files[@]} -gt 0 ] || return 0
+    name=$(grep -vhE '^[[:space:]]*#' "${files[@]}" 2>/dev/null | grep -ohE 'root=/dev/mapper/[A-Za-z0-9_.:-]+' | head -1 | sed 's#^root=/dev/mapper/##')
+    if [ -n "$name" ]; then
+        id=$(for f in "${files[@]}"; do cl_luks_name_pairs "$f"; done | awk -F'\t' -v n="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" '$2==n {print $1; exit}')
+        if [ -z "$id" ]; then
+            for f in "$root/etc/crypttab.initramfs" "$root/etc/crypttab"; do
+                [ -r "$f" ] || continue
+                id=$(cl_crypttab_ref "$f" "$name" | awk -F'\t' '$1=="UUID"{print tolower($2)}')
+                [ -n "$id" ] && break
+            done
+        fi
+        [ -n "$id" ] && { printf '%s\n' "$id"; return 0; }
+    fi
+    ids=$( { for f in "${files[@]}"; do cl_ids_in_file "$f"; done | awk -F'\t' '$1=="luks"{print $2}'
+             for f in "${files[@]}"; do cl_luks_name_pairs "$f"; done | cut -f1
+             [ -r "$root/etc/crypttab.initramfs" ] && cl_table_refs "$root/etc/crypttab.initramfs" 2 | awk -F'\t' '$1=="UUID"{print tolower($2)}'
+           } | sort -u)
+    [ "$(printf '%s' "$ids" | grep -c .)" = 1 ] && printf '%s\n' "$ids"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Hibernation into a SWAPFILE: resume=UUID=<the filesystem holding the file>
+# plus resume_offset=<physical block of the file>. Neither survives a restore:
+# the filesystem UUID is new, the file is re-created (active swapfiles are
+# never in a file-level backup) and its blocks are elsewhere. A stale
+# resume_offset makes the initramfs read a hibernation image from arbitrary
+# blocks; with the old disk still installed, a stale UUID points at the OLD
+# disk's filesystem.
+# cl_resume_file_ref ROOT — "id<TAB>offset" when a carrier has both
+#   resume=UUID=<id> and resume_offset=<n>; nothing otherwise.
+# cl_set_resume_offset ROOT NEW — rewrite every resume_offset= in the carriers
+#   (comment lines untouched; CL_DRY=1 lists, writes nothing). Prints
+#   "kind<TAB>path" per file changed.
+# ---------------------------------------------------------------------------
+cl_resume_file_ref() {
+    local root="${1%/}" _k f id off
+    while IFS=$'\t' read -r _k f; do
+        id=$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -oiE "resume=UUID=${CL_ID}" | head -1 | sed 's/^resume=UUID=//I' | tr '[:upper:]' '[:lower:]')
+        off=$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -oE 'resume_offset=[0-9]+' | head -1 | cut -d= -f2)
+        [ -n "$id" ] && [ -n "$off" ] && { printf '%s\t%s\n' "$id" "$off"; return 0; }
+    done < <(cl_find_carriers "$root")
+    return 0
+}
+cl_set_resume_offset() {
+    local root="${1%/}" new="$2" kind path tmp
+    case "$new" in ''|*[!0-9]*) return 1 ;; esac
+    while IFS=$'\t' read -r kind path; do
+        grep -qE 'resume_offset=[0-9]+' "$path" 2>/dev/null || continue
+        tmp="$(mktemp "$(dirname "$path")/.lbs-ro.XXXXXX")" || return 1
+        if ! sed -E "/^[[:space:]]*#/!s/resume_offset=[0-9]+/resume_offset=$new/g" "$path" > "$tmp"; then rm -f "$tmp"; return 1; fi
+        if cmp -s "$path" "$tmp"; then rm -f "$tmp"; continue; fi
+        if [ "${CL_DRY:-0}" = 1 ]; then rm -f "$tmp"; printf '%s\t%s\n' "$kind" "$path"; continue; fi
+        cat "$tmp" > "$path" && rm -f "$tmp"
+        printf '%s\t%s\n' "$kind" "$path"
+    done < <(cl_find_carriers "$root")
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# cl_ref_disk KIND VALUE — the whole disk the referenced device sits on (through
+# LUKS/LVM and partitions), or nothing. KIND: uuid | partuuid | luks | UUID |
+# PARTUUID | LABEL | PARTLABEL. CL_REF_DISK_CMD overrides it (tests): a command
+# given KIND VALUE that prints a disk path.
+# Used after a restore: a reference that EXISTS but resolves to a disk other
+# than the restore target means the restored system would boot from — or
+# mount, or unlock — the old disk that is still installed.
+# ---------------------------------------------------------------------------
+cl_ref_disk() {
+    local kind val dev kn sl pk
+    kind=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]'); val="$2"
+    if [ -n "${CL_REF_DISK_CMD:-}" ]; then "$CL_REF_DISK_CMD" "$kind" "$val"; return; fi
+    case "$kind" in LUKS) kind=UUID ;; esac
+    dev=$(blkid -t "$kind=$val" -o device 2>/dev/null | head -1)
+    [ -n "$dev" ] || return 0
+    kn=$(basename "$(readlink -f "$dev")")
+    while :; do
+        sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1 || true)
+        if [ -n "$sl" ]; then kn="$sl"; continue; fi
+        pk=$(lsblk -dno PKNAME "/dev/$kn" 2>/dev/null | head -1 || true)
+        if [ -n "$pk" ]; then kn="$pk"; continue; fi
+        break
+    done
+    printf '/dev/%s\n' "$kn"
+}
+
+# cl_refs_off_target ROOT "DISK..." — "where<TAB>kind<TAB>id<TAB>disk" for every
+# id in a carrier, crypttab.initramfs, or an fstab line for / /boot /efi
+# /boot/efi /home, that resolves to a disk NOT in the space-separated list.
+# Ids that resolve to nothing are left to cl_stale_ids.
+cl_refs_off_target() {
+    local root="${1%/}" disks=" $2 " _k f rk id d k v mnt
+    {
+        while IFS=$'\t' read -r _k f; do
+            while IFS=$'\t' read -r rk id; do printf '%s\t%s\t%s\n' "${f#"$root"}" "$rk" "$id"; done < <(cl_ids_in_file "$f")
+        done < <(cl_find_carriers "$root")
+        [ -r "$root/etc/crypttab.initramfs" ] && cl_table_refs "$root/etc/crypttab.initramfs" 2 \
+            | while IFS=$'\t' read -r k v; do [ "$k" = PATH ] || printf '/etc/crypttab.initramfs\t%s\t%s\n' "$k" "$v"; done
+        [ -r "$root/etc/fstab" ] && awk "$_CL_REF_AWK"' $1 !~ /^#/ && NF >= 3 && ($2=="/" || $2=="/boot" || $2=="/efi" || $2=="/boot/efi" || $2=="/home") { print $2 "\t" ref($1) }' "$root/etc/fstab" \
+            | while IFS=$'\t' read -r mnt k v; do [ "$k" = PATH ] || printf '/etc/fstab(%s)\t%s\t%s\n' "$mnt" "$k" "$v"; done
+    } | sort -u | while IFS=$'\t' read -r f rk id; do
+        d=$(cl_ref_disk "$rk" "$id")
+        [ -n "$d" ] || continue
+        case "$disks" in *" $d "*) ;; *) printf '%s\t%s\t%s\t%s\n' "$f" "$rk" "$id" "$d" ;; esac
+    done
+    return 0
+}

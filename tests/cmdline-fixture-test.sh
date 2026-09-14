@@ -240,6 +240,49 @@ ln=$(grep -m1 'rel="\\\\' "$RB")
 out=$(ESP=/boot/efi; loader=/boot/efi/EFI/limine/BOOTX64.EFI; eval "${ln#"${ln%%[![:space:]]*}"}"; printf '%s' "$rel")
 expect "efibootmgr loader path is backslashed and ESP-relative" '\EFI\limine\BOOTX64.EFI' "$out"
 grep -qE "grep -oP 'UUID=\\\\K" "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script still extracts ids with a substring UUID= match" || ok "restore scripts parse fstab/crypttab by field"
+echo "== same-machine restore: the root container, the swapfile resume, references off the target disk"
+Z="$T/zen"
+OLDC=da69add4-1121-4c19-bf51-1307a674abeb; OLDFS=d5a89928-3d28-48ba-aca9-c32318eda426
+mk "$Z/etc/kernel/cmdline" "rd.luks.name=$OLDC=luks-$OLDC rd.luks.options=$OLDC=discard root=/dev/mapper/luks-$OLDC rw rootflags=subvol=@ resume=UUID=$OLDFS resume_offset=41207506 quiet\n"
+mk "$Z/etc/crypttab.initramfs" "luks-$OLDC UUID=$OLDC - discard\n"
+mk "$Z/etc/crypttab" "luks-7ac9a064-f5fc-4f23-8a52-a78a0d1ee580 UUID=7ac9a064-f5fc-4f23-8a52-a78a0d1ee580 /etc/luks-keys/k nofail\n"
+mk "$Z/etc/fstab" "UUID=D265-F4A4 /boot vfat umask=0077 0 2\nUUID=B68A-6FA8 /efi vfat umask=0077 0 2\n/dev/mapper/luks-$OLDC / btrfs subvol=/@ 0 0\n/swap/swapfile none swap defaults 0 0\n"
+expect "root container from root=/dev/mapper/<name> + rd.luks.name (Manjaro sd-encrypt)" "$OLDC" "$(cl_root_luks_id "$Z")"
+mk "$T/arch/etc/default/grub" "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=AAAA1111-2222-3333-4444-555566667777:cryptroot root=/dev/mapper/cryptroot\"\n"
+expect "root container from cryptdevice=UUID=<id>:<name> (Arch encrypt hook)" "aaaa1111-2222-3333-4444-555566667777" "$(cl_root_luks_id "$T/arch")"
+mk "$T/fed/boot/loader/entries/x.conf" "options root=UUID=$NR ro rd.luks.uuid=luks-$OL rhgb\n"
+expect "root container: the only rd.luks.uuid when root=UUID= (Fedora)" "$OL" "$(cl_root_luks_id "$T/fed")"
+mk "$T/two/etc/kernel/cmdline" "root=UUID=$NR rd.luks.uuid=$OL rd.luks.uuid=$OB\n"
+expect "two containers and root=UUID=: undecidable, nothing" "" "$(cl_root_luks_id "$T/two")"
+mk "$T/plain/etc/kernel/cmdline" "root=UUID=$NR ro quiet\n"
+expect "no LUKS at all: nothing" "" "$(cl_root_luks_id "$T/plain")"
+
+expect "swapfile resume: fs id and offset" "$OLDFS	41207506" "$(cl_resume_file_ref "$Z")"
+expect "resume=UUID= without resume_offset (a swap partition) is not a swapfile ref" "" "$(cl_resume_file_ref "$R")"
+CL_DRY=1 cl_set_resume_offset "$Z" 1234 >/dev/null; grep -q 'resume_offset=41207506' "$Z/etc/kernel/cmdline" && ok "resume_offset dry run writes nothing" || bad "dry run wrote"
+cl_set_resume_offset "$Z" 1234 >/dev/null
+grep -q ' resume_offset=1234 ' "$Z/etc/kernel/cmdline" && ! grep -q 41207506 "$Z/etc/kernel/cmdline" && ok "resume_offset rewritten" || bad "resume_offset not rewritten: $(cat "$Z/etc/kernel/cmdline")"
+cl_set_resume_offset "$Z" "12;rm" >/dev/null && bad "a non-number offset was accepted" || ok "a non-number offset is refused"
+
+# The old disk is still installed: /dev/nvme0n1 holds the old container, its
+# filesystem and ESP; the restore target is /dev/sdb.
+fake_disk() { case "$2" in "$OLDC"|"$OLDFS"|B68A-6FA8|D265-F4A4|7ac9a064-f5fc-4f23-8a52-a78a0d1ee580) echo /dev/nvme0n1 ;; NEWC*|NEWFS*|NEWESP|NEWBOOT) echo /dev/sdb ;; esac; }
+export -f fake_disk; export OLDC OLDFS
+off=$(CL_REF_DISK_CMD=fake_disk cl_refs_off_target "$Z" "/dev/sdb")
+grep -q "kernel/cmdline	luks	$OLDC	/dev/nvme0n1" <<<"$off" && ok "old root container on the installed old disk is flagged" || bad "root container not flagged: $off"
+grep -q "kernel/cmdline	uuid	$OLDFS	/dev/nvme0n1" <<<"$off" && ok "resume= onto the old disk's filesystem is flagged" || bad "resume not flagged"
+grep -q "crypttab.initramfs	UUID	$OLDC" <<<"$off" && ok "crypttab.initramfs entry for the old container is flagged" || bad "crypttab.initramfs not flagged"
+grep -q "fstab(/efi)	UUID	B68A-6FA8" <<<"$off" && ok "fstab /efi on the old disk's ESP is flagged" || bad "fstab /efi not flagged"
+grep -q "7ac9a064" <<<"$off" && bad "a data drive in crypttab (not the boot chain) was flagged" || ok "other crypttab drives are not the boot chain and are not flagged"
+printf '%s NEWC-0000-0000-0000-000000000000\n%s NEWFS-000-0000-0000-000000000000\nB68A-6FA8 NEWESP\nD265-F4A4 NEWBOOT\n' "$OLDC" "$OLDFS" > "$T/zmap"
+cl_rewrite_ids "$Z" "$T/zmap" >/dev/null
+cl_table_set_ref "$Z/etc/crypttab.initramfs" 2 UUID "$OLDC" NEWC-0000-0000-0000-000000000000
+cl_table_set_ref "$Z/etc/fstab" 1 UUID B68A-6FA8 NEWESP; cl_table_set_ref "$Z/etc/fstab" 1 UUID D265-F4A4 NEWBOOT
+off=$(CL_REF_DISK_CMD=fake_disk cl_refs_off_target "$Z" "/dev/sdb")
+expect "after the mapping nothing in the boot chain points at the old disk" "" "$off"
+grep -q "root=/dev/mapper/luks-$OLDC" "$Z/etc/kernel/cmdline" && grep -q "rd.luks.name=NEWC-0000-0000-0000-000000000000=luks-$OLDC" "$Z/etc/kernel/cmdline" \
+    && ok "the mapper NAME is kept (fstab's /dev/mapper path still matches), only the id changed" || bad "cmdline: $(cat "$Z/etc/kernel/cmdline")"
+
 grep -qE '\(\([A-Z_]+\+\+\)\)' "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script uses ((X++)) under set -e (exits when X is 0)" || ok "no ((X++)) under set -e in the restore scripts"
 
 echo

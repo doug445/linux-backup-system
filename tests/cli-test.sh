@@ -243,6 +243,15 @@ out=$(BX_LOCK_FILE="$T/lbs.lock" bash -c "source '$T/lockfn.sh'; backup_lock_hel
 wait "$lpid"
 [ "$out" = held ] && ok "a held lock: running" || bad "held lock not seen: $out"
 
+echo "== restore-rebuild-boot.sh: RESTORE_NO_NVRAM=1 writes no firmware boot entry"
+grep -q -- '--no-variables install' "$ROOT/restore-rebuild-boot.sh" && ok "systemd-boot path has a --no-variables install" || bad "no --no-variables bootctl path"
+grep -q -- '--no-nvram --removable' "$ROOT/restore-rebuild-boot.sh" && ok "GRUB path installs --no-nvram --removable" || bad "no --no-nvram GRUB path"
+sed -n '/^efi_boot_entry()/,/^}/p' "$ROOT/restore-rebuild-boot.sh" | grep -q 'NO_NVRAM" = 1' && ok "efibootmgr entry creation is skipped" || bad "efi_boot_entry ignores NO_NVRAM"
+for f in borg-restore.sh backintime-restore.sh; do
+    grep -q 'mount -o remount,bind,ro "$TARGET/sys/firmware/efi/efivars"' "$ROOT/$f" && grep -q 'env RESTORE_NO_NVRAM="$RESTORE_NO_NVRAM"' "$ROOT/$f" \
+        && ok "$f: efivars read-only in the chroot and the mode passed in when run from an installed system" || bad "$f: NVRAM guard missing"
+done
+
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
 [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && ok "BX_VERSION=$v is semver" || bad "BX_VERSION '$v'"
