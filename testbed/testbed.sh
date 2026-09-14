@@ -369,22 +369,22 @@ freeze_suite() { # a copy of the suite the test runs from — editing the checko
     say "suite frozen for this test: $(st_get suite-version)"
 }
 cmd_backup() {
-    local mode="${1:-functional}" inc="" k ex
+    local mode="${1:-functional}" keep_inc="" k ex
     mountpoint -q "$BACKUP_MOUNT" || die "backup drive not mounted at $BACKUP_MOUNT"
     case "$mode" in functional|minimal) ;; *) die "backup functional|minimal" ;; esac
     freeze_suite
     ex="/home/*/* $TB_BIG_EXCLUDES $TB_EXTRA_EXCLUDES"
-    if [ "$mode" = functional ]; then for k in $TB_HOME_KEEP; do inc="$inc /home/*/$k"; done; fi
+    if [ "$mode" = functional ]; then for k in $TB_HOME_KEEP; do keep_inc="$keep_inc /home/*/$k"; done; fi
     set_sectors "$(bx_disk_of "$(findmnt -no SOURCE "$BACKUP_MOUNT" | sed 's/\[.*//')")"
     st_set backup-mode "$mode"
     say "TEST archive ($mode) → $TB_REPO"
     ledger test "TEST archive ($mode) in $TB_REPO; excludes on the command line only, /etc/backup-system.conf untouched" "revert deletes $TB_REPO (revert --keep-repo keeps it)"
-    env BORG_REPO="$TB_REPO" BACKUP_EXTRA_EXCLUDES="$ex" BACKUP_EXTRA_INCLUDES="${inc# }" \
+    env BORG_REPO="$TB_REPO" BACKUP_EXTRA_EXCLUDES="$ex" BACKUP_EXTRA_INCLUDES="${keep_inc# }" \
         "$TB_STATE/suite/borg-backup.sh" > "$TB_STATE/backup.log" 2>&1
-    local rc=$?
+    local brc=$?
     tail -3 "$TB_STATE/backup.log"
     # rc 3 = the btrfs replica layer did not fully succeed; the archive is complete
-    [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || die "test backup failed (rc=$rc) — $TB_STATE/backup.log"
+    [ "$brc" -eq 0 ] || [ "$brc" -eq 3 ] || die "test backup failed (rc=$brc) — $TB_STATE/backup.log"
     st_set archive "$(BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes borg list --last 1 --short "$TB_REPO")"
     say "archive: $(st_get archive)"
 }
@@ -398,10 +398,10 @@ cmd_restore() {
     "$TB_STATE/suite/borg-restore.sh" --dry-run "$TB_MNT" "$TB_REPO" "$a" < /dev/null > "$TB_STATE/restore-dry.log" 2>&1 || die "restore dry run failed — $TB_STATE/restore-dry.log"
     say "restore ($a) ..."
     "$TB_STATE/suite/borg-restore.sh" "$TB_MNT" "$TB_REPO" "$a" < /dev/null > "$TB_STATE/restore.log" 2>&1
-    local rc=$?
+    local rrc=$?
     sed 's/\x1b\[[0-9;]*m//g' "$TB_STATE/restore.log" | grep -E 'FAIL|ERROR\(S\)|ALL CHECKS|WARNING\(S\)' | tail -12
-    st_set restore-rc "$rc"
-    [ "$rc" -eq 0 ] || warn "restore exited $rc — $TB_STATE/restore.log"
+    st_set restore-rc "$rrc"
+    [ "$rrc" -eq 0 ] || warn "restore exited $rrc — $TB_STATE/restore.log"
 }
 
 # --- finish: manifest, homes, logger ----------------------------------------------------------------------

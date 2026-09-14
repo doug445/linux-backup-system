@@ -47,13 +47,14 @@ have.
 | systemd-boot, UKI, GRUB EFI, encrypted argon2id `/boot` | ✅ | |
 | **GRUB legacy BIOS** | ❌ | `restore-rebuild-boot.sh` finds the boot disk; a restored machine boots |
 | Plain (unencrypted) `/boot` | ✅ | a restored machine booting is the bare-metal row below |
-| **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
+| **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ not under test | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
-| **Limine** (CachyOS's default) | ❌ — written, fixture-tested only | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
-| **rEFInd** | ❌ — written, fixture-tested only | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
-| **SELinux restore relabel** (Fedora, RHEL) | ❌ — written, fixture-tested only | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
+| **Limine** (CachyOS's default) | ⚠️ under test | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
+| **rEFInd** | ⚠️ under test | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
+| **SELinux restore relabel** (Fedora, RHEL) | ⚠️ under test | the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
 | Bare-metal restore — Manjaro, btrfs on LUKS2 (sd-encrypt), systemd-boot + mkinitcpio UKIs, Secure Boot with sbctl keys | ✅ total system restore, booted fully working | a report on another distro or boot layout |
-| **Bare-metal restore on every other setup** — each ❌ in the README's *Bare-metal restore* column | ❌ **most wanted** | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
+| Bare-metal restore — Fedora, Debian / Ubuntu / Mint, Arch, EndeavourOS; ext4, LVM-on-LUKS; systemd-boot Type #1, dracut/kernel-install UKIs, shim Secure Boot, GRUB EFI, encrypted argon2id `/boot`, Limine, rEFInd, SELinux relabel; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
+| **Bare-metal restore — Raspberry Pi, GRUB legacy BIOS, encrypted pbkdf2 `/boot`, openSUSE, and the distros the package map does not know** | ❌ not under test — **most wanted** | the same test bed run on that hardware |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
 
 ### Wanted: setups the restore does not handle yet
