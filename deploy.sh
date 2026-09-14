@@ -70,8 +70,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/backup-common.sh" || { echo "FATAL: backup-common.sh missing next to deploy.sh" >&2; exit 1; }
 CAPACITY_HEADROOM_PCT="${CAPACITY_HEADROOM_PCT:-20}"; CAPACITY_RECOMMEND_X="${CAPACITY_RECOMMEND_X:-2}"
-SUDO_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
-USER_HOME=$(eval echo "~$SUDO_USER")
+# The desktop user this deploy is for: sudo, doas and pkexec each say it
+# differently; under su or a unit only logind knows; `logname` fails on most
+# Wayland desktops and everything then landed in /root (autostart, rc files,
+# a mount chowned to root).
+SUDO_USER="${SUDO_USER:-${DOAS_USER:-}}"
+[ -z "$SUDO_USER" ] && [ -n "${PKEXEC_UID:-}" ] && SUDO_USER=$(id -nu "$PKEXEC_UID" 2>/dev/null || true)
+[ -z "$SUDO_USER" ] && SUDO_USER=$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3 != "" && $3 != "root" {print $3; exit}' || true)
+[ -z "$SUDO_USER" ] && SUDO_USER=$(logname 2>/dev/null || true)
+[ -z "$SUDO_USER" ] && SUDO_USER=root
+USER_HOME=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+[ -n "$USER_HOME" ] || USER_HOME=/root
 
 DRY=0
 for _a in "$@"; do
@@ -83,6 +92,14 @@ for _a in "$@"; do
 done
 
 [ "$(id -u)" -eq 0 ] || { err "Must run as root: sudo ./deploy.sh"; exit 1; }
+# bash reads a running script by file offset; overwriting one in place feeds
+# the running root process shifted bytes of the new file — arbitrary lines
+# (a prune, a subvolume delete) at the wrong moment. Scripts are installed
+# with install(1) (new inode), and never while one of them is running.
+if (( ! DRY )) && pgrep -f '/usr/local/sbin/(borg|backintime|timeshift)-backup\.sh' >/dev/null 2>&1; then
+    err "a backup is running ($(pgrep -af '/usr/local/sbin/(borg|backintime|timeshift)-backup\.sh' | awk '{print $NF}' | sort -u | tr '\n' ' ')) — wait for it to finish, then re-run deploy.sh"
+    exit 1
+fi
 
 
 ###############################################################################
@@ -215,10 +232,16 @@ tray_deps_present() {
     python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("AppIndicator3", "0.1"); from gi.repository import Gtk, AppIndicator3' >/dev/null 2>&1
 }
 install_tray_dependencies() {
+    if ! { [ -d /usr/share/xsessions ] || [ -d /usr/share/wayland-sessions ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }; then
+        log "  no graphical session on this host — tray dependencies not installed"; return
+    fi
     if tray_deps_present; then log "  tray dependencies present (python3, GTK3, AppIndicator3)"; return; fi
-    local pkgs
+    local pkgs alt=""
     case "$DISTRO_FAMILY" in
-        debian) pkgs="python3 python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1" ;;
+        # Debian/Ubuntu/Mint ship the maintained Ayatana fork; the legacy
+        # gir1.2-appindicator3-0.1 is gone from newer releases. Try the fork,
+        # then the legacy name.
+        debian) pkgs="python3 python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1"; alt="python3 python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1" ;;
         fedora) pkgs="python3 python3-gobject gtk3 libappindicator-gtk3" ;;
         arch)   pkgs="python python-gobject gtk3 libappindicator-gtk3" ;;
         suse)   pkgs="python3 python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0 typelib-1_0-AppIndicator3-0_1" ;;
@@ -228,13 +251,43 @@ install_tray_dependencies() {
     log "  installing tray dependencies: $pkgs"
     # shellcheck disable=SC2086
     if ! eval "$(bx_pkg_install_cmd) $pkgs" >/dev/null 2>&1 || ! tray_deps_present; then
-        warn "tray dependencies did not install — the tray will not start until they do: $pkgs"
+        if [ -n "$alt" ] && eval "$(bx_pkg_install_cmd) $alt" >/dev/null 2>&1 && tray_deps_present; then
+            log "  tray dependencies installed (legacy AppIndicator3): $alt"
+        else
+            warn "tray dependencies did not install — the tray will not start until they do: $pkgs"
+        fi
     fi
+    case "$(loginctl show-user "$SUDO_USER" -p Desktop --value 2>/dev/null)${XDG_CURRENT_DESKTOP:-}" in
+        *GNOME*|*gnome*) warn "GNOME shows AppIndicator trays only with the 'AppIndicator and KStatusNotifierItem Support' extension installed" ;;
+    esac
 }
 
 ###############################################################################
 # Detect backup mount path
 ###############################################################################
+# adopt_label_mount DEV MOUNT — the labelled drive is mounted at MOUNT. Under
+# /run/media or /media it was the desktop's automount: a per-user tmpfs path
+# that the attach unit would then mkdir as root at boot, after which udisks
+# refuses to mount ANY removable media for that user. Remount it at /mnt/backup.
+adopt_label_mount() {
+    local dev="$1" mnt="$2"
+    case "$mnt" in
+        /run/media/*|/media/*)
+            if (( DRY )) || [ ! -t 0 ]; then
+                warn "the backup drive is mounted by the desktop at $mnt — that path cannot be the backup mount. Unmount it (or run deploy.sh on a terminal to have it remounted at /mnt/backup)."
+                BACKUP_MOUNT=/mnt/backup; WAITING_FOR_DRIVE=1
+                return
+            fi
+            log "the backup drive is mounted by the desktop at $mnt — remounting it at /mnt/backup"
+            umount "$mnt" 2>/dev/null || { err "could not unmount $mnt (open files?) — close them and re-run"; BACKUP_MOUNT=/mnt/backup; WAITING_FOR_DRIVE=1; return; }
+            BACKUP_MOUNT=/mnt/backup
+            mount_backup_fs "$dev" || { WAITING_FOR_DRIVE=1; return; }
+            ;;
+        *)  BACKUP_MOUNT="$mnt"
+            log "Detected backup mount from volume label: $BACKUP_MOUNT" ;;
+    esac
+}
+
 detect_backup_mount() {
     # Priority 1: Environment variable override
     if [ -n "${BACKUP_MOUNT:-}" ]; then
@@ -298,8 +351,7 @@ detect_backup_mount() {
         local label_mount
         label_mount=$(findmnt -n -o TARGET "$label_dev" 2>/dev/null || true)
         if [ -n "$label_mount" ]; then
-            BACKUP_MOUNT="$label_mount"
-            log "Detected backup mount from volume label: $BACKUP_MOUNT"
+            adopt_label_mount "$label_dev" "$label_mount"
             return
         fi
         # Try the LUKS mapper device
@@ -310,8 +362,7 @@ detect_backup_mount() {
                 local check_label
                 check_label=$(lsblk -n -o LABEL "$mapper" 2>/dev/null || true)
                 if [ "$check_label" = "Borg-backup" ]; then
-                    BACKUP_MOUNT="$label_mount"
-                    log "Detected backup mount from LUKS label: $BACKUP_MOUNT"
+                    adopt_label_mount "$mapper" "$label_mount"
                     return
                 fi
             fi
@@ -508,8 +559,14 @@ offer_blank_drive() {
 # A disk is in use if anything on it (partition, LUKS mapping, LV) is mounted
 # or swapped, or if any of its UUIDs appear in fstab or crypttab.
 disk_in_use() {
-    local dev="$1" u
-    lsblk -rno MOUNTPOINTS "$dev" 2>/dev/null | grep -q . && return 0
+    local dev="$1" u mp p
+    # MOUNTPOINTS arrived in util-linux 2.37; on Debian 11 / Ubuntu 20.04 /
+    # RHEL 8 the column is unknown, lsblk printed nothing, and the SYSTEM disk
+    # was listed as eligible. Fall back to MOUNTPOINT; an lsblk that fails
+    # outright means "in use" — never "free".
+    mp=$(lsblk -rno MOUNTPOINTS "$dev" 2>/dev/null) || mp=$(lsblk -rno MOUNTPOINT "$dev" 2>/dev/null) || return 0
+    grep -q . <<<"$mp" && return 0
+    while read -r p; do [ -n "$p" ] && grep -qs "^$p " /proc/swaps && return 0; done < <(lsblk -rnpo NAME "$dev" 2>/dev/null)
     while read -r u; do
         [ -n "$u" ] || continue
         grep -qsF "$u" /etc/fstab /etc/crypttab && return 0
@@ -522,7 +579,8 @@ confirm_erase() { # confirm_erase DEV DESCRIPTION
     local dev="$1"
     echo ""
     echo -e "${RED}This will ERASE $dev${NC} ($2). Everything on it will be gone."
-    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS "$dev" 2>/dev/null | sed 's/^/    /'
+    { lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS "$dev" 2>/dev/null || lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$dev" 2>/dev/null; } | sed 's/^/    /'
+    disk_in_use "$dev" && { err "$dev is IN USE (mounted, swap, or in fstab/crypttab) — refusing to erase it."; return 1; }
     ask "Type the device path ($dev) to continue, anything else to abort: "
     [ "$REPLY" = "$dev" ] || { warn "Aborted — nothing was written."; return 1; }
     ask "Type ERASE to confirm: "
@@ -571,17 +629,34 @@ enroll_keyfile() { # enroll_keyfile LUKS_DEV
     mkdir -p "$kdir"; chmod 700 "$kdir"
     if [ ! -s "$kf" ]; then
         ( umask 077; head -c 64 /dev/urandom > "$kf" ) || { err "could not write $kf"; return 1; }
+    elif cryptsetup open --test-passphrase --key-file "$kf" "$ldev" 2>/dev/null; then
+        # Already enrolled: luksAddKey does not dedupe, and every re-run
+        # through this path burned another keyslot (LUKS1 has eight).
+        log "keyfile $kf already opens $ldev — nothing to enroll"
+        DRIVE_KEYFILE="$kf"
+        return 0
     else
-        log "keyfile $kf already exists — enrolling it"
+        log "keyfile $kf exists but does not open $ldev — enrolling it"
     fi
     chmod 400 "$kf"
+    # LUKS1 (older GNOME Disks / GParted drives) accepts only pbkdf2; LUKS2
+    # gets argon2id with a memory cost a 1 GB Pi can still afford.
+    local kdf=()
+    if cryptsetup luksDump "$ldev" 2>/dev/null | grep -q '^Version:[[:space:]]*1'; then
+        kdf=(--hash sha512)
+    else
+        kdf=(--pbkdf argon2id --pbkdf-memory 262144 --hash sha512)
+    fi
     echo "cryptsetup will ask for the drive's passphrase:"
-    if cryptsetup luksAddKey --pbkdf argon2id --hash sha512 "$ldev" "$kf"; then
+    if cryptsetup luksAddKey "${kdf[@]}" "$ldev" "$kf"; then
         DRIVE_KEYFILE="$kf"
         log "keyfile enrolled in $ldev"
     else
         warn "luksAddKey failed — no keyfile enrolled; you can retry with:"
-        warn "  sudo cryptsetup luksAddKey --pbkdf argon2id --hash sha512 $ldev $kf"
+        warn "  sudo cryptsetup luksAddKey ${kdf[*]} $ldev $kf"
+        # Never record a keyfile that does not open the drive: every plug-in
+        # would end in "luksOpen failed" and a failed unit.
+        rm -f "$kf"
     fi
     return 0
 }
@@ -596,7 +671,7 @@ mount_backup_fs() { # mount_backup_fs FS_DEV
     else
         mount "$fsdev" "$BACKUP_MOUNT" || { err "mount failed"; return 1; }
     fi
-    chown "$SUDO_USER:$SUDO_USER" "$BACKUP_MOUNT" 2>/dev/null || true
+    chown "$SUDO_USER:" "$BACKUP_MOUNT" 2>/dev/null || true   # primary group, whatever it is called (openSUSE: users)
     log "mounted $fsdev ($fstype) at $BACKUP_MOUNT"
     DRIVE_SETUP_DONE=1
     return 0
@@ -742,8 +817,10 @@ explain_encrypt_first() {
     echo "  GNOME Disks   Format Disk (GPT) -> + partition -> type: Internal disk (ext4/btrfs),"
     echo "                tick 'Password protect volume (LUKS)', filesystem btrfs, label Borg-backup"
     echo "  GParted       Device > Create Partition Table (gpt); Partition > New, btrfs, tick 'Encrypt with LUKS'"
-    echo "  Command line  sudo cryptsetup luksFormat --type luks2 --pbkdf argon2id ${dev}1"
-    echo "                sudo cryptsetup open ${dev}1 backup && sudo mkfs.btrfs -L Borg-backup /dev/mapper/backup"
+    local p1; p1=$(lsblk -rnpo NAME,TYPE "$dev" 2>/dev/null | awk '$2=="part"{print $1; exit}' || true)
+    if [ -z "$p1" ]; then case "$dev" in *[0-9]) p1="${dev}p1" ;; *) p1="${dev}1" ;; esac; fi   # nvme0n1p1, mmcblk0p1, sdb1
+    echo "  Command line  sudo cryptsetup luksFormat --type luks2 --pbkdf argon2id $p1"
+    echo "                sudo cryptsetup open $p1 backup && sudo mkfs.btrfs -L Borg-backup /dev/mapper/backup"
     echo ""
     echo "Prefer to keep a plain drive for now? Format it here instead, and encrypt it in place"
     echo "later with LinuxLocker: https://github.com/doug445/LinuxLocker"
@@ -779,15 +856,44 @@ generate_bit_config() {
     local user_to_exclude="$SUDO_USER"
     local exclude_idx=19
     local exclude_size=18  # base excludes (1-18)
-    local cfg=/root/.config/backintime/config
+    # BX_BIT_CONFIG: the fixture test writes a scratch config instead of root's.
+    local cfg="${BX_BIT_CONFIG:-/root/.config/backintime/config}"
 
     # An existing config is the user's — it may carry hand-tuned exclusions or
     # rsync options — and is never regenerated over, except when a new drive
     # was set up this run (the destination path changed); then the old one is
     # kept beside it.
     if [ -f "$cfg" ] && [ "$DRIVE_SETUP_DONE" != 1 ]; then
-        log "  $cfg exists — left as-is"
-        return
+        # Two lines are not the user's to keep: the destination must be this
+        # host's backup drive (a drive moved from /mnt/borg-backup to
+        # /mnt/backup left the GUI, and the config copied into every snapshot,
+        # pointing at the old path), and Back In Time's own scheduler must stay
+        # off — with it on, `backintime check-config` below installs a crontab
+        # that runs BIT by AGE behind the suite's back.
+        local want="$BACKUP_MOUNT/backintime" have changed=""
+        have=$(sed -n 's/^profile1\.snapshots\.path=//p' "$cfg" | head -1)
+        if [ "$have" != "$want" ]; then
+            if grep -q '^profile1\.snapshots\.path=' "$cfg"; then
+                sed -i "s#^profile1\.snapshots\.path=.*#profile1.snapshots.path=$want#" "$cfg"
+            else
+                printf 'profile1.snapshots.path=%s\n' "$want" >> "$cfg"
+            fi
+            changed="snapshots.path ${have:-<unset>} -> $want"
+        fi
+        if [ "$(sed -n 's/^profile1\.schedule\.mode=//p' "$cfg" | head -1)" != 0 ]; then
+            if grep -q '^profile1\.schedule\.mode=' "$cfg"; then
+                sed -i 's/^profile1\.schedule\.mode=.*/profile1.schedule.mode=0/' "$cfg"
+            else
+                printf 'profile1.schedule.mode=0\n' >> "$cfg"
+            fi
+            changed="${changed:+$changed; }schedule.mode -> 0 (the suite runs BIT, never BIT's own cron)"
+        fi
+        if [ -n "$changed" ]; then
+            log "  $cfg exists — kept; updated: $changed"
+        else
+            log "  $cfg exists — left as-is"
+        fi
+        return 1
     fi
     if [ -f "$cfg" ]; then
         /usr/bin/cp -a "$cfg" "$cfg.old-$(date +%Y%m%d-%H%M%S)"
@@ -859,12 +965,12 @@ EOF
 
     # Add ecryptfs-specific excludes if applicable
     if [ "$HAS_ECRYPTFS" = true ] && [ "$user_to_exclude" != "root" ]; then
-        cat >> /root/.config/backintime/config << ECRYPT
+        cat >> "$cfg" << ECRYPT
 profile1.snapshots.exclude.${exclude_idx}.type=0
 profile1.snapshots.exclude.${exclude_idx}.value=/home/${user_to_exclude}
 ECRYPT
         ((exclude_idx++))
-        cat >> /root/.config/backintime/config << ECRYPT
+        cat >> "$cfg" << ECRYPT
 profile1.snapshots.exclude.${exclude_idx}.type=0
 profile1.snapshots.exclude.${exclude_idx}.value=/home/${user_to_exclude}/**
 ECRYPT
@@ -874,22 +980,22 @@ ECRYPT
     # Add btrfs-specific excludes
     if [ "$HAS_BTRFS" = true ]; then
         # Exclude btrfs snapshot directories (snapper and manual)
-        cat >> /root/.config/backintime/config << BTRFS
+        cat >> "$cfg" << BTRFS
 profile1.snapshots.exclude.${exclude_idx}.type=0
 profile1.snapshots.exclude.${exclude_idx}.value=/.snapshots/*
 BTRFS
         ((exclude_idx++))
-        cat >> /root/.config/backintime/config << BTRFS
+        cat >> "$cfg" << BTRFS
 profile1.snapshots.exclude.${exclude_idx}.type=0
 profile1.snapshots.exclude.${exclude_idx}.value=/home/.snapshots/*
 BTRFS
         ((exclude_idx++))
-        cat >> /root/.config/backintime/config << BTRFS
+        cat >> "$cfg" << BTRFS
 profile1.snapshots.exclude.${exclude_idx}.type=0
 profile1.snapshots.exclude.${exclude_idx}.value=/.backup-snapshots/*
 BTRFS
         ((exclude_idx++))
-        cat >> /root/.config/backintime/config << BTRFS
+        cat >> "$cfg" << BTRFS
 profile1.snapshots.exclude.${exclude_idx}.type=0
 profile1.snapshots.exclude.${exclude_idx}.value=/var/lib/flatpak/*
 BTRFS
@@ -897,7 +1003,7 @@ BTRFS
     fi
 
     # Write the exclude size and remaining config
-    cat >> /root/.config/backintime/config << EOF
+    cat >> "$cfg" << EOF
 profile1.snapshots.exclude.size=${exclude_size}
 
 # Scheduling disabled (systemd timer handles it)
@@ -979,20 +1085,47 @@ add_shell_function() {
     local rc_file="$1"
     local func_name="$2"
     local func_body="$3"
+    local marker="# $func_name — added by backup-system deploy"
+    local base; base=$(basename "$rc_file")
 
-    if [ -f "$rc_file" ] && grep -q "^${func_name}()" "$rc_file" 2>/dev/null; then
-        log "  $func_name() already in $(basename "$rc_file") — skipping"
-        return
+    [ -f "$rc_file" ] || return 0
+
+    # The deploy's own block is delimited by its marker line and the first
+    # line that is just "}". Rewrite it when the body changed (a new mount
+    # path, a new repo path) instead of leaving a stale definition in place.
+    if grep -qF -- "$marker" "$rc_file" 2>/dev/null; then
+        local current
+        current=$(awk -v m="$marker" 'f&&/^}/{print;exit} f{print} $0==m{f=1}' "$rc_file")
+        if [ "$current" = "$func_body" ]; then
+            log "  $func_name() in $base is current — unchanged"
+            return 0
+        fi
+        local tmp; tmp=$(mktemp)
+        awk -v m="$marker" '
+            $0==m {skip=1; blank=1; next}      # drop the marker
+            skip && /^}/ {skip=0; next}        # ...through the closing brace
+            skip {next}
+            blank && /^$/ {blank=0; next}      # and the blank line the deploy put before it
+            {blank=0; print}' "$rc_file" > "$tmp"
+        cat "$tmp" > "$rc_file"; rm -f "$tmp"
+        printf '\n%s\n%s\n' "$marker" "$func_body" >> "$rc_file"
+        log "  Updated $func_name() in $base"
+        return 0
     fi
 
-    [ -f "$rc_file" ] || return
+    # A definition the deploy did not write is the user's (or a retired tool's):
+    # never overwrite it, but say so — it shadows the one that would be added.
+    if grep -q "^${func_name}()" "$rc_file" 2>/dev/null; then
+        warn "  $func_name() is already defined in $base (line $(grep -n "^${func_name}()" "$rc_file" | head -1 | cut -d: -f1)) by something other than this deploy — left alone; remove it to get the suite's $func_name()"
+        return 0
+    fi
 
     cat >> "$rc_file" << EOF
 
-# $func_name — added by backup-system deploy
+$marker
 $func_body
 EOF
-    log "  Added $func_name() to $(basename "$rc_file")"
+    log "  Added $func_name() to $base"
 }
 
 ###############################################################################
@@ -1006,11 +1139,19 @@ detect_schedule_mode() {
     local src base rm hp tran
     # Every pipeline here ends in "|| true": under set -e -o pipefail a failing
     # findmnt/lsblk inside $(...) would otherwise kill the script silently.
-    src=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
+    src=$(findmnt -no SOURCE -M "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
     if [ -z "$src" ] || ! bx_mount_is_live "$BACKUP_MOUNT"; then
-        # No live drive mounted: nothing may run on its own until one is set up.
-        SCHEDULE_MODE=adhoc
-        log "Schedule mode (no live backup drive at $BACKUP_MOUNT): $SCHEDULE_MODE"
+        # No live drive mounted. A host that already has a config keeps its
+        # mode: a re-deploy while the internal drive was momentarily unmounted
+        # used to turn a scheduled host ad-hoc and silently stop the nightly
+        # backups. A new host gets ad-hoc until a drive is set up.
+        if [ -r /etc/backup-system.conf ]; then
+            SCHEDULE_MODE=$(. /etc/backup-system.conf 2>/dev/null; echo "${SCHEDULE_MODE:-adhoc}")
+            log "Schedule mode (configured drive not present — unchanged from the config): $SCHEDULE_MODE"
+        else
+            SCHEDULE_MODE=adhoc
+            log "Schedule mode (no live backup drive at $BACKUP_MOUNT): $SCHEDULE_MODE"
+        fi
         return
     fi
     if [[ "$src" == /dev/mapper/* ]]; then
@@ -1021,6 +1162,9 @@ detect_schedule_mode() {
     rm=$(cat "/sys/block/$base/removable" 2>/dev/null || echo 0)
     hp=$(lsblk -no HOTPLUG "/dev/$base" 2>/dev/null | head -1 || true)
     tran=$(lsblk -no TRAN "/dev/$base" 2>/dev/null | head -1 || true)
+    # A Thunderbolt / USB4 NVMe enclosure reports tran=nvme, hotplug=0: it is
+    # an external drive all the same.
+    readlink -f "/sys/block/$base" 2>/dev/null | grep -qE 'thunderbolt|usb4' && hp=1
     # "scheduled" enables timers that run backups unattended, so it needs
     # positive evidence of a fixed internal disk: a resolvable disk that is
     # neither removable nor hotplug nor on USB. Anything unresolved is ad-hoc.
@@ -1041,9 +1185,17 @@ detect_schedule_mode() {
 # Generate /etc/backup-system.conf from detection (never clobber an existing one)
 ###############################################################################
 write_system_conf() {
-    local fs_uuid dev luks_uuid=""
-    fs_uuid=$(findmnt -n -o UUID --target "$BACKUP_MOUNT" 2>/dev/null || true)
-    dev=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
+    local fs_uuid="" dev="" luks_uuid="" host_id
+    host_id=$(hostname 2>/dev/null || uname -n)
+    # Only a LIVE mount at exactly BACKUP_MOUNT (-M). `findmnt --target` on an
+    # existing-but-unmounted /mnt/backup walks UP to the root filesystem, and
+    # its UUIDs were written here as the backup drive: the udev rule then
+    # fired on the root disk, the attach unit mounted the ROOT fs at
+    # /mnt/backup, and the machine backed itself up onto itself.
+    if bx_mount_is_live "$BACKUP_MOUNT"; then
+        fs_uuid=$(findmnt -n -o UUID -M "$BACKUP_MOUNT" 2>/dev/null || true)
+        dev=$(findmnt -no SOURCE -M "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
+    fi
     if [[ "$dev" == /dev/mapper/* ]]; then
         local backing; backing=$(cryptsetup status "${dev#/dev/mapper/}" 2>/dev/null | awk "/device:/{print \$2}" || true)
         luks_uuid=$(cryptsetup luksUUID "$backing" 2>/dev/null || true)
@@ -1054,8 +1206,25 @@ write_system_conf() {
         mv /etc/backup-system.conf "$old"
         log "  a new drive was set up this run — previous config kept at $old"
     elif [ -f /etc/backup-system.conf ]; then
-        log "  /etc/backup-system.conf exists — left as-is (detected fs_uuid=$fs_uuid luks_uuid=${luks_uuid:-none})"
-        return
+        local existing_mount
+        existing_mount=$(. /etc/backup-system.conf 2>/dev/null; echo "${BACKUP_MOUNT:-}")
+        if [ -n "$existing_mount" ] && [ "$existing_mount" != "$BACKUP_MOUNT" ]; then
+            # BACKUP_MOUNT= on the command line moved the drive: the units and
+            # rc functions get the new path, and so must the config the
+            # scripts read — or borg kept writing to the old one.
+            local old
+            old="/etc/backup-system.conf.old-$(date +%Y%m%d-%H%M%S)"
+            mv /etc/backup-system.conf "$old"
+            log "  BACKUP_MOUNT changed ($existing_mount -> $BACKUP_MOUNT) — previous config kept at $old"
+        else
+            # Kept as-is, plus any key this release added and the file lacks.
+            if ! grep -q '^BACKUP_HOST_ID=' /etc/backup-system.conf; then
+                printf 'BACKUP_HOST_ID="%s"\n' "$host_id" >> /etc/backup-system.conf
+                log "  /etc/backup-system.conf: added BACKUP_HOST_ID=\"$host_id\" (pins the archive/chain name across hostname changes)"
+            fi
+            log "  /etc/backup-system.conf exists — left as-is (detected fs_uuid=${fs_uuid:-none} luks_uuid=${luks_uuid:-none})"
+            return
+        fi
     fi
     local keyfile="$DRIVE_KEYFILE"
     if [ -z "$keyfile" ] && [ -n "$luks_uuid" ] && [ -r /etc/luks-keys/backup-drive.key ]; then
@@ -1067,8 +1236,11 @@ BACKUP_MOUNT="$BACKUP_MOUNT"
 BACKUP_FS_UUID="$fs_uuid"
 BACKUP_LUKS_UUID="${luks_uuid:-}"
 BACKUP_KEYFILE="$keyfile"
-BACKUP_MOUNT_OPTS="$([ "$(findmnt -no FSTYPE --target "$BACKUP_MOUNT" 2>/dev/null)" = btrfs ] && echo compress=zstd:1)"
+BACKUP_MOUNT_OPTS="$([ -n "$fs_uuid" ] && [ "$(findmnt -no FSTYPE -M "$BACKUP_MOUNT" 2>/dev/null)" = btrfs ] && echo compress=zstd:1)"
 SCHEDULE_MODE="$SCHEDULE_MODE"
+# The name this host's backups are filed under (borg archive prefix, Back In
+# Time chain). Pinned here so a later hostname change does not orphan them.
+BACKUP_HOST_ID="$host_id"
 KEEP=10
 MIN_KEEP=3
 MIN_FREE_PCT=10
@@ -1090,11 +1262,12 @@ EOF
 # auto-prunes. Idempotent; the exclude list and everything else are untouched.
 ###############################################################################
 configure_timeshift() {
-    local cfg=/etc/timeshift/timeshift.json fs_uuid dev luks_uuid="" out
-    fs_uuid=$(findmnt -n -o UUID --target "$BACKUP_MOUNT" 2>/dev/null || true)
-    # "|| true": with no drive connected BACKUP_MOUNT may not exist, findmnt
-    # fails, and under set -e -o pipefail that aborted the whole deploy.
-    dev=$(findmnt -no SOURCE --target "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
+    local cfg=/etc/timeshift/timeshift.json fs_uuid="" dev="" luks_uuid="" out
+    # Only a live mount at exactly BACKUP_MOUNT — see write_system_conf.
+    if bx_mount_is_live "$BACKUP_MOUNT"; then
+        fs_uuid=$(findmnt -n -o UUID -M "$BACKUP_MOUNT" 2>/dev/null || true)
+        dev=$(findmnt -no SOURCE -M "$BACKUP_MOUNT" 2>/dev/null | sed "s/\[.*//" || true)
+    fi
     if [[ "$dev" == /dev/mapper/* ]]; then
         local backing; backing=$(cryptsetup status "${dev#/dev/mapper/}" 2>/dev/null | awk "/device:/{print \$2}" || true)
         luks_uuid=$(cryptsetup luksUUID "$backing" 2>/dev/null || true)
@@ -1144,10 +1317,12 @@ PY
 ###############################################################################
 deploy_extra_units() {
     local u
+    # No Environment=BACKUP_MOUNT/BORG_REPO in any unit: the scripts read
+    # /etc/backup-system.conf themselves, and a unit's Environment= outranks
+    # the config, so a BORG_REPO set there was silently ignored by the timer.
     for u in backup-verify luks-header-backup; do
         [ -f "$SCRIPT_DIR/$u.service" ] || continue
         sed -e "s#/mnt/backup#$BACKUP_MOUNT#g" \
-            -e "s#^Environment=BORG_REPO=.*#Environment=BORG_REPO=$BACKUP_MOUNT/borg-backup#" \
             "$SCRIPT_DIR/$u.service" > "/etc/systemd/system/$u.service"
         [ -f "$SCRIPT_DIR/$u.timer" ] && install -m 644 "$SCRIPT_DIR/$u.timer" "/etc/systemd/system/$u.timer"
     done
@@ -1163,10 +1338,11 @@ deploy_extra_units() {
     # The udev rule is a template: it fires on the backup drive's LUKS UUID from
     # /etc/backup-system.conf. No UUID known (plain drive, or unconfigured) means
     # no rule — never a rule pinned to some other machine's disk.
-    local dev_uuid
+    local dev_uuid fs_uuid
     dev_uuid=$(. /etc/backup-system.conf 2>/dev/null; echo "${BACKUP_LUKS_UUID:-${BACKUP_FS_UUID:-}}")
+    fs_uuid=$(. /etc/backup-system.conf 2>/dev/null; echo "${BACKUP_FS_UUID:-}")
     if [ -f "$SCRIPT_DIR/99-borg-backup.rules" ] && [ -n "$dev_uuid" ]; then
-        sed "s#@BACKUP_DEV_UUID@#$dev_uuid#g" "$SCRIPT_DIR/99-borg-backup.rules" \
+        sed -e "s#@BACKUP_DEV_UUID@#$dev_uuid#g" -e "s#@BACKUP_FS_UUID@#${fs_uuid:-$dev_uuid}#g" "$SCRIPT_DIR/99-borg-backup.rules" \
             > /etc/udev/rules.d/99-borg-backup.rules
         chmod 644 /etc/udev/rules.d/99-borg-backup.rules
     else
@@ -1239,29 +1415,25 @@ log "Packages verified."
 log "Deploying scripts..."
 
 # BIT scripts — always deploy
-cp "$SCRIPT_DIR/backintime-backup.sh" /usr/local/sbin/backintime-backup.sh
-chmod +x /usr/local/sbin/backintime-backup.sh
+install -m 755 "$SCRIPT_DIR/backintime-backup.sh" /usr/local/sbin/backintime-backup.sh
 
 # Restore scripts — always deploy (bug-fixed versions)
 for script in backintime-restore.sh borg-restore.sh restore.sh; do
-    cp "$SCRIPT_DIR/$script" "/usr/local/sbin/$script"
-    chmod +x "/usr/local/sbin/$script"
+    install -m 755 "$SCRIPT_DIR/$script" "/usr/local/sbin/$script"
 done
 
 # Borg backup script — only if not already deployed
 if [ "$BORG_ALREADY_DEPLOYED" = false ] || [ "${FORCE_BORG:-0}" = "1" ]; then
-    cp "$SCRIPT_DIR/borg-backup.sh" /usr/local/sbin/borg-backup.sh
-    chmod +x /usr/local/sbin/borg-backup.sh
+    install -m 755 "$SCRIPT_DIR/borg-backup.sh" /usr/local/sbin/borg-backup.sh
     log "  Borg script deployed."
 else
     log "  Borg script: existing /usr/local/sbin/borg-backup.sh preserved."
 fi
 # Universal library + verifier + header backup + drive-attach + snapper patch
-cp "$SCRIPT_DIR/backup-common.sh" /usr/local/sbin/backup-common.sh
-chmod 644 /usr/local/sbin/backup-common.sh
+install -m 644 "$SCRIPT_DIR/backup-common.sh" /usr/local/sbin/backup-common.sh
 [ -f "$SCRIPT_DIR/lib-cmdline.sh" ] && install -m 644 "$SCRIPT_DIR/lib-cmdline.sh" /usr/local/sbin/lib-cmdline.sh
 for s in backup-verify.sh luks-header-backup.sh; do
-    [ -f "$SCRIPT_DIR/$s" ] && { cp "$SCRIPT_DIR/$s" "/usr/local/sbin/$s"; chmod 700 "/usr/local/sbin/$s"; }
+    [ -f "$SCRIPT_DIR/$s" ] && install -m 700 "$SCRIPT_DIR/$s" "/usr/local/sbin/$s"
 done
 # restore helper must sit next to the restore scripts (they find it via their own dir)
 [ -f "$SCRIPT_DIR/restore-rebuild-boot.sh" ] && install -m 755 "$SCRIPT_DIR/restore-rebuild-boot.sh" /usr/local/sbin/restore-rebuild-boot.sh
@@ -1279,25 +1451,25 @@ log "Scripts deployed."
 
 # Step 3: Deploy backup tray
 log "Deploying backup tray indicator..."
-cp "$SCRIPT_DIR/backup-tray.py" /usr/local/bin/backup-tray
-chmod +x /usr/local/bin/backup-tray
+install -m 755 "$SCRIPT_DIR/backup-tray.py" /usr/local/bin/backup-tray
 mkdir -p "$USER_HOME/.config/autostart"
 cp "$SCRIPT_DIR/backup-tray.desktop" "$USER_HOME/.config/autostart/"
-chown "$SUDO_USER:$SUDO_USER" "$USER_HOME/.config/autostart/backup-tray.desktop"
+chown "$SUDO_USER:" "$USER_HOME/.config/autostart/backup-tray.desktop"
 restart_tray
 log "Tray indicator deployed."
 
 # Step 4: Generate BIT config
 log "Generating Back in Time config..."
 mkdir -p /root/.config/backintime
-generate_bit_config
-if [ "$HAS_ECRYPTFS" = true ]; then
-    log "  ecryptfs detected — excluding /home/$SUDO_USER (encrypted view)"
+if generate_bit_config; then
+    if [ "$HAS_ECRYPTFS" = true ]; then
+        log "  ecryptfs detected — excluding /home/$SUDO_USER (encrypted view)"
+    fi
+    if [ "$HAS_BTRFS" = true ]; then
+        log "  btrfs detected — excluding /.snapshots, /home/.snapshots, /.backup-snapshots"
+    fi
+    log "  Config written to /root/.config/backintime/config"
 fi
-if [ "$HAS_BTRFS" = true ]; then
-    log "  btrfs detected — excluding /.snapshots, /home/.snapshots, /.backup-snapshots"
-fi
-log "  Config written to /root/.config/backintime/config"
 
 # Step 5: Create snapshot directory
 mkdir -p "$BACKUP_MOUNT/backintime" 2>/dev/null || true
@@ -1369,7 +1541,8 @@ BITBACK_FUNC="bitback() {
 }"
 
 TIMEBACK_FUNC="timeback() {
-    local BORG_REPO=\"$BACKUP_MOUNT/borg-backup\"
+    local BORG_REPO
+    BORG_REPO=\$(. /etc/backup-system.conf 2>/dev/null; echo \"\${BORG_REPO:-$BACKUP_MOUNT/borg-backup}\")
     if ! mountpoint -q $BACKUP_MOUNT 2>/dev/null; then echo \"ERROR: $BACKUP_MOUNT not mounted\"; return 1; fi
     case \"\${1:-}\" in
         list) sudo borg list \"\$BORG_REPO\" ;; info) sudo borg info \"\$BORG_REPO\" ;;
@@ -1397,7 +1570,13 @@ done
 
 # Step 9: Verify BIT config
 log "Verifying BIT config..."
-backintime --config /root/.config/backintime/config check-config 2>&1 | grep -iE 'done|fine|error' || true
+# check-config also (re)installs BIT's crontab unless told not to; the suite,
+# not cron, runs Back In Time. Older BIT without --no-crontab: skip the check.
+if backintime check-config --help 2>&1 | grep -q -- '--no-crontab'; then
+    backintime --config /root/.config/backintime/config check-config --no-crontab 2>&1 | grep -iE 'done|fine|error' || true
+else
+    log "  (backintime check-config lacks --no-crontab on this version — check skipped rather than let it install a crontab)"
+fi
 
 # Step 10: Summary
 echo ""

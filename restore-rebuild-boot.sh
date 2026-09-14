@@ -128,18 +128,41 @@ if [ "$IS_EFI" = false ]; then
     for d in /boot/firmware /boot; do [ -f "$d/config.txt" ] && { IS_PI_FW=true; PI_FW_DIR="$d"; break; }; done
 fi
 
-# Kernel form: UKI if the ESP holds unified images, or kernel-install is set to uki.
-IS_UKI=false
-if [ -n "$ESP" ] && compgen -G "$ESP/EFI/Linux/*.efi" >/dev/null 2>&1; then IS_UKI=true; fi
-grep -qs 'layout[[:space:]]*=[[:space:]]*uki' /etc/kernel/install.conf 2>/dev/null && IS_UKI=true
+# Kernel form: UKI if the ESP — or an XBOOTLDR /boot — holds unified images,
+# or kernel-install is set to uki. And WHICH tool built them: the one whose
+# config says so. Preferring kernel-install because it exists (it exists on
+# every systemd host) on an Arch box whose UKIs come from mkinitcpio presets
+# left the restored UKIs with the OLD command line embedded.
+IS_UKI=false; UKI_TOOL=""
+for _d in ${ESP:+"$ESP/EFI/Linux"} /boot/EFI/Linux /boot/efi/EFI/Linux /efi/EFI/Linux; do
+    compgen -G "$_d/*.efi" >/dev/null 2>&1 && { IS_UKI=true; break; }
+done
+grep -qs 'layout[[:space:]]*=[[:space:]]*uki' /etc/kernel/install.conf /etc/kernel/install.conf.d/*.conf 2>/dev/null && IS_UKI=true
+if [ "$IS_UKI" = true ]; then
+    if grep -qsE '^[[:space:]]*default_uki=|^[[:space:]]*fallback_uki=' /etc/mkinitcpio.d/*.preset 2>/dev/null && command -v mkinitcpio >/dev/null 2>&1; then
+        UKI_TOOL=mkinitcpio
+    elif grep -qsE '^[[:space:]]*uefi=["'"'"']?yes' /etc/dracut.conf /etc/dracut.conf.d/*.conf 2>/dev/null && command -v dracut >/dev/null 2>&1; then
+        UKI_TOOL=dracut
+    elif grep -qs 'layout[[:space:]]*=[[:space:]]*uki' /etc/kernel/install.conf /etc/kernel/install.conf.d/*.conf 2>/dev/null && command -v kernel-install >/dev/null 2>&1; then
+        UKI_TOOL=kernel-install
+    elif command -v kernel-install >/dev/null 2>&1; then UKI_TOOL=kernel-install
+    elif command -v dracut >/dev/null 2>&1; then UKI_TOOL=dracut
+    elif command -v mkinitcpio >/dev/null 2>&1; then UKI_TOOL=mkinitcpio
+    fi
+fi
 
 # Bootloader: GRUB if a grub.cfg exists; systemd-boot if its EFI binary is on the
 # ESP (or bootctl reports installed) — checked independently, a host can have one
 # or the other. loader/entries alone does NOT mean systemd-boot: Fedora GRUB uses
 # BLS entries in /boot/loader/entries too.
+# GRUB is in use when its config exists (or /etc/default/grub next to a
+# /boot/grub{,2} directory). NOT merely because the grub package is installed:
+# a systemd-boot host with grub still on disk (Manjaro after a migration) got
+# grub-install onto its ESP and a new default NVRAM entry pointing at a GRUB
+# with no config.
 USES_GRUB=false
 { [ -f /boot/grub2/grub.cfg ] || [ -f /boot/grub/grub.cfg ] \
-  || command -v grub2-mkconfig >/dev/null 2>&1 || command -v grub-mkconfig >/dev/null 2>&1; } && USES_GRUB=true
+  || { [ -f /etc/default/grub ] && { [ -d /boot/grub2 ] || [ -d /boot/grub ]; }; }; } && USES_GRUB=true
 USES_SDBOOT=false
 if [ -n "$ESP" ] && compgen -G "$ESP/EFI/systemd/systemd-boot*.efi" >/dev/null 2>&1; then
     USES_SDBOOT=true
@@ -199,6 +222,48 @@ boot_src=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//')
 [ -z "$boot_src" ] && boot_src=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*//')
 [[ "$boot_src" == /dev/mapper/* ]] && BOOT_ON_LUKS=true
 
+# The WHOLE DISK a device sits on, through LUKS/LVM/RAID and partitions. A
+# BIOS grub-install wants the disk; `lsblk PKNAME` of /dev/mapper/cryptboot
+# gave the partition, and grub-install refused it ("will not proceed with
+# blocklists") — no MBR written.
+disk_of() {
+    local d kn pk sl
+    d=$(readlink -f "$1" 2>/dev/null) || return 1; kn=$(basename "$d")
+    while :; do
+        sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1 || true)
+        if [ -n "$sl" ]; then kn="$sl"; continue; fi
+        pk=$(lsblk -dno PKNAME "/dev/$kn" 2>/dev/null | head -1 || true)
+        if [ -n "$pk" ]; then kn="$pk"; continue; fi
+        break
+    done
+    [ -b "/dev/$kn" ] && echo "/dev/$kn"
+}
+
+# kernel-install takes the command line from /etc/kernel/cmdline, else
+# /usr/lib/kernel/cmdline, else /proc/cmdline — which, in this chroot, is the
+# LIVE USB's (root=live:CDLABEL=… rd.live.image). Baked into a UKI or a Type #1
+# entry that is the only bootable image. Make sure a real one exists first,
+# from the restored (already id-rewritten) loader entries if need be.
+ensure_kernel_cmdline() {
+    [ -s /etc/kernel/cmdline ] && return 0
+    [ -s /usr/lib/kernel/cmdline ] && return 0
+    local e opts=""
+    for e in ${ESP:+"$ESP"/loader/entries/*.conf} /boot/loader/entries/*.conf /efi/loader/entries/*.conf /boot/efi/loader/entries/*.conf; do
+        [ -f "$e" ] || continue
+        opts=$(awk '$1=="options"{ $1=""; sub(/^ /,""); printf "%s ", $0 }' "$e" | sed 's/ $//')
+        [ -n "$opts" ] && break
+    done
+    if [ -z "$opts" ] && [ -f /etc/default/grub ]; then
+        opts=$( . /etc/default/grub 2>/dev/null; echo "${GRUB_CMDLINE_LINUX:-} ${GRUB_CMDLINE_LINUX_DEFAULT:-}" | sed 's/^ //; s/ $//')
+    fi
+    if [ -z "$opts" ]; then
+        warn "no /etc/kernel/cmdline and no restored loader entry to take one from — kernel-install would embed the LIVE system's command line; skipped. Write /etc/kernel/cmdline (root=… etc.) and run kernel-install add by hand."
+        return 1
+    fi
+    say "writing /etc/kernel/cmdline from the restored loader entry: $opts"
+    runsh "mkdir -p /etc/kernel && printf '%s\\n' '$opts' > /etc/kernel/cmdline"
+}
+
 say "distro=$DISTRO_FAMILY arch=$ARCH efi=$IS_EFI esp=${ESP:-none}"
 say "kernels: ${KVERS[*]:-none}"
 say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT limine=$USES_LIMINE refind=$USES_REFIND pi_firmware=$IS_PI_FW"
@@ -209,17 +274,19 @@ say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB s
 # ---------------------------------------------------------------------------
 say "===== kernel / initramfs rebuild ====="
 if [ "$IS_UKI" = true ]; then
-    say "UKI layout — regenerating unified images"
-    if command -v kernel-install >/dev/null 2>&1; then
-        for kv in "${KVERS[@]}"; do
-            img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
-            run kernel-install add "$kv" "$img"
-        done
-    elif command -v dracut >/dev/null 2>&1; then
-        for kv in "${KVERS[@]}"; do run dracut --force --uefi --kver "$kv"; done
-    else
-        warn "no kernel-install or dracut — cannot regenerate UKI"
-    fi
+    say "UKI layout — regenerating unified images with ${UKI_TOOL:-?}"
+    case "$UKI_TOOL" in
+        mkinitcpio) run mkinitcpio -P ;;
+        dracut)     for kv in "${KVERS[@]}"; do run dracut --force --uefi --kver "$kv"; done ;;
+        kernel-install)
+            if ensure_kernel_cmdline; then
+                for kv in "${KVERS[@]}"; do
+                    img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
+                    run kernel-install add "$kv" "$img"
+                done
+            fi ;;
+        *) warn "no mkinitcpio, dracut or kernel-install — cannot regenerate UKIs" ;;
+    esac
 else
     if command -v update-initramfs >/dev/null 2>&1; then
         say "Debian family — update-initramfs -k all -c"
@@ -270,18 +337,34 @@ if [ "$USES_GRUB" = true ]; then
     if [ "$IS_EFI" = true ]; then
         case "$ARCH" in x86_64) gt=x86_64-efi;; aarch64) gt=arm64-efi;; *) gt="$ARCH-efi";; esac
         bid="${ID:-linux}"; edir="${ESP:-/boot/efi}"
-        if command -v grub2-install >/dev/null 2>&1; then
-            run grub2-install --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck
-        elif command -v grub-install >/dev/null 2>&1; then
-            run grub-install --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck
+        gi=""; command -v grub2-install >/dev/null 2>&1 && gi=grub2-install
+        [ -z "$gi" ] && command -v grub-install >/dev/null 2>&1 && gi=grub-install
+        if [ "$DISTRO_FAMILY" = fedora ] && compgen -G "$edir/EFI/$bid/shim*.efi" >/dev/null 2>&1; then
+            # Fedora/RHEL boot shim -> the SIGNED grubx64.efi from the grub2-efi
+            # package. grub2-install would replace it with an unsigned image
+            # (Secure Boot then refuses it) or fail for lack of the modules
+            # package; the binaries were restored with the files and need no
+            # reinstall. The ESP stub EFI/<id>/grub.cfg was id-rewritten by
+            # the restore script.
+            say "Fedora family with shim on the ESP — keeping the signed GRUB image, not running $gi"
+            say "(if the ESP was empty or damaged: dnf reinstall shim-x64 grub2-efi-x64 restores it)"
+        elif [ -n "$gi" ]; then
+            if ! run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck; then
+                # A firmware that refuses NVRAM writes (efivars read-only, some
+                # VMs, Apple): install the files anyway, and as the removable-
+                # media fallback path the firmware tries without any entry.
+                warn "$gi failed — retrying without touching NVRAM, plus the removable-media fallback (EFI/BOOT/BOOT*.EFI)"
+                run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck --no-nvram || true
+                run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck --no-nvram --removable || true
+            fi
         fi
     else
-        disk=$(lsblk -npo PKNAME "$boot_src" 2>/dev/null | head -1)
+        disk=$(disk_of "$boot_src" 2>/dev/null || true)
         if [ -n "$disk" ]; then
             command -v grub2-install >/dev/null 2>&1 && run grub2-install "$disk" --recheck \
                 || { command -v grub-install >/dev/null 2>&1 && run grub-install "$disk" --recheck; }
         else
-            warn "could not determine BIOS boot disk for grub-install"
+            warn "could not determine BIOS boot disk for grub-install (from $boot_src)"
         fi
     fi
     # Regenerate config
@@ -298,15 +381,33 @@ fi
 if [ "$USES_SDBOOT" = true ]; then
     say "===== systemd-boot ====="
     if command -v bootctl >/dev/null 2>&1; then
-        run bootctl ${ESP:+--esp-path="$ESP"} install
-        # kernel-install writes Type#1 entries (or UKIs) per the install layout
-        if command -v kernel-install >/dev/null 2>&1; then
-            for kv in "${KVERS[@]}"; do
-                img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
-                run kernel-install add "$kv" "$img"
-            done
+        if ! run bootctl ${ESP:+--esp-path="$ESP"} install; then
+            warn "bootctl install failed — retrying without NVRAM variables (the firmware boots EFI/BOOT/BOOT*.EFI, which bootctl also writes)"
+            run bootctl ${ESP:+--esp-path="$ESP"} --no-variables install || true
+        fi
+        # kernel-install writes Type#1 entries (or UKIs) per the install layout.
+        # Only where kernel-install owns the entries: on a mkinitcpio host the
+        # restored entries are already right (their ids were rewritten) and
+        # kernel-install would add a second set with the live USB's cmdline.
+        if [ "$IS_UKI" = true ] && [ "$UKI_TOOL" != kernel-install ]; then
+            say "entries/UKIs are managed by $UKI_TOOL (rebuilt above) — not running kernel-install"
+        elif command -v kernel-install >/dev/null 2>&1 && compgen -G "${ESP:-/boot}/$(cat /etc/machine-id 2>/dev/null)/*" >/dev/null 2>&1; then
+            if ensure_kernel_cmdline; then
+                for kv in "${KVERS[@]}"; do
+                    img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
+                    run kernel-install add "$kv" "$img"
+                done
+            fi
+        elif command -v kernel-install >/dev/null 2>&1 && ! compgen -G "${ESP:-/boot}/loader/entries/*.conf" >/dev/null 2>&1 && ! compgen -G "/boot/loader/entries/*.conf" >/dev/null 2>&1; then
+            # no entries at all were restored: let kernel-install create them
+            if ensure_kernel_cmdline; then
+                for kv in "${KVERS[@]}"; do
+                    img="/lib/modules/$kv/vmlinuz"; [ -f "$img" ] || img="/boot/vmlinuz-$kv"
+                    run kernel-install add "$kv" "$img"
+                done
+            fi
         else
-            warn "bootctl present but kernel-install missing — loader entries may be incomplete"
+            say "loader entries restored with the files (ids rewritten) — kept as they are"
         fi
     else
         warn "systemd-boot detected but bootctl not available"
@@ -387,6 +488,21 @@ if [ "$IS_PI_FW" = true ]; then
         || say "config.txt loads no initramfs — kernel*.img boots the root directly"
 elif [ "$USES_GRUB" = false ] && [ "$USES_SDBOOT" = false ] && [ "$USES_LIMINE" = false ] && [ "$USES_REFIND" = false ]; then
     warn "no bootloader detected (neither GRUB, systemd-boot, Limine, rEFInd nor Pi firmware) — boot install skipped"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Secure Boot: everything regenerated above is unsigned. A host enrolled
+#    with its own keys (sbctl) refuses them at the firmware until re-signed;
+#    the sbctl pacman hook does not fire here. Sign what sbctl knows about.
+# ---------------------------------------------------------------------------
+if command -v sbctl >/dev/null 2>&1 && { [ -d /var/lib/sbctl ] || [ -d /usr/share/secureboot/keys ]; }; then
+    say "===== Secure Boot (sbctl keys present) ====="
+    run sbctl sign-all || warn "sbctl sign-all reported errors — sign the loader and kernels by hand before rebooting"
+    if (( ! DRY )); then sbctl verify 2>&1 | sed 's/^/[rebuild-boot]   /' || true; fi
+elif [ "$IS_EFI" = true ] && command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -q enabled; then
+    if ! compgen -G "${ESP:-/boot/efi}/EFI/*/shim*.efi" >/dev/null 2>&1; then
+        warn "Secure Boot is enabled, no shim on the ESP and no sbctl keys — the firmware may refuse the (unsigned) loader/kernels rebuilt above; disable Secure Boot for the first boot or sign them"
+    fi
 fi
 
 say "===== boot rebuild ${DRY:+(dry run) }complete ====="

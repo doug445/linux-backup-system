@@ -116,6 +116,11 @@ fi
 [ -d "$TARGET" ] || fatal "Target $TARGET does not exist"
 [ -d "$BIT_BASE" ] || fatal "BIT base $BIT_BASE does not exist"
 mountpoint -q "$TARGET" || fatal "$TARGET is not a mountpoint"
+# Never onto the system this is running from: "/" is a mountpoint too, and so
+# is a bind mount of it.
+[ "$TARGET" != / ] || fatal "refusing to restore onto / — the running system. Boot a live USB and mount the new disk at a target path."
+[ "$(findmnt -no SOURCE --target "$TARGET" 2>/dev/null)" != "$(findmnt -no SOURCE / 2>/dev/null)" ] \
+    || fatal "$TARGET is the running root filesystem ($(findmnt -no SOURCE / 2>/dev/null)) — refusing to restore over the live system"
 
 ###############################################################################
 # Step 1: Find and select snapshot
@@ -124,14 +129,22 @@ log "========== BIT RESTORE SESSION START =========="
 log "Date: $(date)"
 log "Live system kernel: $(uname -r)"
 
-# Discover hostname from snapshots
-HOSTNAME_DIR=""
-for d in "$BIT_BASE"/backintime/*/; do
-    [ -d "$d" ] && HOSTNAME_DIR="$d" && break
-done
-[ -n "$HOSTNAME_DIR" ] || fatal "No hostname directory found under $BIT_BASE/backintime/"
-BIT_HOST=$(basename "$HOSTNAME_DIR")
-log "Detected backup hostname: $BIT_HOST"
+# Which host's chain: one drive can hold several. The first directory
+# alphabetically used to win, with no choice offered.
+mapfile -t _HOSTS < <(for d in "$BIT_BASE"/backintime/*/; do [ -d "$d" ] && basename "$d"; done)
+[ ${#_HOSTS[@]} -gt 0 ] || fatal "No hostname directory found under $BIT_BASE/backintime/"
+BIT_HOST="${RESTORE_HOST:-}"
+if [ -z "$BIT_HOST" ] && [ ${#_HOSTS[@]} -eq 1 ]; then BIT_HOST="${_HOSTS[0]}"; fi
+if [ -z "$BIT_HOST" ]; then
+    if [ -t 0 ]; then
+        echo "Back In Time chains from ${#_HOSTS[@]} hosts:"
+        select BIT_HOST in "${_HOSTS[@]}"; do [ -n "$BIT_HOST" ] && break; done
+    else
+        fatal "chains from several hosts (${_HOSTS[*]}) — set RESTORE_HOST=<name>"
+    fi
+fi
+[ -d "$BIT_BASE/backintime/$BIT_HOST" ] || fatal "no chain for host '$BIT_HOST' under $BIT_BASE/backintime/"
+log "Backup host: $BIT_HOST"
 
 SNAPSHOT_BASE="$BIT_BASE/backintime/$BIT_HOST/root/1"
 [ -d "$SNAPSHOT_BASE" ] || fatal "Snapshot base not found: $SNAPSHOT_BASE"
@@ -145,7 +158,7 @@ echo -e "${BOLD}============================================================${NC
 SNAPSHOTS=()
 while IFS= read -r snap_dir; do
     snap_name=$(basename "$snap_dir")
-    if [ -d "$snap_dir/backup" ]; then
+    if [ -d "$snap_dir/backup" ] && [ ! -e "$snap_dir/failed" ]; then
         SNAPSHOTS+=("$snap_name")
         # Parse date from snapshot name (YYYYMMDD-HHMMSS)
         snap_date="${snap_name:0:4}-${snap_name:4:2}-${snap_name:6:2} ${snap_name:9:2}:${snap_name:11:2}:${snap_name:13:2}"
@@ -197,6 +210,17 @@ echo ""
 echo -e "${CYAN}Restoring files via rsync... this may take a while.${NC}"
 echo ""
 
+if (( ! DRY )) && [ -t 0 ]; then
+    echo ""
+    echo "  Snapshot: $SNAPSHOT_NAME  (host $BIT_HOST)"
+    echo "  Target:   $TARGET  ($(findmnt -no SOURCE,FSTYPE --target "$TARGET" 2>/dev/null))"
+    echo ""
+    read -rp "Copy this snapshot onto $TARGET? [y/N] " _ans
+    [[ "$_ans" =~ ^[yY] ]] || fatal "cancelled"
+fi
+# rc 23/24 are partial-transfer warnings; under set -e a bare rsync aborted the
+# script on them, after the copy and before any fixup.
+rsync_rc=0
 rsync -aAXH --numeric-ids --info=progress2 ${DRY:+--dry-run} \
     --exclude='/dev/*' \
     --exclude='/proc/*' \
@@ -205,9 +229,7 @@ rsync -aAXH --numeric-ids --info=progress2 ${DRY:+--dry-run} \
     --exclude='/run/*' \
     --exclude='/mnt/*' \
     --exclude='/media/*' \
-    "$SNAPSHOT_PATH/" "$TARGET/"
-
-rsync_rc=$?
+    "$SNAPSHOT_PATH/" "$TARGET/" || rsync_rc=$?
 
 if [ "$rsync_rc" -eq 0 ]; then
     log "Restore completed successfully (rc=0)"
@@ -217,11 +239,13 @@ else
     log "WARNING: rsync finished with rc=$rsync_rc"
 fi
 
-# Ensure essential directories exist
-for d in dev proc sys tmp run mnt media; do
-    mkdir -p "$TARGET/$d"
-done
-chmod 1777 "$TARGET/tmp"
+# Ensure essential directories exist (not in a dry run: it writes nothing)
+if (( ! DRY )); then
+    for d in dev proc sys tmp run mnt media; do
+        mkdir -p "$TARGET/$d"
+    done
+    chmod 1777 "$TARGET/tmp"
+fi
 
 log "File restoration complete."
 
@@ -324,6 +348,7 @@ log "Root device: $TARGET_ROOT_DEV (fstype=$TARGET_ROOT_FSTYPE) → UUID=$ROOT_U
 
 # For btrfs: detect the raw device (strip [/subvol] from source)
 BTRFS_RAW_DEV=""
+ROOT_SUBVOL=""   # set -u: every ext4/xfs/LVM restore died here as "unbound variable" after extraction
 if [ "$TARGET_ROOT_FSTYPE" = "btrfs" ]; then
     BTRFS_RAW_DEV=$(echo "$TARGET_ROOT_DEV" | sed 's/\[.*\]//')
     ROOT_UUID=$(blkid -s UUID -o value "$BTRFS_RAW_DEV" 2>/dev/null) || true
@@ -402,18 +427,38 @@ if [ -n "$EFI_MNT" ] && [ "$EFI_MNT" != /boot ] && [ -n "${BOOT_DEV:-}" ] \
     esac
 fi
 
-# Detect swap (LVM swap, partition swap, or zram)
-SWAP_UUID=""; SWAP_DEV=""
-for dev in /dev/mapper/vg*-swap* /dev/mapper/*-swap* /dev/sd*[0-9] /dev/nvme*p[0-9]; do
-    [ -b "$dev" ] || continue
-    dev_type=$(blkid -s TYPE -o value "$dev" 2>/dev/null || true)
-    if [ "$dev_type" = "swap" ]; then
-        SWAP_DEV="$dev"
-        SWAP_UUID=$(blkid -s UUID -o value "$dev" 2>/dev/null) || true
-        log "Swap device: $dev → UUID=$SWAP_UUID"
+# Detect swap — only on the disk(s) the target itself lives on. The first
+# swap-typed device on ANY disk used to win: the live USB's, another OS's,
+# another drive's, and resume= then pointed at a device the restored system
+# never has (a 30-90 s "gave up waiting for suspend/resume device" per boot).
+# Every device type: LVM/dm swap, partitions on sd*/nvme*/mmcblk*/vd*.
+_disk_of() {
+    local d kn pk sl
+    d=$(readlink -f "$1" 2>/dev/null) || return 1; kn=$(basename "$d")
+    while :; do
+        sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1 || true)
+        if [ -n "$sl" ]; then kn="$sl"; continue; fi
+        pk=$(lsblk -dno PKNAME "/dev/$kn" 2>/dev/null | head -1 || true)
+        if [ -n "$pk" ]; then kn="$pk"; continue; fi
         break
-    fi
+    done
+    echo "/dev/$kn"
+}
+TARGET_DISKS=" "
+for _d in "${BTRFS_RAW_DEV:-$TARGET_ROOT_DEV}" "${BOOT_DEV:-}" "${EFI_DEV:-}"; do
+    [ -n "$_d" ] || continue
+    TARGET_DISKS="$TARGET_DISKS$(_disk_of "$_d" 2>/dev/null || true) "
 done
+SWAP_UUID=""; SWAP_DEV=""
+while read -r dev; do
+    [ -b "$dev" ] || continue
+    case "$TARGET_DISKS" in *" $(_disk_of "$dev" 2>/dev/null || true) "*) ;; *) continue ;; esac
+    SWAP_DEV="$dev"
+    SWAP_UUID=$(blkid -s UUID -o value "$dev" 2>/dev/null) || true
+    log "Swap device: $dev → UUID=$SWAP_UUID"
+    break
+done < <(lsblk -rno PATH,FSTYPE 2>/dev/null | awk '$2=="swap"{print $1}')
+[ -n "$SWAP_DEV" ] || log "No swap device on the target disk(s) (${TARGET_DISKS# }) — resume= references, if any, are left for the check below"
 
 # Detect LUKS UUIDs (for crypttab)
 HAS_LUKS=false
@@ -588,6 +633,48 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
         fi
     done
 
+    # Entries no open mapper matched BY NAME. Fedora names its mapper
+    # luks-<OLD-UUID>; on the new disk the container is opened as
+    # luks-<NEW-UUID> or cryptroot, nothing matched, crypttab kept the old
+    # id and the initramfs was rebuilt against it. With exactly one unmatched
+    # entry whose device is gone and exactly one open container no entry
+    # names, they are each other's.
+    _matched=" "
+    for mapper_name in "${!LUKS_MAP[@]}"; do
+        [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$mapper_name")" ] && _matched="$_matched$mapper_name "
+    done
+    _unmatched_maps=()
+    for mapper_name in "${!LUKS_MAP[@]}"; do
+        case "$_matched" in *" $mapper_name "*) ;; *) _unmatched_maps+=("$mapper_name") ;; esac
+    done
+    _unmatched_entries=()
+    while read -r _name; do
+        [ -n "$_name" ] || continue
+        [ -n "${LUKS_MAP[$_name]:-}" ] && continue
+        c_kind=""; c_old=""
+        IFS=$'\t' read -r c_kind c_old < <(cl_crypttab_ref "$CRYPTTAB" "$_name") || true
+        case "$c_kind" in UUID|PARTUUID) ;; *) continue ;; esac
+        cl_ref_exists "$c_kind" "$c_old" && continue      # still present: a second drive carried over
+        _unmatched_entries+=("$_name")
+    done < <(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CRYPTTAB")
+    if [ ${#_unmatched_entries[@]} -eq 1 ] && [ ${#_unmatched_maps[@]} -eq 1 ]; then
+        _name="${_unmatched_entries[0]}"; mapper_name="${_unmatched_maps[0]}"
+        c_kind=""; c_old=""; c_new=""
+        IFS=$'\t' read -r c_kind c_old < <(cl_crypttab_ref "$CRYPTTAB" "$_name") || true
+        if [ "$c_kind" = UUID ]; then c_new="${LUKS_MAP[$mapper_name]}"
+        else c_new=$(blkid -s "$c_kind" -o value "${LUKS_DEV[$mapper_name]:-}" 2>/dev/null || true); fi
+        if [ -n "$c_new" ]; then
+            warn "crypttab entry '$_name' ($c_kind=$c_old, no such device here) is the only unmatched entry and '$mapper_name' (${LUKS_DEV[$mapper_name]:-?}) the only open container no entry names — pairing them"
+            case "$c_kind" in UUID|PARTUUID) echo "$c_old $c_new" >> "$LUKS_ID_MAP" ;; esac
+            cl_table_set_ref "$CRYPTTAB" 2 "$c_kind" "$c_old" "$c_new"
+            log "  Updated $_name $c_kind: $c_old → $c_new (the mapper keeps the name '$_name'; the initramfs creates it from crypttab)"
+        fi
+    elif [ ${#_unmatched_entries[@]} -gt 0 ]; then
+        for _name in "${_unmatched_entries[@]}"; do
+            warn "crypttab entry '$_name' names a device that does not exist here and no open mapper is called '$_name' — open the new container under that name (cryptsetup open <dev> $_name) and re-run, or fix crypttab by hand; the check below will flag it"
+        done
+    fi
+
     # Comment out backup-crypt entry
     if grep -q '^backup-crypt' "$CRYPTTAB"; then
         sed -i '/^backup-crypt/s/^/#RESTORED# /' "$CRYPTTAB"
@@ -621,6 +708,35 @@ ID_MAP="$(mktemp /tmp/restore-idmap.XXXXXX)"
     [ -n "$OLD_SWAP_UUID" ] && [ -n "$SWAP_UUID" ] && echo "$OLD_SWAP_UUID $SWAP_UUID"
     [ -n "${LUKS_ID_MAP:-}" ] && [ -s "$LUKS_ID_MAP" ] && cat "$LUKS_ID_MAP"
 } > "$ID_MAP"
+# Command lines that bind a container id to a mapper NAME — cryptdevice=
+# UUID=<id>:<name> (Arch encrypt hook), rd.luks.name=<id>=<name> (dracut,
+# sd-encrypt) — declare the root container themselves, not in crypttab, so
+# crypttab alone never yields their new id. The name is the bridge to the
+# container opened under it.
+if [ "$HAS_LUKS" = true ]; then
+    while IFS=$'\t' read -r _oid _mname; do
+        [ -n "$_oid" ] && [ -n "${LUKS_MAP[$_mname]:-}" ] || continue
+        _nid=$(tr '[:upper:]' '[:lower:]' <<<"${LUKS_MAP[$_mname]}")
+        [ "$_oid" != "$_nid" ] || continue
+        grep -qi "^$_oid " "$ID_MAP" && continue
+        echo "$_oid ${LUKS_MAP[$_mname]}" >> "$ID_MAP"
+        log "  mapped LUKS $_oid → ${LUKS_MAP[$_mname]} through mapper name '$_mname' (declared on the command line, not in crypttab)"
+    done < <(cl_find_carriers "$TARGET" | while IFS=$'\t' read -r _k _f; do cl_luks_name_pairs "$_f"; done | sort -u)
+    # A single rd.luks.uuid=/luks.uuid= id that is stale and still unmapped,
+    # and a single open container nothing maps to yet: that is it.
+    _mapped_new=" $(awk '{print tolower($2)}' "$ID_MAP" | tr '\n' ' ') "
+    _unmapped=()
+    for mapper_name in "${!LUKS_MAP[@]}"; do
+        case "$_mapped_new" in *" $(tr '[:upper:]' '[:lower:]' <<<"${LUKS_MAP[$mapper_name]}") "*) ;; *) _unmapped+=("$mapper_name") ;; esac
+    done
+    _stale_luks=$(cl_find_carriers "$TARGET" | while IFS=$'\t' read -r _k _f; do cl_ids_in_file "$_f"; done \
+                  | awk '$1=="luks"{print $2}' | sort -u \
+                  | while read -r _id; do cl_id_exists luks "$_id" || grep -qi "^$_id " "$ID_MAP" || echo "$_id"; done)
+    if [ "$(wc -w <<<"$_stale_luks")" -eq 1 ] && [ ${#_unmapped[@]} -eq 1 ]; then
+        echo "$_stale_luks ${LUKS_MAP[${_unmapped[0]}]}" >> "$ID_MAP"
+        warn "command line names LUKS container $_stale_luks, which does not exist here; '${_unmapped[0]}' (${LUKS_DEV[${_unmapped[0]}]:-?}) is the only open container nothing else maps to — mapping them"
+    fi
+fi
 log "Rewriting kernel command-line carriers ($(grep -c . "$ID_MAP") id mappings)..."
 n_carriers=$(cl_find_carriers "$TARGET" | wc -l)
 log "  carriers found under $TARGET: $n_carriers"
@@ -650,12 +766,27 @@ esac
 
 log "Preparing chroot environment..."
 
+# Undo the binds on ANY exit: a set -e abort between here and the cleanup
+# below used to leave $TARGET/dev, /proc, /sys mounted, and the next attempt
+# (or an umount of the target) failed on them.
+cleanup_chroot() {
+    local m
+    for m in sys/firmware/efi/efivars run dev/pts dev proc sys; do umount "$TARGET/$m" 2>/dev/null || true; done
+}
+trap cleanup_chroot EXIT
+
+mkdir -p "$TARGET/dev" "$TARGET/proc" "$TARGET/sys" "$TARGET/run"
 mount --bind /dev  "$TARGET/dev"
 mount --bind /dev/pts "$TARGET/dev/pts"
 mount -t proc proc "$TARGET/proc"
 mount -t sysfs sys "$TARGET/sys"
+# /run too: dracut, lvm and bootctl look for udev's and systemd's state there
+# (arch-chroot and Fedora's chroot recipe both bind it).
+mount --bind /run "$TARGET/run" 2>/dev/null || true
 [ -d /sys/firmware/efi/efivars ] && mount --bind /sys/firmware/efi/efivars "$TARGET/sys/firmware/efi/efivars" 2>/dev/null || true
-cp /etc/resolv.conf "$TARGET/etc/resolv.conf" 2>/dev/null || true
+# --remove-destination: the restored resolv.conf is usually a dangling symlink
+# into ../run/systemd/resolve/, and a plain cp wrote through it and failed.
+cp --remove-destination /etc/resolv.conf "$TARGET/etc/resolv.conf" 2>/dev/null || true
 
 # ecryptfs-utils in the target (only if the restored system uses ecryptfs)
 if [ -d "$TARGET/home/.ecryptfs" ] && [ ! -x "$TARGET/usr/bin/ecryptfs-mount-private" ]; then
@@ -680,11 +811,8 @@ else
 fi
 
 log "Cleaning up chroot mounts..."
-umount "$TARGET/sys/firmware/efi/efivars" 2>/dev/null || true
-umount "$TARGET/dev/pts" 2>/dev/null || true
-umount "$TARGET/dev" 2>/dev/null || true
-umount "$TARGET/proc" 2>/dev/null || true
-umount "$TARGET/sys" 2>/dev/null || true
+cleanup_chroot
+trap - EXIT
 
 ###############################################################################
 # Step 8: Comprehensive verification

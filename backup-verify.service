@@ -1,14 +1,16 @@
 [Unit]
 Description=Verify backups could actually restore this machine
 Documentation=file:/usr/local/sbin/backup-verify.sh
+# Condition only: with the drive absent the unit is skipped, not failed.
+# RequiresMountsFor= on a drive with an fstab line failed the mount unit
+# after its device timeout and showed in systemctl --failed every day.
 ConditionPathIsMountPoint=/mnt/backup
-RequiresMountsFor=/mnt/backup
 
 [Service]
 Type=oneshot
 # install.sh rewrites these two for the host's layout.
-Environment=BACKUP_MOUNT=/mnt/backup
-Environment=BORG_REPO=/mnt/backup/borg-backup
+# No Environment=: the script reads /etc/backup-system.conf (a unit's
+# Environment= would outrank a BORG_REPO set there).
 ExecStart=/usr/local/sbin/backup-verify.sh
 # 0 = restore-ready, 1 = ready with warnings, 2 = a restore would fail.
 # Only 2 marks the unit failed, so `systemctl --failed` means something.

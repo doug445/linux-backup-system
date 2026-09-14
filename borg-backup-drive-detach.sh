@@ -35,6 +35,9 @@
 #
 # Never touches a drive that is still present, and never starts anything.
 set -uo pipefail
+# Debian upgraded in place from before usrmerge, Gentoo split-usr: cryptsetup
+# lives in /sbin and mount in /bin. Never hard-code /usr/bin.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 
 _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for _c in "$_self_dir/backup-common.sh" /usr/local/sbin/backup-common.sh /usr/local/lib/backup-common.sh; do
@@ -64,9 +67,9 @@ if [ "$present" = 1 ]; then
 fi
 
 # 1. The mount: lazily unmount so nothing can write into a dead filesystem.
-if /usr/bin/mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
+if mountpoint -q "$BACKUP_MOUNT" 2>/dev/null; then
     log "drive gone — lazily unmounting $BACKUP_MOUNT"
-    /usr/bin/umount -l "$BACKUP_MOUNT" 2>/dev/null || true
+    umount -l "$BACKUP_MOUNT" 2>/dev/null || true
 fi
 
 # 2. The LUKS mapping: close it (force the dm table away if it is still busy).
@@ -74,8 +77,8 @@ if [ -n "$BACKUP_LUKS_UUID" ]; then
     MAPPER="luks-$BACKUP_LUKS_UUID"
     if [ -e "/dev/mapper/$MAPPER" ]; then
         log "drive gone — closing /dev/mapper/$MAPPER"
-        /usr/sbin/cryptsetup close "$MAPPER" 2>/dev/null \
-            || /usr/sbin/dmsetup remove --force "$MAPPER" 2>/dev/null \
+        cryptsetup close "$MAPPER" 2>/dev/null \
+            || dmsetup remove --force "$MAPPER" 2>/dev/null \
             || log "could not close $MAPPER — it will be cleared on the next attach"
     fi
 fi

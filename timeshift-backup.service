@@ -7,7 +7,7 @@ RequiresMountsFor=/mnt/backup
 [Service]
 Type=oneshot
 # deploy.sh rewrites the mount path for this host.
-Environment=BACKUP_MOUNT=/mnt/backup
+# No Environment=: the script reads /etc/backup-system.conf.
 ExecStart=/usr/local/sbin/timeshift-backup.sh
 Nice=19
 IOSchedulingClass=idle

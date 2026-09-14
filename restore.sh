@@ -35,6 +35,12 @@
 #   sudo ./restore.sh /mnt/target
 set -uo pipefail
 
+# The borg repo is encryption=none (the LUKS drive encrypts it); without these
+# a fresh live USB's borg asks "unknown unencrypted repository — continue?" on
+# a stderr that is discarded below, and hangs.
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
+export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -116,7 +122,8 @@ check_deps() {
             elif command -v dnf &>/dev/null; then
                 dnf install -y borgbackup rsync cryptsetup 2>&1
             elif command -v pacman &>/dev/null; then
-                pacman -S --noconfirm borg rsync cryptsetup lvm2 2>&1
+                # -Sy: a live ISO's package database is stale by weeks
+                pacman -Sy --noconfirm --needed borg rsync cryptsetup lvm2 2>&1
             else
                 fatal "No supported package manager found. Install manually."
             fi || fatal "Failed to install some packages."
@@ -149,10 +156,10 @@ detect_capabilities() {
         HAS_SNAPPER=true
     fi
 
-    # Find backup drive
-    # Try to read from existing borg-backup.sh
-    if [ -f /usr/local/sbin/borg-backup.sh ]; then
-        BACKUP_MOUNT=$(grep -oP '^BACKUP_MOUNT="\K[^"]+' /usr/local/sbin/borg-backup.sh 2>/dev/null || true)
+    # Find backup drive: the host's config (when run on the installed system),
+    # then the usual places.
+    if [ -r /etc/backup-system.conf ]; then
+        BACKUP_MOUNT=$(. /etc/backup-system.conf 2>/dev/null; echo "${BACKUP_MOUNT:-}")
     fi
 
     # Try common locations
@@ -401,40 +408,68 @@ do_btrfs_receive() {
 
     STAMP="$(date +%Y%m%d_%H%M%S)"
 
-    # Rename current root subvolume
-    local current_root
-    current_root=$(findmnt -n -o OPTIONS / | grep -oP 'subvol=/\K[^,]+')
-    if [ -d "$toplevel/$current_root" ]; then
-        log "Renaming current root: $current_root → ${current_root}.pre_restore_$STAMP"
-        mv "$toplevel/$current_root" "$toplevel/${current_root}.pre_restore_$STAMP"
-    fi
-
-    # Receive root snapshot
-    log "Receiving root snapshot: $root_snap"
-    btrfs send "$BTRFS_SNAP_DIR/$root_snap" | btrfs receive "$toplevel/" 2>&1 | tee -a "$RESTORE_LOG"
-    # Create writable snapshot from received read-only
-    btrfs subvolume snapshot "$toplevel/$root_snap" "$toplevel/$current_root" 2>&1 | tee -a "$RESTORE_LOG"
-    btrfs subvolume delete "$toplevel/$root_snap" 2>/dev/null || true
-
-    # Handle home
-    if [ -n "$home_snap" ] && [ -d "$BTRFS_SNAP_DIR/$home_snap" ]; then
-        if [ -d "$toplevel/home" ]; then
-            log "Renaming current home: home → home.pre_restore_$STAMP"
-            mv "$toplevel/home" "$toplevel/home.pre_restore_$STAMP"
+    # receive_into SNAP SUBVOL — receive the replica, and only when that
+    # succeeded move the live subvolume aside and put a writable snapshot of the
+    # replica in its place. The old order (rename first, receive second, exit
+    # status never read, a tee in the pipe) left a system with NO root
+    # subvolume when the receive failed, and still said "restore complete".
+    receive_into() {
+        local snap="$1" subvol="$2" rc
+        if [ -d "$toplevel/$snap" ]; then
+            log "Removing a leftover received copy: $snap"
+            btrfs subvolume delete "$toplevel/$snap" >>"$RESTORE_LOG" 2>&1 || true
         fi
-        log "Receiving home snapshot: $home_snap"
-        btrfs send "$BTRFS_SNAP_DIR/$home_snap" | btrfs receive "$toplevel/" 2>&1 | tee -a "$RESTORE_LOG"
-        btrfs subvolume snapshot "$toplevel/$home_snap" "$toplevel/home" 2>&1 | tee -a "$RESTORE_LOG"
-        btrfs subvolume delete "$toplevel/$home_snap" 2>/dev/null || true
-    fi
+        log "Receiving $snap ..."
+        btrfs send "$BTRFS_SNAP_DIR/$snap" 2>>"$RESTORE_LOG" | btrfs receive "$toplevel/" >>"$RESTORE_LOG" 2>&1
+        rc=("${PIPESTATUS[@]}")
+        if [ "${rc[0]}" -ne 0 ] || [ "${rc[1]}" -ne 0 ] || [ "$(btrfs property get "$toplevel/$snap" ro 2>/dev/null | sed -n 's/^ro=//p')" != true ]; then
+            error "receive of $snap failed (send rc=${rc[0]}, receive rc=${rc[1]}) — '$subvol' left untouched; see $RESTORE_LOG"
+            [ -d "$toplevel/$snap" ] && btrfs subvolume delete "$toplevel/$snap" >>"$RESTORE_LOG" 2>&1 || true
+            return 1
+        fi
+        if [ -d "$toplevel/$subvol" ]; then
+            log "Moving current $subvol aside: $subvol → ${subvol}.pre_restore_$STAMP"
+            mv "$toplevel/$subvol" "$toplevel/${subvol}.pre_restore_$STAMP" || { error "could not move $subvol aside"; return 1; }
+        fi
+        if ! btrfs subvolume snapshot "$toplevel/$snap" "$toplevel/$subvol" >>"$RESTORE_LOG" 2>&1; then
+            error "could not create writable $subvol from $snap — putting the old one back"
+            [ -d "$toplevel/${subvol}.pre_restore_$STAMP" ] && mv "$toplevel/${subvol}.pre_restore_$STAMP" "$toplevel/$subvol"
+            return 1
+        fi
+        btrfs subvolume delete "$toplevel/$snap" >>"$RESTORE_LOG" 2>&1 || true
+        log "$subvol restored from $snap"
+    }
 
+    local current_root current_home ok=1
+    current_root=$(findmnt -n -o OPTIONS / | grep -oP 'subvol=/\K[^,]+')
+    [ -n "$current_root" ] || { umount "$toplevel"; fatal "could not tell which subvolume / is mounted from"; }
+    receive_into "$root_snap" "$current_root" || ok=0
+
+    # home: the subvolume /home is actually mounted from (@home, home, …), not
+    # a hard-coded name — with "home" hard-coded, an @home system got a new,
+    # unused toplevel "home" and its real home was never restored.
+    if [ "$ok" = 1 ] && [ -n "$home_snap" ] && [ -d "$BTRFS_SNAP_DIR/$home_snap" ]; then
+        current_home=$(findmnt -n -o OPTIONS /home 2>/dev/null | grep -oP 'subvol=/\K[^,]+' || true)
+        if [ -n "$current_home" ] && [ "$current_home" != "$current_root" ]; then
+            receive_into "$home_snap" "$current_home" || ok=0
+        else
+            warn "/home is not its own subvolume here (it lives inside $current_root) — the home replica is not applied separately"
+        fi
+    fi
     umount "$toplevel" 2>/dev/null || true
     rmdir "$toplevel" 2>/dev/null || true
 
     echo ""
-    echo -e "${GREEN}btrfs restore complete.${NC}"
-    echo "Old subvolumes preserved as *.pre_restore_$STAMP"
-    echo "Reboot to use the restored system."
+    if [ "$ok" = 1 ]; then
+        echo -e "${GREEN}btrfs restore complete.${NC}"
+        echo "Old subvolumes preserved as *.pre_restore_$STAMP"
+        echo "Nested subvolumes (/.snapshots, /var/lib/machines, …) are not carried by send/receive:"
+        echo "if fstab mounts one, recreate it (btrfs subvolume create) before rebooting."
+        echo "Reboot to use the restored system."
+    else
+        echo -e "${RED}btrfs restore did NOT complete — see the errors above and $RESTORE_LOG.${NC}"
+        echo "Nothing that failed was swapped in; the running subvolumes are as they were."
+    fi
 }
 
 ###############################################################################
@@ -492,25 +527,26 @@ do_combined_restore() {
     [ -x "$bit_script" ] || bit_script="/usr/local/sbin/backintime-restore.sh"
     [ -x "$bit_script" ] || fatal "backintime-restore.sh not found"
 
-    # Phase 1: Borg
-    log "Phase 1/2: Restoring from Borg (primary base)..."
+    # Order matters: the Back In Time overlay copies the snapshot's OLD fstab,
+    # crypttab, loader entries and initramfs, so it must land BEFORE the id
+    # rewrite and the boot rebuild — the old order undid the fixup it had just
+    # done. Files from both layers first, one fixup pass last.
+    log "Phase 1/3: extracting the Borg archive (files only)..."
     echo -en "Borg archive (Enter for latest): "
     read -r borg_archive
 
     if [ -n "$borg_archive" ]; then
-        "$borg_script" "$TARGET" "$BORG_REPO" "$borg_archive"
+        "$borg_script" --files-only "$TARGET" "$BORG_REPO" "$borg_archive"
     else
-        "$borg_script" "$TARGET" "$BORG_REPO"
+        "$borg_script" --files-only "$TARGET" "$BORG_REPO"
     fi
-
     borg_rc=$?
     if [ "$borg_rc" -ne 0 ]; then
-        error "Borg restore finished with errors (rc=$borg_rc)"
-        confirm "Continue with BIT overlay anyway?" || exit "$borg_rc"
+        error "Borg extraction finished with errors (rc=$borg_rc)"
+        confirm "Continue with the BIT overlay anyway?" || exit "$borg_rc"
     fi
 
-    # Phase 2: BIT overlay (files only)
-    log "Phase 2/2: Overlaying latest files from Back in Time..."
+    log "Phase 2/3: overlaying the newest files from Back In Time (files only)..."
     echo -en "BIT snapshot for overlay (Enter for latest): "
     read -r bit_snapshot
 
@@ -519,6 +555,11 @@ do_combined_restore() {
     else
         "$bit_script" --files-only "$TARGET" "$BIT_BASE"
     fi
+    bit_rc=$?
+    [ "$bit_rc" -eq 0 ] || warn "BIT overlay finished with rc=$bit_rc — continuing to the fixup"
+
+    log "Phase 3/3: fstab/crypttab/command-line rewrite + boot rebuild (one pass, on the combined tree)..."
+    "$borg_script" --fixup-only "$TARGET" "$BORG_REPO"
 
     log "=== COMBINED RESTORE COMPLETE ==="
 }

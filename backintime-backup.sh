@@ -59,10 +59,23 @@ for a in "$@"; do
 done
 
 LOG="/var/log/backintime-backup.log"
-SNAP_BASE="$BACKUP_MOUNT/backintime/backintime/$(hostname)/root/1"
+# The chain is filed under BACKUP_HOST_ID (pinned in the config by deploy.sh),
+# not the live hostname: a renamed host used to start a second full copy under
+# the new name — no --link-dest, no hardlinks — that nothing ever pruned.
+SNAP_BASE="$BACKUP_MOUNT/backintime/backintime/${BACKUP_HOST_ID}/root/1"
 BIT_CONFIG="/root/.config/backintime/config"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')]${DRY:+ [DRY]} $*" | tee -a "$LOG"; }
+
+# One lock for every layer (backup-common.sh). A second Back In Time run used
+# to rm -rf the first one's in-progress snapshot; a borg run alongside watched
+# the drive fill and pruned its own archives to make room.
+if (( ! DRY )); then
+    if ! bx_lock 2>>"$LOG"; then
+        log "Another backup layer is still running (lock ${BX_LOCK_FILE:-/var/lock/backup-system.lock} held); exiting."
+        exit 0
+    fi
+fi
 
 # Dependencies first — identify anything missing and install it (a dry run only
 # reports) rather than failing silently mid-rsync.
@@ -77,7 +90,7 @@ fi
 # Pre-flight
 ###############################################################################
 log "========== BIT BACKUP SESSION START${DRY:+ (DRY RUN — no changes)} =========="
-log "suite=${BX_VERSION:-?} host=$(hostname) kernel=$(uname -r) arch=$(uname -m) root_fs=$(bx_root_fstype)"
+log "suite=${BX_VERSION:-?} host=${BACKUP_HOST_ID} kernel=$(uname -r) arch=$(uname -m) root_fs=$(bx_root_fstype)"
 log "config=$BX_CONFIG mount=$BACKUP_MOUNT schedule=$SCHEDULE_MODE"
 log "retention KEEP=$KEEP MIN_KEEP=$MIN_KEEP MIN_FREE_PCT=$MIN_FREE_PCT MIN_FREE_GIB=$MIN_FREE_GIB"
 
@@ -126,30 +139,30 @@ RSYNC_ARGS=(
     "--filter=-x security.*"
     "--filter=-xr security.*"
     --chmod=Du+wx
-    --exclude="$BACKUP_MOUNT/backintime"
-    --exclude='/dev/*'
-    --exclude='/proc/*'
-    --exclude='/sys/*'
-    --exclude='/tmp/*'
-    --exclude='/run/*'
-    --exclude='/mnt/*'
-    --exclude='/media/*'
-    --exclude='/snap/*'
-    --exclude='/swapfile'
-    --exclude='/var/tmp/*'
-    --exclude='/var/cache/*'
-    --exclude='/var/log/journal/*'
-    --exclude='/home/*/.cache/*'
-    --exclude='/home/*/.local/share/Trash/*'
-    --exclude='/home/*/.npm/_cacache/*'
-    --exclude='/home/*/.cargo/registry/*'
-    --exclude='/root/.cache/*'
-    --exclude='/root/.local/share/Trash/*'
-    --exclude='/.snapshots/*'
-    --exclude='/home/.snapshots/*'
-    --exclude='/.backup-snapshots/*'
-    --exclude='/var/lib/flatpak/*'
 )
+# What to copy: "/" and, because rsync crosses filesystems here, every separate
+# local filesystem the machine is made of comes along (a separate /home, /boot,
+# the ESP, an openSUSE /var) — but NOTHING else that happens to be mounted:
+# the backup drive itself (a drive mounted anywhere but /mnt used to copy its
+# own borg repo and replicas into the snapshot until it was full), NAS shares,
+# docker overlays, snap images, other people's USB sticks. Every mount that is
+# not a backup source is excluded by name, from the live mount table.
+mapfile -t SOURCES < <(bx_backup_sources)
+# A source that lives under a blanket-excluded tree (BACKUP_EXTRA_SOURCES=
+# /mnt/data under /mnt/*) is included first — rsync takes the first match.
+for _src in "${SOURCES[@]}"; do
+    case "$_src" in /mnt/*|/media/*|/run/*|/tmp/*) RSYNC_ARGS+=("--include=$_src") ;; esac
+done
+while IFS= read -r _t; do
+    [ -n "$_t" ] && [ "$_t" != / ] || continue
+    case " ${SOURCES[*]} " in *" $_t "*) continue ;; esac
+    RSYNC_ARGS+=("--exclude=$_t/*")
+done < <(findmnt -lno TARGET 2>/dev/null)
+# The shared exclude list (backup-common.sh): the same one borg uses, plus
+# BACKUP_EXTRA_EXCLUDES from the config.
+while IFS= read -r _ex; do [ -n "$_ex" ] && RSYNC_ARGS+=("--exclude=$_ex"); done < <(bx_excludes)
+RSYNC_ARGS+=(--exclude="$BACKUP_MOUNT/backintime")
+log "backup sources: ${SOURCES[*]}"
 if [ -n "$PREV_SNAP" ] && [ -d "$SNAP_BASE/$PREV_SNAP/backup" ]; then
     RSYNC_ARGS+=(--link-dest="../../${PREV_SNAP}/backup")
     log "Incremental from: $PREV_SNAP"
@@ -169,10 +182,12 @@ END_TIME=$(date +%s)
 DURATION_MIN=$(( (END_TIME - START_TIME) / 60 )); DURATION_SEC=$(( (END_TIME - START_TIME) % 60 ))
 
 # rsync exit codes: 0=ok, 24=vanished files (normal), 23=partial
+PARTIAL=0
 case "$rsync_rc" in
     0)  log "rsync completed successfully (rc=0) in ${DURATION_MIN}m ${DURATION_SEC}s" ;;
     24) log "rsync completed with vanished files (rc=24) in ${DURATION_MIN}m ${DURATION_SEC}s — normal" ;;
-    23) log "WARNING: rsync partial transfer (rc=23) in ${DURATION_MIN}m ${DURATION_SEC}s" ;;
+    23) log "WARNING: rsync partial transfer (rc=23) in ${DURATION_MIN}m ${DURATION_SEC}s — kept as a FAILED snapshot (Back In Time's marker), not as the chain head"
+        PARTIAL=1 ;;
     *)  log "ERROR: rsync failed with rc=$rsync_rc after ${DURATION_MIN}m ${DURATION_SEC}s"
         df -h "$BACKUP_MOUNT" 2>&1 | tee -a "$LOG"
         (( ! DRY )) && rm -rf "$SNAP_BASE/new_snapshot"
@@ -203,9 +218,18 @@ type=1
 EOF
 [ -f "$BIT_CONFIG" ] && cp "$BIT_CONFIG" "$SNAP_BASE/new_snapshot/config"
 mv "$SNAP_BASE/new_snapshot" "$SNAP_BASE/$SNAP_NAME"
-rm -f "$SNAP_BASE/last_snapshot"
-ln -s "$SNAP_NAME" "$SNAP_BASE/last_snapshot"
-log "Snapshot finalized: $SNAP_NAME"
+if (( PARTIAL )); then
+    # A partial copy (drive went read-only, I/O errors, a destination that
+    # rejects ACLs/xattrs) must never become last_snapshot: it would be the
+    # next run's --link-dest and, ten runs later, the count prune would have
+    # replaced every complete snapshot with partial ones.
+    touch "$SNAP_BASE/$SNAP_NAME/failed"
+    log "Snapshot kept as FAILED: $SNAP_NAME (last_snapshot unchanged${PREV_SNAP:+: $PREV_SNAP})"
+else
+    rm -f "$SNAP_BASE/last_snapshot"
+    ln -s "$SNAP_NAME" "$SNAP_BASE/last_snapshot"
+    log "Snapshot finalized: $SNAP_NAME"
+fi
 
 ###############################################################################
 # Prune: count-based (keep newest $KEEP), then free-space based (drop oldest
@@ -213,24 +237,46 @@ log "Snapshot finalized: $SNAP_NAME"
 # may sit unplugged for months. The newest is always kept, so last_snapshot
 # stays valid.
 ###############################################################################
-SNAP_COUNT=$(ls -1d "$SNAP_BASE"/[0-9]* 2>/dev/null | wc -l)
+# Failed (partial) snapshots first: they hold space and restore a partial
+# system. Any older than the newest complete snapshot goes; a failed one newer
+# than every complete one is kept until a complete one supersedes it.
+bit_complete() { ls -1d "$SNAP_BASE"/[0-9]* 2>/dev/null | sort | while read -r d; do [ -e "$d/failed" ] || echo "$d"; done; }
+newest_ok=$(bit_complete | tail -1)
+if [ -n "$newest_ok" ]; then
+    ls -1d "$SNAP_BASE"/[0-9]* 2>/dev/null | sort | while read -r d; do
+        [ -e "$d/failed" ] || continue
+        [ "$d" \< "$newest_ok" ] || continue
+        log "Removing failed snapshot: $(basename "$d") (superseded by $(basename "$newest_ok"))"
+        rm -rf "$d"
+    done
+fi
+# rm -rf on btrfs frees space only at the next commit; without a sync the
+# free-space loop below re-read df too early and deleted one snapshot too many.
+bit_sync() { sync; btrfs filesystem sync "$BACKUP_MOUNT" >/dev/null 2>&1 || true; }
+SNAP_COUNT=$(bit_complete | wc -l)
 if [ "$SNAP_COUNT" -gt "$KEEP" ]; then
-    log "Pruning old snapshots ($SNAP_COUNT total, keeping newest $KEEP)..."
-    ls -1d "$SNAP_BASE"/[0-9]* | sort | head -n -"$KEEP" | while read -r old; do
+    log "Pruning old snapshots ($SNAP_COUNT complete, keeping newest $KEEP)..."
+    bit_complete | head -n -"$KEEP" | while read -r old; do
         log "  Removing: $(basename "$old")"
         rm -rf "$old"
     done
+    bit_sync
 fi
 while bx_space_low; do
-    n=$(ls -1d "$SNAP_BASE"/[0-9]* 2>/dev/null | wc -l)
+    n=$(bit_complete | wc -l)
     if [ "$n" -le "$MIN_KEEP" ]; then
         log "Space still low (free $(bx_free_gib)G / $(bx_free_pct)%) but at floor MIN_KEEP=$MIN_KEEP; stopping"
         break
     fi
-    oldest=$(ls -1d "$SNAP_BASE"/[0-9]* 2>/dev/null | sort | head -1)
+    oldest=$(bit_complete | head -1)
     [ -d "$oldest" ] || break
     log "Space low (free $(bx_free_gib)G / $(bx_free_pct)%): deleting oldest snapshot $(basename "$oldest")"
     rm -rf "$oldest"
+    bit_sync
+    if [ -e "$oldest" ]; then
+        log "ERROR: could not delete $(basename "$oldest") (read-only drive?) — stopping the space prune"
+        break
+    fi
 done
 
 ###############################################################################
@@ -238,8 +284,12 @@ done
 ###############################################################################
 FINAL_AVAIL_KB=$(df --output=avail "$BACKUP_MOUNT" 2>/dev/null | tail -1 | tr -dc '0-9')
 log "--- Final State ---"
-log "Snapshots: $(ls -1d "$SNAP_BASE"/[0-9]* 2>/dev/null | wc -l)"
+log "Snapshots: $(bit_complete | wc -l) complete$( n=$(ls -1d "$SNAP_BASE"/[0-9]*/failed 2>/dev/null | wc -l); [ "$n" -gt 0 ] && echo ", $n failed")"
 log "Space used by this backup: ~$(( (${AVAIL_KB:-0} - ${FINAL_AVAIL_KB:-0}) / 1024 ))MB"
 log "Remaining: $(( ${FINAL_AVAIL_KB:-0} / 1024 / 1024 ))GB"
 df -h "$BACKUP_MOUNT" 2>&1 | tee -a "$LOG"
+if (( PARTIAL )); then
+    log "========== BIT BACKUP SESSION END (PARTIAL — see rsync rc=23 above) =========="
+    exit 3
+fi
 log "========== BIT BACKUP SESSION END =========="

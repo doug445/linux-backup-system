@@ -266,6 +266,63 @@ out=$(bx_check_backup_capacity 99999999999999999); rc=$?
 expect "absurdly large drive -> 0" 0 "$rc"
 case "$out" in "capacity: OK — "*) ok "ok message" ;; *) bad "unexpected: $out" ;; esac
 
+echo "== backup sources from a mount table: every local filesystem, nothing else"
+cat > "$T/mt" <<'MT'
+/ btrfs /dev/mapper/root[/@] rw,subvol=/@
+/home btrfs /dev/mapper/root[/@home] rw,subvol=/@home
+/var btrfs /dev/mapper/root[/@/var] rw,subvol=/@/var
+/srv/data btrfs /dev/mapper/root[/@/srv/data] rw,subvol=/@
+/.snapshots btrfs /dev/mapper/root[/@/.snapshots] rw,subvol=/@/.snapshots
+/boot vfat /dev/nvme0n1p3 rw
+/efi vfat /dev/nvme0n1p1 rw
+/mnt/backup btrfs /dev/mapper/luks-x rw
+/mnt/backup/snapshots btrfs /dev/mapper/luks-x[/snapshots] rw
+/run/media/u/stick vfat /dev/sdb1 rw
+/opt ext4 /dev/sda5 rw
+/opt/bind ext4 /dev/sda5[/x] rw
+/opt2 ext4 /dev/sda5 rw
+/home/u/nas nfs4 nas:/export rw
+/var/lib/docker/overlay2/x/merged overlay overlay rw
+/snap/core/1 squashfs /dev/loop0 ro
+/proc proc proc rw
+/tmp tmpfs tmpfs rw
+/mnt/data xfs /dev/sdc1 rw
+/tank/home zfs tank/home rw
+MT
+got=$(BACKUP_MOUNT=/mnt/backup BX_MOUNT_TABLE="$T/mt" BACKUP_EXTRA_SOURCES="/mnt/data /nope" bx_backup_sources | tr '\n' ' ')
+expect "openSUSE-style /var, a data disk, a ZFS dataset in; bind/snapper/NAS/overlay/snap/backup drive out" "/ /boot /efi /home /mnt/data /opt /tank/home /var " "$got"
+unset BX_MOUNT_TABLE BACKUP_EXTRA_SOURCES
+
+echo "== kernels without an initramfs beside them"
+printf 'boot/vmlinuz-6.1.0-18-amd64\nboot/initrd.img-6.1.0-18-amd64\nboot/vmlinuz-6.2.0-1-amd64\nboot/vmlinuz-linux\nboot/initramfs-linux.img\nefi/0123456789abcdef0123456789abcdef/6.10/linux\nefi/0123456789abcdef0123456789abcdef/6.11/linux\nefi/0123456789abcdef0123456789abcdef/6.11/initrd\nboot/vmlinuz-6.4.0-default\nboot/initrd-6.4.0-default\nboot/vmlinuz-lts\nboot/initramfs-lts\nboot/firmware/kernel8.img\nboot/vmlinuz-0-rescue-0123456789abcdef0123456789abcdef\nboot/initramfs-0-rescue-0123456789abcdef0123456789abcdef.img\n' > "$T/l-initrd"
+expect "Debian/Fedora/Arch/openSUSE/Alpine/kernel-install/rescue pairs; two unpaired" "boot/vmlinuz-6.2.0-1-amd64 efi/0123456789abcdef0123456789abcdef/6.10/linux " "$(bx_kernels_without_initrd "$T/l-initrd" | tr '\n' ' ')"
+expect "UKI-only listing: nothing to pair" "" "$(bx_kernels_without_initrd "$T/l-uki" | tr '\n' ' ')"
+
+echo "== retention counts are validated: KEEP never undercuts MIN_KEEP, garbage falls back"
+unset BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID SCHEDULE_MODE KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB BACKUP_EXTRA_SOURCES
+printf 'KEEP=0\nMIN_KEEP=3\n' > "$T/keep.conf"; BX_CONFIG="$T/keep.conf" bx_load_config 2>/dev/null
+expect "KEEP=0 (head -n -0 deletes everything) raised to MIN_KEEP" 3 "$KEEP"
+unset KEEP MIN_KEEP
+printf 'KEEP=abc\nMIN_KEEP=0\n' > "$T/keep.conf"; BX_CONFIG="$T/keep.conf" bx_load_config 2>/dev/null
+expect "KEEP=abc falls back to 10" 10 "$KEEP"; expect "MIN_KEEP=0 raised to 1" 1 "$MIN_KEEP"
+unset KEEP MIN_KEEP BACKUP_HOST_ID
+printf 'BACKUP_HOST_ID=pinned\n' > "$T/host.conf"; BX_CONFIG="$T/host.conf" bx_load_config 2>/dev/null
+expect "BACKUP_HOST_ID from the config" pinned "$BACKUP_HOST_ID"
+unset BACKUP_HOST_ID; BX_CONFIG=/dev/null bx_load_config 2>/dev/null
+[ -n "$BACKUP_HOST_ID" ] && ok "BACKUP_HOST_ID defaults to the hostname ($BACKUP_HOST_ID)" || bad "BACKUP_HOST_ID empty"
+
+echo "== the shared exclude list"
+ex=$(BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="/x/y /z/*" bx_excludes)
+grep -qx '/mnt/backup/\*' <<<"$ex" && ok "excludes the backup drive itself" || bad "backup drive not excluded"
+grep -qx '/x/y' <<<"$ex" && grep -qx '/z/\*' <<<"$ex" && ok "BACKUP_EXTRA_EXCLUDES appended" || bad "extra excludes missing"
+grep -qx '/home/\*/build/\*' <<<"$ex" && bad "a personal exclude (~/build) is still in the universal list" || ok "no personal excludes in the universal list"
+grep -qx '/.snapshots/\*' <<<"$ex" && grep -qx '/var/lib/snapd/snap/\*' <<<"$ex" && ok "snapper dirs and snap images excluded" || bad "snapper/snap excludes missing"
+
+echo "== capacity check knob"
+BACKUP_MOUNT="$T/absent"; CAPACITY_CHECK=off
+m=$(bx_check_backup_capacity); rc=$?; expect "CAPACITY_CHECK=off passes" 0 "$rc"; grep -q disabled <<<"$m" && ok "…and says so" || bad "no 'disabled' message: $m"
+CAPACITY_CHECK=refuse
+
 echo "== snapshot engine"
 e=$(bx_snapshot_engine)
 case "$e" in btrfs|timeshift|none) ok "engine is one of btrfs/timeshift/none ($e)" ;; *) bad "engine '$e'" ;; esac
