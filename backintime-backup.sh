@@ -97,6 +97,7 @@ log "retention KEEP=$KEEP MIN_KEEP=$MIN_KEEP MIN_FREE_PCT=$MIN_FREE_PCT MIN_FREE
 # Backup drive mounted, and the RIGHT drive (fs-UUID guard from config).
 if ! guard_msg=$(bx_check_backup_drive); then
     log "ERROR: $guard_msg — aborting."
+    while IFS= read -r _h; do [ -n "$_h" ] && log "  hint: $_h"; done < <(bx_drive_gone_hint)
     exit 1
 fi
 

@@ -287,6 +287,22 @@ runsh "udev rule" 'f=/etc/udev/rules.d/99-borg-backup.rules; [ -f "$f" ] && grep
 runsh "masked backup units" 'ls -la /etc/systemd/disabled-backup-units 2>/dev/null || echo none'
 
 # ---------------------------------------------------------------------------
+section "USB: drops, bridge resets and authorization"
+# A drive that vanished mid-backup and "every USB port died" are usually a
+# bridge that reset its UAS link plus USB authorization (USBGuard's lock hook)
+# keeping the re-enumerated device out. Both leave traces here.
+runsh "unauthorized USB devices (authorized=0)" 'b=$(for d in /sys/bus/usb/devices/*; do [ -f "$d/authorized" ] && [ -f "$d/idVendor" ] && [ "$(cat "$d/authorized")" = 0 ] && echo "$(basename "$d") $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/product" 2>/dev/null)"; done); echo "${b:-none}"'
+runsh "USB storage drivers (uas vs usb-storage) and quirks" 'lsusb -t 2>/dev/null | grep -iE "mass storage|uas|usb-storage" || echo "no USB storage attached"; echo "usb-storage quirks: $(cat /sys/module/usb_storage/parameters/quirks 2>/dev/null || echo "module not loaded")"'
+if have usbguard; then
+    runsh "USBGuard policy" 'for p in InsertedDevicePolicy ImplicitPolicyTarget; do printf "%s=%s\n" "$p" "$(usbguard get-parameter "$p" 2>/dev/null || echo "(no IPC access)")"; done; usbguard list-devices 2>/dev/null | grep -E "08:06:(50|62)" | sed -E "s/ hash \"[^\"]*\"//; s/ parent-hash \"[^\"]*\"//; s/ serial \"[^\"]*\"/ serial …/" || true'
+else
+    out "_USBGuard not installed._"; out ""
+fi
+if [ $IS_ROOT = 1 ] && have journalctl; then
+    runsh "kernel: USB disconnects/resets, this boot and the previous one" 'for b in -1 0; do echo "--- boot $b"; journalctl -k -b "$b" --no-pager -o short-iso 2>/dev/null | grep -E "USB disconnect|uas_zap_pending|reset (Super|high)Speed USB|not authorized for usage|I/O error, dev sd|forced readonly" | tail -n 25; done'
+fi
+
+# ---------------------------------------------------------------------------
 section "Logs (last $TAIL_N lines each)"
 for lg in /var/log/borg-backup.log /var/log/backintime-backup.log /var/log/timeshift-backup.log /var/log/luks-header-backup.log; do
     if [ -r "$lg" ]; then runsh "$lg" "tail -n $TAIL_N '$lg'"
