@@ -145,8 +145,8 @@ before trusting it.
 | Distro (arch) | Machine | Layout | Verified |
 |---|---|---|---|
 | Fedora Asahi Remix (aarch64) | MacBook Pro, M1 Pro | btrfs root, GRUB on `arm64-efi` behind m1n1/U-Boot | development platform; restore over a fresh Asahi install boots — September 2026, earlier 3.x |
-| Linux Mint 22.3 (x86_64) | — | ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI | backups + `backup-verify` 2026-09-11; Timeshift retention (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot cleanup) 2026-09-12, on a loop-device drive and then a real count prune on the production drive |
-| Fedora 44 (x86_64) | 2019 System76 laptop (Clevo-based, 32 GB RAM, two NVMe) | — | backups + `backup-verify` |
+| Linux Mint 22.3 (x86_64) | 2014 MacBook Pro, i7-4870HQ, 16GB RAM, NVMe 2TB, AX210 Wi-Fi | ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI | backups + `backup-verify` 2026-09-11; Timeshift retention (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot cleanup) 2026-09-12, on a loop-device drive and then a real count prune on the production drive |
+| Fedora 44 (x86_64) | 2019 System76 laptop (Clevo-based, 32 GB RAM, two NVMe) | btrfs root, systemd-boot, UKI, Secure Boot | backups + `backup-verify` |
 | EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, SATA SSD) | ext4 root on LUKS2, plain vfat `/boot` (XBOOTLDR) + ESP at `/efi`, systemd-boot Type #1 entries, dracut; USB NVMe backup drive | deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL; the two warnings are the deliberately unencrypted test drive and a 477 GiB drive under the 2x recommendation) — 2026-09-14, 3.7.0 |
 
 **Distros**
