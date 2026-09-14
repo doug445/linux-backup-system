@@ -146,6 +146,46 @@ out=$(BX_CONFIG="$T/verify.conf" BACKUP_MOUNT="$T/envmount" bash "$ROOT/backup-v
 grep -q "$T/envmount" <<<"$out" && ok "environment still overrides the config" || bad "environment did not override the config"
 grep -q 'KEEP=${_env_keep:-6}' "$ROOT/luks-header-backup.sh" && ok "luks-header-backup keeps its own KEEP default" || bad "luks-header-backup KEEP default lost"
 
+echo "== tray: a backup counts as running only when one runs (not when a command line names it)"
+# The tray's detection helpers, loaded with GTK stubbed out and pgrep fed
+# synthetic process lists. Each case prints PASS/FAIL itself.
+while IFS= read -r line; do
+    case "$line" in PASS*) ok "tray: ${line#PASS }" ;; FAIL*) bad "tray: ${line#FAIL }" ;; *) [ -n "$line" ] && bad "tray probe: $line" ;; esac
+done < <(INVOCATION_ID=cli-test BX_CONFIG="$T/none.conf" python3 - "$ROOT/backup-tray.py" 2>&1 <<'PY'
+import re, sys, types
+gi = types.ModuleType("gi"); gi.require_version = lambda *a: None
+repo = types.ModuleType("gi.repository")
+for n in ("AppIndicator3", "GLib", "Gtk"):
+    setattr(repo, n, types.SimpleNamespace())
+sys.modules.update({"gi": gi, "gi.repository": repo})
+ns = {"__name__": "tray"}
+exec(open(sys.argv[1]).read().split("# ── Tray indicator")[0], ns)
+fake = []
+ns["pgrep"] = lambda pattern, full=True: [c for c in fake if re.search(pattern, c) and not ns["SHELL_C"].match(c)]
+ns["unit_active"] = lambda unit: False
+def case(desc, cmds, probe, want):
+    fake[:] = cmds
+    got = bool(ns[probe]()[0])
+    print(("PASS " if got == want else "FAIL ") + f"{desc} (got {got})")
+case("borg-backup.sh running",            ["/bin/bash /usr/local/sbin/borg-backup.sh"], "is_borg_running", True)
+case("borg create under python",          ["/usr/bin/python /usr/bin/borg create --stats r::a /"], "is_borg_running", True)
+case("btrfs send",                        ["btrfs send /.backup-snapshots/root_1"], "is_borg_running", True)
+case("shell -c naming borg-backup.sh",    ["/usr/bin/zsh -c sudo /usr/local/sbin/borg-backup.sh"], "is_borg_running", False)
+case("editor/pager on borg-backup.sh",    ["vim borg-backup.sh", "less /usr/local/sbin/borg-backup.sh"], "is_borg_running", False)
+case("grep for 'borg create'",            ["grep borg create /var/log/borg-backup.log"], "is_borg_running", False)
+case("backintime-backup.sh running",      ["bash /usr/local/sbin/backintime-backup.sh"], "is_bit_running", True)
+case("Back In Time GUI job",              ["/usr/bin/python3 -Es /usr/share/backintime/common/backintime.py backup-job"], "is_bit_running", True)
+case("idle Back In Time serviceHelper",   ["/usr/bin/python -Es /usr/share/backintime/qt/serviceHelper.py"], "is_bit_running", False)
+case("tail of the BIT log",               ["tail -f /var/log/backintime-backup.log"], "is_bit_running", False)
+case("timeshift --create",                ["timeshift --create --scripted --comments x"], "is_timeshift_running", True)
+case("idle timeshift-gtk",                ["timeshift-gtk"], "is_timeshift_running", False)
+case("backup-verify.sh running",          ["bash /usr/local/sbin/backup-verify.sh"], "is_verify_running", True)
+case("sudo line alone is not the run",    ["sudo /usr/local/sbin/backup-verify.sh"], "is_verify_running", False)
+print(("PASS " if ns["mount_is_live"]("/nonexistent-lbs-mount") is False else "FAIL ") + "a directory that is not a mount is not the drive")
+print(("PASS " if ns["mount_is_live"]("/") is True else "FAIL ") + "a live mount is the drive")
+PY
+)
+
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")
 [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && ok "BX_VERSION=$v is semver" || bad "BX_VERSION '$v'"

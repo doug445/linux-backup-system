@@ -552,6 +552,19 @@ fi
 ###############################################################################
 # Step 6: Chroot and update initramfs + GRUB
 ###############################################################################
+# SELinux: files restored without their labels make an enforcing system refuse
+# logins and services. The Back In Time layer strips security.* xattrs by
+# design, and a live USB without SELinux may not write them back on a borg
+# extract either. /.autorelabel has the restored system relabel every file on
+# its first boot — one slow boot and one extra reboot, on every SELinux target.
+SELINUX_MODE=$(awk -F= '/^[[:space:]]*SELINUX=/{gsub(/[[:space:]"]/, "", $2); print $2; exit}' "$TARGET/etc/selinux/config" 2>/dev/null || true)
+case "$SELINUX_MODE" in
+    enforcing|permissive)
+        touch "$TARGET/.autorelabel"
+        log "SELinux ($SELINUX_MODE) in the restored system: created /.autorelabel — the first boot relabels every file, then reboots once" ;;
+    *)  log "SELinux not enabled in the restored system (${SELINUX_MODE:-no /etc/selinux/config}) — no relabel needed" ;;
+esac
+
 log "Preparing chroot environment..."
 
 mount --bind /dev  "$TARGET/dev"

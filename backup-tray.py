@@ -152,8 +152,14 @@ def run_quiet(cmd, timeout=3):
     return result.stdout if result.returncode == 0 else None
 
 
+# A shell running a -c string only MENTIONS what it names: a terminal wrapper,
+# an agent's tool shell or a one-liner that tails a log. The process it starts
+# shows up on its own and is matched there.
+SHELL_C = re.compile(r"^(\S*/)?(ba|da|z|k|fi)?sh\s+(-\S+\s+)*-c\s")
+
+
 def pgrep(pattern, full=True):
-    """Matching `pgrep -a` lines, minus this process."""
+    """Matching `pgrep -a` lines, minus this process and shell -c wrappers."""
     flags = "-fa" if full else "-a"
     out = run_quiet(["pgrep", flags, pattern])
     if not out:
@@ -162,9 +168,28 @@ def pgrep(pattern, full=True):
     lines = []
     for line in out.strip().splitlines():
         parts = line.split(None, 1)
-        if len(parts) == 2 and parts[0] != me:
+        if len(parts) == 2 and parts[0] != me and not SHELL_C.match(parts[1]):
             lines.append(parts[1])
     return lines
+
+
+def script_running(name):
+    """A suite script actually executing, not a command line that names it.
+
+    The kernel shows a script started through its shebang as
+    "<interpreter> <path/to/script>", so require exactly that: an editor, a
+    pager or `grep borg-backup.sh` never counts. Matching the name anywhere
+    showed "backup running" while nothing ran.
+    """
+    rx = re.compile(r"^(\S*/)?(env\s+)?(ba|da)?sh\s+(-\S+\s+)*\S*" + re.escape(name) + r"(\s|$)")
+    return any(rx.match(cmd) for cmd in pgrep(re.escape(name)))
+
+
+def process_running(rx):
+    """A process whose own executable (argv0, or the script a python/perl
+    interpreter runs) matches rx — anchored, so a mention elsewhere never counts."""
+    anchored = re.compile(r"^(\S*/)?((python|perl)[\d.]*\s+(-\S+\s+)*\S*/)?" + rx)
+    return next((cmd for cmd in pgrep(rx) if anchored.match(cmd)), None)
 
 
 CONF = load_config()
@@ -185,6 +210,24 @@ def run_in_terminal(cmd_str):
     else:
         argv = [TERMINAL, "-e", "bash", "-c", full_cmd]
     subprocess.Popen(argv)
+
+
+def mount_is_live(path):
+    """True when path is a mount point whose source device still exists.
+
+    A drive yanked while mounted leaves the mount behind until the detach unit
+    clears it; its source node is what disappears (or, for a LUKS mapping, the
+    disk under it — then the detach unit closes the mapping within seconds).
+    """
+    if not os.path.ismount(path):
+        return False
+    with contextlib.suppress(OSError), open("/proc/self/mounts") as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) > 1 and fields[1] == path:
+                src = fields[0]
+                return not src.startswith("/dev/") or os.path.exists(src)
+    return True
 
 
 # ── Backup detection ──────────────────────────────────────────────────────────
@@ -212,16 +255,12 @@ def is_borg_running():
     if os.path.exists(os.path.join(BORG_REPO, "lock.exclusive")):
         return True, "Borg repo locked"
 
-    for cmd in pgrep("borgmatic|borg-backup|borg (create|prune|compact|check|extract)"):
-        lower = cmd.lower()
-        if re.search(r"(?:^|\s|/)borgmatic(?:\s|$)", cmd):
-            return True, cmd.strip()[:60]
-        if "borg-backup" in lower and ".sh" in lower:
-            return True, cmd.strip()[:60]
-        if re.search(r"\bborg\s+(create|prune|compact|check|extract)", lower):
-            return True, cmd.strip()[:60]
-
-    if pgrep("btrfs.*(send|receive)"):
+    if script_running("borg-backup.sh"):
+        return True, "borg-backup.sh running"
+    cmd = process_running(r"borgmatic(\s|$)") or process_running(r"borg\s+(create|prune|compact|check|extract)\b")
+    if cmd:
+        return True, cmd.strip()[:60]
+    if process_running(r"btrfs\s+(send|receive)\b"):
         return True, "btrfs send/receive"
     return False, ""
 
@@ -258,25 +297,22 @@ def is_bit_running():
     if bit_lock_alive():
         return True, "Back in Time running"
 
-    if pgrep(r"backintime-backup\.sh"):
+    if script_running("backintime-backup.sh"):
         return True, "backintime-backup.sh running"
-
-    skip = ["servicehelper", "backup-tray", "konsole", "tail ", "cat ", "grep ", "less "]
-    for cmd in pgrep("backintime"):
-        lower = cmd.lower()
-        if any(x in lower for x in skip):
-            continue
-        if any(sub in lower for sub in ["backup", "restore", "smart-remove"]):
-            return True, cmd.strip()[:60]
+    # The GUI's own jobs: backintime (a python script) with a job verb.
+    cmd = process_running(r"backintime(-qt)?(\.py)?\s+(.*\s)?(backup|backup-job|restore|smart-remove)(\s|$)")
+    if cmd:
+        return True, cmd.strip()[:60]
     return False, ""
 
 
 def is_timeshift_running():
     if unit_active("timeshift-backup.service"):
         return True, "timeshift-backup.service running"
-    if pgrep(r"timeshift-backup\.sh"):
+    if script_running("timeshift-backup.sh"):
         return True, "timeshift-backup.sh running"
-    for cmd in pgrep(r"timeshift(-launcher)?\s+--(create|delete|check)"):
+    cmd = process_running(r"timeshift(-launcher)?\s+(.*\s)?--(create|delete|check)(\s|$)")
+    if cmd:
         return True, cmd.strip()[:60]
     return False, ""
 
@@ -284,7 +320,7 @@ def is_timeshift_running():
 def is_verify_running():
     if unit_active("backup-verify.service"):
         return True, "backup-verify.service running"
-    if pgrep(r"backup-verify\.sh"):
+    if script_running("backup-verify.sh"):
         return True, "backup-verify.sh running"
     return False, ""
 
@@ -292,7 +328,7 @@ def is_verify_running():
 def is_luks_header_running():
     if unit_active("luks-header-backup.service"):
         return True, "luks-header-backup.service running"
-    if pgrep(r"luks-header-backup\.sh"):
+    if script_running("luks-header-backup.sh"):
         return True, "luks-header-backup.sh running"
     return False, ""
 
@@ -487,7 +523,12 @@ class BackupIndicator:
         else:
             self.indicator.set_icon_full("idle", "Idle")
 
-        # Update disk usage label
+        # Update disk usage label. Only a live mount: statvfs on the empty
+        # mountpoint directory reports the ROOT filesystem, so an unplugged
+        # drive showed the system disk's size as the backup drive's.
+        if not mount_is_live(BACKUP_MOUNT):
+            self.disk_item.set_label("\U0001f4be Drive: not connected")
+            return True
         try:
             stat = os.statvfs(BACKUP_MOUNT)
             total_gb = stat.f_blocks * stat.f_frsize / 1024**3

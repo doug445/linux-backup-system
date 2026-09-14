@@ -38,7 +38,7 @@
 # Version of the suite. Printed in every detection dump and by backup-diag.sh so
 # a report can be tied to a release; bump with each tag.
 # shellcheck disable=SC2034  # read by every script that sources this file
-BX_VERSION="3.7.0"
+BX_VERSION="3.8.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -278,9 +278,11 @@ bx_pi_firmware_boot() {
 }
 
 # Classify an archive/snapshot listing (paths relative to the root, one per
-# line) by what would let it boot. Prints: uki kern gcfg sdb pifw — counts of
-# UKIs, plain kernels, grub.cfg files, systemd-boot entries, and Raspberry Pi
-# firmware config files. Plain kernels include the kernel-install Type #1
+# line) by what would let it boot. Prints: uki kern gcfg sdb pifw oth — counts
+# of UKIs, plain kernels, grub.cfg files, systemd-boot entries, Raspberry Pi
+# firmware config files, and other bootloader configs (Limine, rEFInd,
+# syslinux/extlinux) — without the last, a CachyOS/Limine archive failed verify
+# with "no bootloader config". Plain kernels include the kernel-install Type #1
 # layout, <esp>/<machine-id>/<version>/linux, which systemd-boot without UKIs
 # uses on Fedora, Debian and Arch when the ESP is /efi or XBOOTLDR is /boot. Only boot/ and efi/ are considered: /usr/lib/modules
 # keeps a vmlinuz copy on Fedora and would satisfy a root-only archive.
@@ -290,12 +292,13 @@ bx_pi_firmware_boot() {
 # required a directory there and missed every systemd-boot host with /efi.
 bx_boot_listing_counts() { # bx_boot_listing_counts LISTING_FILE
     local f="$1"
-    printf '%s %s %s %s %s\n' \
+    printf '%s %s %s %s %s %s\n' \
         "$(grep -icE '^(boot|efi)/(.*/)?EFI/Linux/.*\.efi$' "$f")" \
         "$(grep -cE '^(boot|efi)/(.*/)?(vmlinuz|vmlinux|Image|kernel)(-|$)|^(boot|efi)/[0-9a-f]{32}/[^/]+/linux$|^boot/(firmware/)?kernel[0-9_a-z]*\.img$' "$f")" \
         "$(grep -icE '^(boot|efi)/(.*/)?grub\.cfg$' "$f")" \
         "$(grep -icE '^(boot|efi)/(.*/)?loader/(loader\.conf|entries/.+\.conf)$' "$f")" \
-        "$(grep -cE '^boot/(firmware/)?(config|cmdline)\.txt$' "$f")"
+        "$(grep -cE '^boot/(firmware/)?(config|cmdline)\.txt$' "$f")" \
+        "$(grep -icE '^(boot|efi)/(.*/)?(limine\.conf|refind\.conf|extlinux\.conf|syslinux\.cfg)$' "$f")"
 }
 
 # Is /boot its own filesystem (vs a directory on root)?
