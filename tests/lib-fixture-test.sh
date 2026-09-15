@@ -330,6 +330,7 @@ expect "patterns printed literally, not expanded against the filesystem" "/home/
 many=$(for i in $(seq 1 5000); do printf '/x/%s/* ' "$i"; done)
 ( set -o pipefail; BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="$many /home/*" bx_source_fully_excluded /home ) && ok "a long exclude list under pipefail: /home still fully excluded" || bad "SIGPIPE under pipefail turned a match into 'not excluded'"
 ( set -o pipefail; BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_EXCLUDES="$many" bx_source_fully_excluded /var/cache ) && ok "…and the base list's /var/cache too" || bad "/var/cache lost under pipefail"
+bx_excludes | grep -qxF '/var/cache/*/*' && ! bx_excludes | grep -qxF '/var/cache/*' && ok "/var/cache keeps its package-made directories (owner, mode), not their contents" || bad "/var/cache exclude: $(bx_excludes | grep var/cache)"
 
 echo "== extra includes: literal, one per line, trailing slash dropped"
 expect "includes printed as given" "/home/*/.config /home/*/.ssh " "$(cd / && BACKUP_EXTRA_INCLUDES="/home/*/.config /home/*/.ssh/" bx_includes | tr '\n' ' ')"
@@ -337,7 +338,11 @@ expect "no includes: nothing" "" "$(BACKUP_EXTRA_INCLUDES="" bx_includes)"
 
 echo "== borg pattern order: extra source, includes, excludes"
 pat=$(BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_INCLUDES="/home/*/.config" BACKUP_EXTRA_EXCLUDES="/home/*/*" bx_borg_patterns / /home /mnt/data | tr '\n' ' ')
-case "$pat" in "--pattern=+/mnt/data --pattern=+/home/*/.config --pattern=-/dev/*"*) ok "source re-include, then includes, then the first exclude" ;; *) bad "pattern order: $pat" ;; esac
+case "$pat" in "--pattern=+/mnt/data --pattern=+re:^home/[^/]*\$ --pattern=+re:^home\$ --pattern=+/home/*/.config --pattern=-/dev/*"*) ok "source re-include, the include's parent directories, then includes, then the first exclude" ;; *) bad "pattern order: $pat" ;; esac
+pat=$(BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_INCLUDES="/home/*/.local/share/keyrings /srv/a+b/x" BACKUP_EXTRA_EXCLUDES="/home/*/*" bx_borg_patterns / | tr '\n' ' ')
+grep -qF -- '--pattern=+re:^home/[^/]*/\.local/share$ --pattern=+re:^home/[^/]*/\.local$' <<<"$pat" \
+    && ok "every directory above an include is archived as an exact match (restored with its owner, not root 700)" || bad "parent directories of an include: $pat"
+grep -qF -- '--pattern=+re:^srv/a\+b$' <<<"$pat" && ok "regex characters in an include path are escaped" || bad "unescaped include parent: $pat"
 grep -q -- '--pattern=-/home/\*/\* ' <<<"$pat " && ok "the extra exclude is in the list" || bad "extra exclude missing"
 
 echo "== capacity check knob"

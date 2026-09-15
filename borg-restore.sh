@@ -230,6 +230,46 @@ else
         borg extract --verbose --list --numeric-ids "$BORG_REPO"::"$ARCHIVE" || extract_rc=$?
         [ "$extract_rc" -le 1 ] || fatal "borg extract failed (rc=$extract_rc) — see the output above"
         [ "$extract_rc" -eq 1 ] && warn "borg extract finished with warnings (rc=1) — review the list above"
+        # Directories the archive does not hold but its files need (the parents
+        # of an include inside an excluded tree, in archives made before 4.0.2)
+        # are created by borg extract as root, mode 700. A home's .local and
+        # .local/share came back that way (found by inspecting a restored
+        # drive), where nothing the user runs can write its state. Give
+        # each such directory the owner, group and mode of its nearest archived
+        # ancestor; a directory the archive does hold keeps what it recorded.
+        log "Checking directories the extract created without an archive entry ..."
+        borg list --format '{path}{NL}' "$BORG_REPO"::"$ARCHIVE" 2>/dev/null | python3 -c '
+import os, stat, sys
+target = sys.argv[1]
+paths = set(l.rstrip("\n") for l in sys.stdin if l.strip())
+made = set()
+for p in paths:
+    d = os.path.dirname(p)
+    while d and d not in paths and d not in made:
+        made.add(d); d = os.path.dirname(d)
+n = 0
+for d in sorted(made, key=lambda x: x.count("/")):
+    t = os.path.join(target, d)
+    try:
+        st = os.lstat(t)
+    except OSError:
+        continue
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+        continue
+    a = os.path.dirname(d)
+    while a and a not in paths:
+        a = os.path.dirname(a)
+    if not a:
+        continue
+    ast = os.stat(os.path.join(target, a))
+    if ast.st_uid == 0:
+        continue
+    os.chown(t, ast.st_uid, ast.st_gid)
+    os.chmod(t, stat.S_IMODE(ast.st_mode))
+    n += 1
+    print("  /%s: root 0%o -> %d:%d 0%o (from /%s)" % (d, stat.S_IMODE(st.st_mode), ast.st_uid, ast.st_gid, stat.S_IMODE(ast.st_mode), a))
+print("  %d director%s repaired" % (n, "y" if n == 1 else "ies"))
+' "$TARGET" || warn "could not check the directories the extract created — look for root-owned directories in the restored homes"
     fi
     log "Extraction ${DRY:+(dry-run) }complete."
     if [ "$FILES_ONLY" = true ]; then

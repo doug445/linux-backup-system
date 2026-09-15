@@ -40,7 +40,7 @@
 # shellcheck disable=SC2034  # read by every script that sources this file
 # Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
 [ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
-BX_VERSION="4.0.1"
+BX_VERSION="4.0.2"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -319,10 +319,13 @@ bx_backup_sources() {
 # rsync snapshots on the root disk (/timeshift — a backup of the system inside it),
 # flatpak's image store, and every ACTIVE SWAPFILE (8–16 GiB of churn that
 # also makes `btrfs subvolume snapshot` of the root refuse). Nothing personal:
-# per-host additions go in BACKUP_EXTRA_EXCLUDES.
+# per-host additions go in BACKUP_EXTRA_EXCLUDES. /var/cache keeps its first level:
+# the cache directories packages create (lightdm:lightdm, akmods:akmods) are
+# part of the system; a restore without them came back missing or root-owned,
+# found by inspecting a restored drive. Their contents stay out.
 bx_excludes() {
     printf '%s\n' '/dev/*' '/proc/*' '/sys/*' '/tmp/*' '/run/*' '/mnt/*' '/media/*' \
-        '/var/tmp/*' '/var/cache/*' '/var/log/journal/*' '/snap/*' '/var/lib/snapd/snap/*' \
+        '/var/tmp/*' '/var/cache/*/*' '/var/log/journal/*' '/snap/*' '/var/lib/snapd/snap/*' \
         '/home/*/.cache/*' '/home/*/.local/share/Trash/*' '/home/*/.npm/_cacache/*' \
         '/home/*/.cargo/registry/*' '/root/.cache/*' '/root/.local/share/Trash/*' \
         '/var/lib/flatpak/*' '/.snapshots/*' '/home/.snapshots/*' '/.backup-snapshots/*' \
@@ -361,11 +364,31 @@ bx_includes() {
 # (BACKUP_EXTRA_SOURCES=/mnt/data), then BACKUP_EXTRA_INCLUDES, then every
 # exclude. The one place this order is decided: borg-backup.sh and the restore
 # test bed build the same archive from it.
+# bx_glob_re GLOB — a shell glob as an anchored borg re: body (no leading slash,
+# as borg matches paths): * and ? stay within one path component.
+bx_glob_re() {
+    printf '%s' "${1#/}" | sed -e 's/[.^$+(){}|\\]/\\&/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\[!/[^/g'
+}
 bx_borg_patterns() {
-    local s i e
+    local s i e d seen=" "
     for s in "$@"; do
         case "$s" in /mnt/*|/media/*|/run/*|/tmp/*) printf -- '--pattern=+%s\n' "$s" ;; esac
     done
+    # The directories ABOVE each include, as exact matches: the directory entry
+    # itself (owner, mode, labels), none of its other contents. Without them an
+    # include inside an excluded tree (/home/*/.local/share/keyrings under
+    # /home/*/*) is archived without its parents, and borg extract creates
+    # /home/<user>/.local and .local/share owned by root, mode 700 — found by
+    # inspecting a restored drive (restore test bed, Fedora 44): nothing the user
+    # runs can write its state there.
+    while IFS= read -r i; do
+        [ -n "$i" ] || continue
+        d=$(dirname "$i")
+        while [ "$d" != / ] && [ "$d" != . ]; do
+            case "$seen" in *" $d "*) ;; *) seen="$seen$d "; printf -- '--pattern=+re:^%s$\n' "$(bx_glob_re "$d")" ;; esac
+            d=$(dirname "$d")
+        done
+    done < <(bx_includes)
     while IFS= read -r i; do [ -n "$i" ] && printf -- '--pattern=+%s\n' "$i"; done < <(bx_includes)
     while IFS= read -r e; do [ -n "$e" ] && printf -- '--pattern=-%s\n' "$e"; done < <(bx_excludes)
     return 0
@@ -375,8 +398,10 @@ bx_source_fully_excluded() { # bx_source_fully_excluded MOUNT
     # Not `bx_excludes | grep -q`: grep -q exits at the first match, the
     # writer gets SIGPIPE, and under the callers' `set -o pipefail` a found
     # match came back as "not excluded" whenever the list was long.
+    # "SRC/*/*" counts too: only the directories below SRC are archived, and a
+    # replica would carry everything in them (a separate /var/cache subvolume).
     local ex; ex=$(bx_excludes)
-    grep -qxF -- "${1%/}/*" <<<"$ex"
+    grep -qxF -e "${1%/}/*" -e "${1%/}/*/*" <<<"$ex"
 }
 
 # ---------------------------------------------------------------------------

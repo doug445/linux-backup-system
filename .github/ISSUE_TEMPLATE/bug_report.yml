@@ -65,7 +65,7 @@ body:
         The `suite=` value at the top of any backup log, the first table row of
         the troubleshooting report, or `git describe --tags --always --dirty`.
         Only the latest release receives fixes.
-      placeholder: "4.0.1"
+      placeholder: "4.0.2"
     validations:
       required: true
 

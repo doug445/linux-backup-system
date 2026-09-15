@@ -91,6 +91,15 @@ cmd "swapon --show"
 sec "Health"
 cmd "systemctl --failed --no-legend"
 cmd "journalctl -b -p err --no-pager -o short-iso | tail -60"
+# Directories inside a home that root owns: the user's desktop cannot write its
+# state there. A restore once left ~/.local and ~/.local/share root:root 700 while
+# every other check PASSed; inspecting the restored drive found it.
+while IFS=: read -r u _ uid _ _ hd _; do
+    [ "$uid" -ge 1000 ] 2>/dev/null && [ "$uid" -lt 60000 ] && [ -d "$hd" ] || continue
+    ro=$(find "$hd" -xdev -maxdepth 4 -type d -uid 0 ! -name __pycache__ 2>/dev/null | head -20 | tr '\n' ' ')
+    if [ -n "$ro" ]; then out "- **WARN: root-owned directories in $u's home** (the desktop cannot write there): \`$ro\`"
+    else out "- PASS: no root-owned directories in $u's home"; fi
+done < /etc/passwd
 
 publish || true
 
