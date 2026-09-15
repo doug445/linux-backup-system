@@ -816,11 +816,11 @@ pass.
 
 ### Will a restore boot on a UKI / systemd-boot / GRUB / BIOS machine?
 
-`restore-rebuild-boot.sh` detects which one the restored system uses and
-rebuilds it — initramfs or UKI, GRUB EFI or BIOS, systemd-boot — inside the
-chroot. Its `--dry-run` plan has been checked on the encrypted-`/boot` GRUB
-host; the plan has not yet been *executed* by a real bare-metal restore, which
-is why that row is ⚠️ (under test now).
+Yes, on confirmed systems. `restore-rebuild-boot.sh` detects which one the
+restored system uses and rebuilds it — initramfs or UKI, GRUB EFI or BIOS,
+systemd-boot — inside the chroot. Successful restore is confirmed by the 
+bare-metal restore status with a ✅. Make sure your system matches all 
+confirmed ✅ restore parameters listed.
 
 ### How is this different from just running borg on a timer?
 
