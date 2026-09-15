@@ -824,6 +824,13 @@ n_carriers=$(cl_find_carriers "$TARGET" | wc -l)
 log "  carriers found under $TARGET: $n_carriers"
 cl_find_carriers "$TARGET" | while IFS=$'\t' read -r k f; do log "    $k: ${f#"$TARGET"}"; done
 while IFS=$'\t' read -r k f; do log "  rewrote $k: ${f#"$TARGET"}"; done < <(cl_rewrite_ids "$TARGET" "$ID_MAP")
+# Every full GRUB config too. The boot rebuild regenerates the one the distro's
+# generator owns; a GRUB built from source reads another (/boot/grub/ on Fedora)
+# that nothing regenerates, and restored verbatim it booted the OLD disk.
+mapfile -t _grub_cfgs < <(cl_grub_cfgs "$TARGET")
+if [ ${#_grub_cfgs[@]} -gt 0 ]; then
+    while IFS=$'\t' read -r k f; do log "  rewrote $k: ${f#"$TARGET"}"; done < <(cl_rewrite_files "$ID_MAP" grubcfg "${_grub_cfgs[@]}")
+fi
 # The new root/home/boot/ESP filesystem ids are declared by the mounts
 # themselves even where fstab names a mapper path (and a swapfile's resume=
 # names the root filesystem): not "undeclared".
@@ -1036,21 +1043,16 @@ while read -r _uki; do
 done < <(cl_ukis "$TARGET")
 [ "$_uki_n" -gt 0 ] || log "  no unified kernel images"
 
-# Verify GRUB config UUIDs
-for grub_cfg in "$TARGET/boot/grub/grub.cfg" "$TARGET/boot/grub2/grub.cfg"; do
-    if [ -f "$grub_cfg" ]; then
-        log "Verifying GRUB config ($grub_cfg)..."
-        for uuid in $(grep -oP '(?:root=UUID=|resume=UUID=|search.*--fs-uuid.*?)\K[0-9a-fA-F-]+' "$grub_cfg" 2>/dev/null | sort -u); do
-            if blkid -U "$uuid" >/dev/null 2>&1; then
-                log "  OK: GRUB UUID=$uuid found"
-            else
-                error "  FAIL: GRUB UUID=$uuid NOT FOUND!"
-                ERRORS=$((ERRORS + 1))
-            fi
-        done
-        break
-    fi
-done
+# Verify GRUB's own files: every grub.cfg, and the early config inside every
+# loader image on the ESP
+while IFS=$'\t' read -r _lvl _msg; do
+    case "$_lvl" in
+        INFO) log "$_msg" ;;
+        OK)   log "  OK: $_msg" ;;
+        WARN) warn "  $_msg"; WARNINGS=$((WARNINGS + 1)) ;;
+        FAIL) error "  FAIL: $_msg"; ERRORS=$((ERRORS + 1)) ;;
+    esac
+done < <(cl_grub_boot_findings "$TARGET" "$ID_MAP")
 
 # Verify initramfs — both naming conventions
 log "Verifying initramfs..."
@@ -1138,4 +1140,9 @@ log "========== BIT RESTORE SESSION END =========="
 cp "$RESTORE_LOG" "$TARGET/var/log/backintime-restore-latest.log" 2>/dev/null || true
 log "Full log: $RESTORE_LOG"
 log "Copied to: /var/log/backintime-restore-latest.log"
+# Failed checks are the exit status, as in borg-restore.sh.
+if [ "$ERRORS" -gt 0 ]; then
+    error "Restore finished with $ERRORS verification error(s) — the restored disk is NOT ready to boot; fix them first (see above)"
+    exit 2
+fi
 log "Restore complete. Unmount all partitions and reboot."

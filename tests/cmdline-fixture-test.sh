@@ -311,6 +311,51 @@ grep -q '^cryptomount -u 2ca341e7-57eb-4e2a-bf92-2bb35eb908bc$' "$U/boot/efi/EFI
     && ! grep -qi c70a3576 "$U/boot/efi/EFI/ubuntu/grub.cfg" \
     && ok "stub: cryptomount -u, cryptouuid/ and search.fs_uuid all rewritten to the new disk" || bad "stub not rewritten: $(cat "$U/boot/efi/EFI/ubuntu/grub.cfg")"
 
+# Fedora 44 with GRUB 2.14 built from source (encrypted argon2 /boot): the ESP stub
+# has no search at all, the full config lives in /boot/grub/ (Fedora's generator
+# writes /boot/grub2/), and the core image on the ESP carries its own early config.
+F="$T/fed214"; FOB=378975e8-04bb-40a4-8993-4172e1a8f4da; FNB=0d57d35b-b847-4330-bc48-d791540caf17
+FOF=fdb44aa8-841e-47e0-9f0f-90cd3005e7d6; FNF=bd9e7fbb-e9e0-41e8-a7c2-dc0f5f9737f1
+mk "$F/boot/efi/EFI/fedora/grub.cfg" "# fallback stub\ncryptomount -u $FOB\nset prefix=(cryptouuid/${FOB//-/})/grub\nexport prefix\nconfigfile \$prefix/grub.cfg\n"
+cl_find_carriers "$F" | grep -q "^grubstub	$F/boot/efi/EFI/fedora/grub.cfg$" && ok "stub with cryptomount + cryptouuid prefix and no search is a carrier" || bad "cryptomount-only stub not found: $(cl_find_carriers "$F")"
+mk "$F/etc/kernel/cmdline" "root=UUID=$OLDFS ro rootflags=subvol=root rd.luks.uuid=luks-$OLDC\n"
+expect "root container still found with a /boot cryptomount stub beside the command line" "$(tr '[:upper:]' '[:lower:]' <<<"$OLDC")" "$(cl_root_luks_id "$F")"
+{ printf 'set timeout=5\n'; for _i in $(seq 1 40); do printf '# filler %s\n' "$_i"; done
+  printf "cryptomount -u %s\nset root='cryptouuid/%s'\n" "$FOB" "${FOB//-/}"
+  printf "  search --no-floppy --fs-uuid --set=root --hint='cryptouuid/%s' --hint-efi=hd2,gpt1  %s\n" "${FOB//-/}" "$FOF"
+  printf '  linux /vmlinuz root=UUID=%s ro rd.luks.uuid=luks-%s\n' "$OLDFS" "$OLDC"
+  printf 'menuentry "other OS" { search --no-floppy --fs-uuid --set=root 1111-2222 }\n'; } > "$T/fedcfg"
+mkdir -p "$F/boot/grub"; cp "$T/fedcfg" "$F/boot/grub/grub.cfg"
+expect "cl_grub_cfgs finds the full config, not the stub" "$F/boot/grub/grub.cfg" "$(cl_grub_cfgs "$F" | tr '\n' ' ' | sed 's/ $//')"
+cl_ids_in_file "$F/boot/grub/grub.cfg" | grep -q "uuid	$FOF" && ok "search --fs-uuid with --hint options before the id is read" || bad "hinted search id not read: $(cl_ids_in_file "$F/boot/grub/grub.cfg")"
+printf '%s %s\n%s %s\n%s NEWFS-000-0000-0000-000000000000\n%s NEWC-0000-0000-0000-000000000000\n' "$FOB" "$FNB" "$FOF" "$FNF" "$OLDFS" "$OLDC" > "$T/fedmap"
+fake_exists() { case "$2" in 1111-2222|"$FOB") return 1 ;; *) return 0 ;; esac; }
+f=$(CL_ID_EXISTS_CMD=fake_exists cl_grub_boot_findings "$F" "$T/fedmap")
+grep -q "^FAIL	/boot/grub/grub.cfg still names the SOURCE disk: .*$FOB" <<<"$f" && ok "findings: a grub.cfg naming source-disk ids FAILs even though the ids exist" || bad "stale grub.cfg not failed: $f"
+cl_rewrite_files "$T/fedmap" grubcfg "$F/boot/grub/grub.cfg" | grep -q "^grubcfg	" && ok "cl_rewrite_files reports the rewritten config" || bad "cl_rewrite_files reported nothing"
+cl_rewrite_ids "$F" "$T/fedmap" >/dev/null
+! grep -qiE "$FOB|${FOB//-/}|$FOF|$OLDFS|$OLDC" "$F/boot/grub/grub.cfg" "$F/boot/efi/EFI/fedora/grub.cfg" \
+    && grep -q "search --no-floppy --fs-uuid --set=root --hint='cryptouuid/${FNB//-/}' --hint-efi=hd2,gpt1  $FNF" "$F/boot/grub/grub.cfg" \
+    && grep -q "set prefix=(cryptouuid/${FNB//-/})/grub" "$F/boot/efi/EFI/fedora/grub.cfg" \
+    && ok "full config (hinted search, cryptouuid root, kernel line) and cryptomount stub rewritten" || bad "fedora 2.14 files not rewritten: $(cat "$F/boot/grub/grub.cfg" "$F/boot/efi/EFI/fedora/grub.cfg")"
+grep -q 'search --no-floppy --fs-uuid --set=root 1111-2222' "$F/boot/grub/grub.cfg" && ok "an id outside the map (os-prober entry) is left alone" || bad "os-prober id changed"
+f=$(CL_ID_EXISTS_CMD=fake_exists cl_grub_boot_findings "$F" "$T/fedmap")
+grep -q "^FAIL.*still names the SOURCE" <<<"$f" && bad "rewritten config still FAILs: $f" || ok "findings: the rewritten config names no source-disk id"
+grep -q "^FAIL	GRUB uuid 1111-2222 (/boot/grub/grub.cfg) NOT FOUND" <<<"$f" && ok "findings: an id no device has FAILs in the first config" || bad "missing id not failed: $f"
+printf 'MZ\0\0binary\0cryptomount -u %s\0set prefix=(cryptouuid/%s)/grub\0' "$FOB" "${FOB//-/}" > "$F/boot/efi/EFI/fedora/grubx64.efi"
+printf 'MZ\0\0shim, no early config\0' > "$F/boot/efi/EFI/fedora/shimx64.efi"
+f=$(CL_ID_EXISTS_CMD=fake_exists cl_grub_boot_findings "$F" "$T/fedmap")
+grep -q "^FAIL	/boot/efi/EFI/fedora/grubx64.efi carries an early config naming the SOURCE disk: $FOB" <<<"$f" && ok "findings: a core image whose early config names the source disk FAILs" || bad "stale core not failed: $f"
+grep -q shimx64 <<<"$f" && bad "an image with no early config was reported" || ok "findings: an image with no early config is not reported"
+# The restore scripts run under set -e: an image without an early config (shim)
+# sorted before the stale core must not end the check.
+cp "$F/boot/efi/EFI/fedora/shimx64.efi" "$F/boot/efi/EFI/fedora/aaa-shim.efi"
+f=$( set -e; CL_ID_EXISTS_CMD=fake_exists cl_grub_boot_findings "$F" "$T/fedmap" )
+grep -q "^FAIL	/boot/efi/EFI/fedora/grubx64.efi carries an early config" <<<"$f" && ok "findings under set -e: a shim before the stale core does not end the check" || bad "set -e cut the loader check short: $f"
+rm -f "$F/boot/efi/EFI/fedora/aaa-shim.efi"
+printf 'MZ\0\0binary\0cryptomount -u %s\0' "$FNB" > "$F/boot/efi/EFI/fedora/grubx64.efi"
+grep -q "^OK	/boot/efi/EFI/fedora/grubx64.efi: early config names this disk" <<<"$(CL_ID_EXISTS_CMD=fake_exists cl_grub_boot_findings "$F" "$T/fedmap")" && ok "findings: a rebuilt core image is OK" || bad "rebuilt core not OK"
+
 echo "== optional crypttab drives; UKI embedded command lines; extra expected ids"
 mk "$T/ct/etc/crypttab" "data1 UUID=$OL none discard,nofail,noauto\ndata2 UUID=$OB /k nofail\nroot UUID=$NL none discard\n# old UUID=$OR none noauto\n"
 cl_crypttab_optional "$T/ct/etc/crypttab" data1 && ok "noauto,nofail entry is optional" || bad "data1 not optional"

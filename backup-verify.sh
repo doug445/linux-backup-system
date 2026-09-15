@@ -142,22 +142,25 @@ is_bios_boot() { [[ ! -d /sys/firmware/efi ]]; }
 # (Fedora, Manjaro, EndeavourOS, Linux Mint, Asahi).
 uses_grub() { [[ -f /boot/grub2/grub.cfg || -f /boot/grub/grub.cfg ]]; }
 
+# The newest GRUB installed: the distro's, or one built from source into
+# /usr/local beside it (Fedora 44's 2.12 next to a 2.14 that opens argon2 —
+# reporting the first found named the one that cannot).
 grub_version() {
     local g
-    for g in grub2-install grub-install grub2-mkconfig grub-mkconfig; do
+    for g in grub2-install grub-install grub2-mkconfig grub-mkconfig \
+             /usr/local/sbin/grub-install /usr/local/bin/grub-install /usr/local/sbin/grub2-install /usr/local/bin/grub2-install; do
         command -v "$g" &>/dev/null || continue
         "$g" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1
-        return 0
-    done
+    done | sort -V | tail -1
 }
 
 # true when $1 >= $2
 ver_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]; }
 
-# GRUB gained LUKS2 argon2 support in 2.12. Below that it can only derive
-# PBKDF2 and an argon2id /boot is genuinely unopenable; at or above it,
-# argon2id /boot is fine and is the intended configuration here.
-GRUB_ARGON2_MIN="2.12"
+# GRUB gained LUKS2 argon2 support in 2.14 — 2.12 has none (Fedora 44 ships
+# 2.12 and cannot open an argon2 /boot). Below 2.14 GRUB can only derive PBKDF2
+# and an argon2id /boot is unopenable, unless that GRUB ships argon2.mod.
+GRUB_ARGON2_MIN="2.14"
 
 # Underlying block device of an active dm-crypt mapping ("" if not one).
 luks_dev_of_mapper() {
@@ -597,11 +600,12 @@ if [[ -n "$boot_dev" ]] || is_asahi || is_bios_boot; then
         [[ "$boot_ver" == 1 ]] && boot_kdf=pbkdf2
         say_kdf="LUKS${boot_ver:-?}/${boot_kdf:-unknown}"
         gv="$(grub_version)"
-        # argon2 capable: 2.12+, or a distro backport that ships the module
-        # (openSUSE's 2.06 does).
+        # argon2 capable: 2.14+, or a GRUB that ships the module — a distro
+        # backport, or one built from source into /usr/local next to the
+        # distro's older one (the version above is the distro's).
         grub_argon2_ok=0
         if [[ -n "$gv" ]] && ver_ge "$gv" "$GRUB_ARGON2_MIN"; then grub_argon2_ok=1
-        elif compgen -G "/usr/lib/grub/*/argon2.mod" >/dev/null 2>&1 || compgen -G "/boot/grub*/*/argon2.mod" >/dev/null 2>&1; then grub_argon2_ok=1; fi
+        elif compgen -G "/usr/lib/grub/*/argon2.mod" >/dev/null 2>&1 || compgen -G "/usr/local/lib/grub/*/argon2.mod" >/dev/null 2>&1 || compgen -G "/boot/grub*/*/argon2.mod" >/dev/null 2>&1; then grub_argon2_ok=1; fi
         if uses_grub && [[ "$boot_kdf" == *pbkdf2* ]]; then
             # The form stock GRUB opens: LUKS1 needs GRUB >= 2.02 (cryptodisk),
             # LUKS2 with pbkdf2 needs GRUB >= 2.06. UNTESTED ON METAL — see the

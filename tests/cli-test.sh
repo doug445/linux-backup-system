@@ -297,6 +297,52 @@ if [ "$(id -u)" -ne 0 ]; then
     bash "$ROOT/testbed/testbed.sh" status >/dev/null 2>&1; expect "testbed.sh as a normal user refuses (exit 1)" 1 "$?"
 fi
 grep -q 'TB_PASSPHRASE' "$ROOT/borg-restore.sh" "$ROOT/backintime-restore.sh" "$ROOT/restore.sh" "$ROOT/deploy.sh" && bad "a real restore/deploy script references the test passphrase" || ok "no real restore or deploy script carries a passphrase"
+# The Mac firmware menu showed the test drive exactly like the host's disk (the
+# restored volume icon and label): finish labels it TEST and parks the icon.
+tb_fn() { awk -v n="$1() {" '$0==n {p=1} p {print} p && /^}$/ {exit}' "$ROOT/testbed/testbed.sh"; }
+grep -qx '    mark_test_drive_picker' <<<"$(awk '/^cmd_finish\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")" && ok "finish labels the test drive in the firmware boot menu" || bad "cmd_finish does not call mark_test_drive_picker"
+grep -qx '    preflight_grub_unlock' <<<"$(awk '/^cmd_finish\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")" && ok "finish checks GRUB opens the test drive with the passphrase before the boot" || bad "cmd_finish does not call preflight_grub_unlock"
+# vmboot: the test drive boots in QEMU before a real reboot, never writing to it
+vmb=$(awk '/^cmd_vmboot\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")
+grep -q 'snapshot=on' <<<"$vmb" && ok "vmboot attaches the test drive with snapshot=on (nothing written to it)" || bad "vmboot does not use snapshot=on"
+grep -q -- '-nic none' <<<"$vmb" && ok "vmboot gives the VM no network (restored homes hold real logins)" || bad "vmboot VM has a network"
+grep -q 'serial=\$TB_TARGET_SERIAL' <<<"$vmb" && ok "vmboot's virtual disk carries the test drive's serial (logger PASS check)" || bad "vmboot disk has no serial"
+grep -q 'REPORT_PARTUUID' <<<"$vmb" && ok "vmboot gives the logger a report disk with the report PARTUUID" || bad "vmboot has no report disk"
+grep -qx '    vmboot)      cmd_vmboot ;;' "$ROOT/testbed/testbed.sh" && ok "testbed.sh vmboot is a command" || bad "vmboot not dispatched"
+grep -q 'cmd_vmboot' <<<"$(awk '/^cmd_finish\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")" && ok "finish runs the VM boot before saying the drive is ready" || bad "finish does not run vmboot"
+grep -q 'vmboot=' "$ROOT/backup-diag.sh" && grep -q 'VM boot of the test drive' "$ROOT/backup-diag.sh" && ok "the troubleshooting report carries the VM boot verdict" || bad "backup-diag.sh has no VM boot section"
+# The report disk is read through mtools, from the image file: a loop device every
+# poll popped the desktop's device notifier up every 30 s.
+if command -v sgdisk >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1 && command -v mkfs.vfat >/dev/null 2>&1; then
+    ri="$T/report.img"; truncate -s 64M "$ri"; sgdisk -n 1:0:0 -t 1:0700 "$ri" >/dev/null
+    rf=$(sgdisk -i 1 "$ri" | awk '/^First sector/{print $3}'); rl=$(sgdisk -i 1 "$ri" | awk '/^Last sector/{print $3}')
+    mkfs.vfat --offset "$rf" "$ri" $(( (rl - rf + 1) / 2 )) >/dev/null 2>&1
+    printf 'x\n_report complete_\n' > "$T/br.md"
+    MTOOLS_SKIP_CHECK=1 mmd -i "$ri@@$((rf * 512))" ::/restore-test-h-1 && MTOOLS_SKIP_CHECK=1 mcopy -i "$ri@@$((rf * 512))" "$T/br.md" ::/restore-test-h-1/boot-report-1.md
+    ( losetup() { echo "losetup called" >&2; return 1; }; eval "$(awk '/^vm_report_read\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")"; vm_report_read "$ri" "$T/rr" ) 2>"$T/rr.err"
+    grep -q '_report complete_' "$T/rr/boot-report-1.md" 2>/dev/null && ! grep -q 'losetup called' "$T/rr.err" \
+        && ok "vmboot reads the report disk from the image file (mtools), no loop device" || bad "report disk read: $(cat "$T/rr.err")"
+fi
+# GRUB runs a built-in config through its rescue parser: plain commands only. An
+# `if … fi` there unlocked nothing and the test boot stopped at grub>.
+# shellcheck disable=SC2034  # read by the eval'd testbed function
+ecfg=$( TB_TARGET_SERIAL=SERIAL1; TB_PASSPHRASE="test"; eval "$(tb_fn grub_early_cfg)"; grub_early_cfg bbbb-boot bbbb-boot rrrr-root )
+grep -q 'TEST DRIVE' <<<"$ecfg" && ok "the auto-unlock loader announces itself as the TEST DRIVE" || bad "early config has no TEST DRIVE banner: $ecfg"
+expect "early config: /boot first, then the other container, each once, with -p" "cryptomount -u bbbb-boot -p test|cryptomount -u rrrr-root -p test" "$(grep '^cryptomount' <<<"$ecfg" | paste -sd'|')"
+grep -vE '^(echo|cryptomount|set|insmod|search|sleep) ' <<<"$ecfg" | grep -q . && bad "early config has a line GRUB's rescue parser cannot run: $(grep -vE '^(echo|cryptomount|set|insmod|search|sleep) ' <<<"$ecfg")" || ok "early config: plain commands only (rescue parser — no if/then/fi, &&, ||, braces)"
+grep -qE '(^|[; ])(if|then|else|fi|for|while|do|done)([; ]|$)|&&|\|\||[{}]' <<<"$ecfg" && bad "early config uses shell control flow" || ok "early config: no shell control flow"
+P="$T/picker"; mkdir -p "$P/boot/efi/EFI/BOOT"; printf 'icon' > "$P/boot/efi/.VolumeIcon.icns"; printf 'main-nvme' > "$P/boot/efi/EFI/BOOT/.disk_label.contentDetails"
+# shellcheck disable=SC2034  # read by the eval'd testbed function
+out=$( TB_MNT="$P"; TB_STATE="$T/pstate"
+       layout() { case "$1" in FIRMWARE) echo uefi ;; ESP_MOUNT) echo /boot/efi ;; esac; }
+       say() { echo "say: $*"; }; warn() { echo "warn: $*"; }; ledger() { :; }
+       eval "$(tb_fn mark_test_drive_picker)"; mark_test_drive_picker 2>&1 )
+[ ! -e "$P/boot/efi/.VolumeIcon.icns" ] && [ -f "$P/root/restore-test/VolumeIcon.icns.parked" ] && ok "picker: the restored volume icon is parked on the test drive" || bad "picker: volume icon not parked: $out"
+expect "picker: .disk_label.contentDetails says TEST" "TEST" "$(cat "$P/boot/efi/EFI/BOOT/.disk_label.contentDetails")"
+if command -v grub-render-label >/dev/null 2>&1 || command -v grub2-render-label >/dev/null 2>&1; then
+    [ -s "$P/boot/efi/EFI/BOOT/.disk_label" ] && [ -s "$P/boot/efi/EFI/BOOT/.disk_label_2x" ] && [ "$(head -c1 "$P/boot/efi/EFI/BOOT/.disk_label" | od -An -tx1 | tr -d ' ')" = 01 ] \
+        && ok "picker: a rendered Apple .disk_label (and _2x) for TEST" || bad "picker: no rendered label: $out"
+fi
 mkdir -p "$T/cm/usr/bin" "$T/cm/etc"
 printf 'data-one\n' > "$T/cm/usr/bin/a"; ln "$T/cm/usr/bin/a" "$T/cm/usr/bin/a-link"
 printf 'changed-longer\n' > "$T/cm/etc/state"; printf 'x\n' > "$T/cm/etc/same"

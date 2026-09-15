@@ -345,7 +345,19 @@ section "Restore test bed runs"
 # The evidence a Bare-metal restore row turns green on: attach the state
 # directory's LEDGER.md, boot-report/ and byte-comparison.md with the issue.
 if [ $IS_ROOT = 1 ]; then
-    runsh "/var/lib/linux-backup-testbed" 'n=0; for d in /var/lib/linux-backup-testbed/*/; do [ -d "$d" ] || continue; n=1; g() { cat "$d/$1" 2>/dev/null | head -1; }; printf "%s  verdict=%s suite=%s backup=%s restore-rc=%s collected=%s\n" "$(basename "$d")" "$(g verdict || true)" "$(g suite-version)" "$(g backup-mode)" "$(g restore-rc)" "$([ -f "$d/finished-collect" ] && echo yes || echo no)"; grep -h "restored with the archived size" "$d/byte-comparison.md" 2>/dev/null | sed "s/^/    /"; done; [ "$n" = 1 ] || echo "no test bed runs on this machine"'
+    runsh "/var/lib/linux-backup-testbed" 'n=0; for d in /var/lib/linux-backup-testbed/*/; do [ -d "$d" ] || continue; n=1; g() { cat "$d/$1" 2>/dev/null | head -1; }; printf "%s  verdict=%s vmboot=%s suite=%s backup=%s restore-rc=%s preflight-grub=%s collected=%s\n" "$(basename "$d")" "$(g verdict || true)" "$(g vmboot || true)" "$(g suite-version)" "$(g backup-mode)" "$(g restore-rc)" "$(g preflight-grub-unlock || true)" "$([ -f "$d/finished-collect" ] && echo yes || echo no)"; grep -h "restored with the archived size" "$d/byte-comparison.md" 2>/dev/null | sed "s/^/    /"; done; [ "$n" = 1 ] || echo "no test bed runs on this machine"'
+    # The newest run's VM boot (testbed.sh vmboot, run by finish): what the test
+    # drive did before anyone booted it for real — its loader on the serial
+    # console, and the verdict lines of the boot logger that ran inside the VM.
+    runsh "newest test bed run: VM boot of the test drive" 'd=$(ls -1d /var/lib/linux-backup-testbed/*/ 2>/dev/null | sort | tail -1); [ -n "$d" ] || { echo "no test bed runs"; exit 0; }; v="$d/vm"
+        echo "run: $(basename "$d")  vmboot=$(cat "$d/vmboot" 2>/dev/null || echo never-ran)"
+        [ -s "$d/vmboot-why" ] && echo "why: $(cat "$d/vmboot-why")"
+        [ -d "$v" ] || exit 0
+        echo "qemu: $(qemu-system-$(uname -m) --version 2>/dev/null | head -1)"
+        echo "--- loader on the serial console"; tr -d "\r" < "$v/serial.log" 2>/dev/null | sed "s/\x1b\[[0-9;?]*[a-zA-Z]//g" | grep -aoE "linux-backup-system TEST DRIVE [^:]*|Slot \"[0-9]+\" opened|No key available[^.]{0,80}|error: .{0,100}|Booting .{0,90}|GNU GRUB +version [0-9.]+" | sort | uniq -c | head -20
+        r=$(ls -1 "$v"/boot-report/boot-report-*.md 2>/dev/null | sort | tail -1)
+        if [ -n "$r" ]; then echo "--- boot logger inside the VM ($(basename "$r"))"; grep -hE "\*\*|system state|_report complete_" "$r"; else echo "--- no boot report from the VM"; fi
+        echo "--- screenshots: $(ls "$v"/screen-* 2>/dev/null | wc -l) in $v (attach screen-last.png with a failure)"'
 else
     skip "the test bed state needs root"
 fi
