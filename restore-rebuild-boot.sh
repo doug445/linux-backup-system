@@ -38,7 +38,7 @@
 #   - UKI (unified kernel image): kernel-install / dracut --uefi
 #   - bootloader: GRUB (EFI + BIOS, x86_64/aarch64), systemd-boot (bootctl),
 #     Limine and rEFInd (untested on metal), with a firmware boot entry
-#   - encrypted /boot: enables GRUB cryptodisk; warns if GRUB < 2.12 with argon2
+#   - encrypted /boot: enables GRUB cryptodisk; warns when no GRUB has the argon2 module (2.14+) for an argon2 /boot
 #
 # Usage:  restore-rebuild-boot.sh [--dry-run]
 # Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
@@ -371,37 +371,92 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$USES_GRUB" = true ]; then
     say "===== GRUB ====="
+    case "$ARCH" in x86_64) gt=x86_64-efi; ea=x64 ;; aarch64) gt=arm64-efi; ea=aa64 ;; *) gt="$ARCH-efi"; ea="" ;; esac
+    [ "$IS_EFI" = true ] || gt=i386-pc
+    # Every grub-install on the system, newest first: the distro's, and one built
+    # from source into /usr/local (the only GRUB that opens an argon2 /boot on a
+    # distro whose own GRUB cannot). "version<TAB>path", symlinks resolved.
+    grub_installs() {
+        local g
+        for g in /usr/local/sbin/grub-install /usr/local/bin/grub-install /usr/local/sbin/grub2-install /usr/local/bin/grub2-install \
+                 /usr/sbin/grub2-install /usr/sbin/grub-install /usr/bin/grub2-install /usr/bin/grub-install; do
+            [ -x "$g" ] || continue
+            g=$(readlink -f "$g")
+            printf '%s\t%s\n' "$("$g" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)" "$g"
+        done | sort -u -t$'\t' -k2,2 | sort -t$'\t' -k1,1Vr
+    }
+    # grub_moddir INSTALL — the module directory that grub-install builds images from.
+    grub_moddir() {
+        local p d; p=$(dirname "$(dirname "$1")")
+        for d in "$p/lib/grub/$gt" "$p/lib64/grub/$gt" "$p/share/grub/$gt"; do [ -d "$d" ] && { echo "$d"; return 0; }; done
+        return 1
+    }
+    gi=""; gv=""; need_mod=""
     if [ "$BOOT_ON_LUKS" = true ]; then
         if ! grep -qs '^GRUB_ENABLE_CRYPTODISK=y' /etc/default/grub 2>/dev/null; then
             say "enabling GRUB_ENABLE_CRYPTODISK=y (encrypted /boot)"
             runsh "sed -i '/^GRUB_ENABLE_CRYPTODISK=/d' /etc/default/grub 2>/dev/null; echo GRUB_ENABLE_CRYPTODISK=y >> /etc/default/grub"
         fi
-        gv=$({ grub2-install --version 2>/dev/null || grub-install --version 2>/dev/null; } | grep -oE '[0-9]+\.[0-9]+' | head -1)
         # What GRUB must be able to open depends on the /boot container: LUKS1
-        # needs cryptodisk (GRUB >= 2.02), LUKS2 with pbkdf2 needs >= 2.06,
-        # argon2 needs >= 2.12. Read the container, not an assumption.
+        # needs cryptodisk (GRUB >= 2.02), LUKS2 with pbkdf2 needs >= 2.06, argon2
+        # needs the argon2 module — GRUB 2.14 or later; 2.12 has no argon2 (Fedora
+        # 44's own GRUB is 2.12). Read the container, and the
+        # modules of the GRUB that builds the image, not a version number.
         boot_mapper=$(findmnt -no SOURCE /boot 2>/dev/null | sed 's/\[.*//'); boot_mapper=${boot_mapper#/dev/mapper/}
         boot_luks=$(cryptsetup status "$boot_mapper" 2>/dev/null | awk '/device:/{print $2}')
         boot_kdf=$(cryptsetup luksDump "$boot_luks" 2>/dev/null | awk '/PBKDF:/{print $2; exit}')
         boot_lv=$(cryptsetup luksDump "$boot_luks" 2>/dev/null | awk '/^Version:/{print $2; exit}')
         case "${boot_lv:-?}/${boot_kdf:-?}" in
-            */argon2*) need=2.12 ;;
-            2/*)       need=2.06 ;;
-            1/*)       need=2.02 ;;
-            *)         need=2.12 ;;   # unknown: assume the strictest
+            */argon2*) need=2.14; need_mod=argon2 ;;
+            2/*)       need=2.06; need_mod=luks2 ;;
+            1/*)       need=2.02; need_mod=luks ;;
+            *)         need=2.14; need_mod=argon2 ;;   # unknown: assume the strictest
         esac
-        say "encrypted /boot: LUKS${boot_lv:-?}/${boot_kdf:-?} — needs GRUB >= $need (found ${gv:-unknown})"
-        if [ -n "$gv" ] && [ "$(printf '%s\n%s\n' "$need" "$gv" | sort -V | head -1)" != "$need" ]; then
-            warn "GRUB $gv is older than $need and cannot unlock this /boot (LUKS${boot_lv:-?}/${boot_kdf:-?}) — restore may leave /boot unopenable"
+        # The newest grub-install whose modules open this container.
+        while IFS=$'\t' read -r _v _g; do
+            _md=$(grub_moddir "$_g") || continue
+            [ -f "$_md/$need_mod.mod" ] || continue
+            gi=$_g; gv=$_v; break
+        done < <(grub_installs)
+        if [ -n "$gi" ]; then
+            say "encrypted /boot: LUKS${boot_lv:-?}/${boot_kdf:-?} — needs GRUB with $need_mod.mod: $gi (GRUB ${gv:-?}, $(grub_moddir "$gi"))"
+        else
+            warn "encrypted /boot: LUKS${boot_lv:-?}/${boot_kdf:-?} needs a GRUB with the $need_mod module (>= $need) — none of these has it: $(grub_installs | tr '\t\n' ' ,')the restored /boot may be unopenable"
         fi
     fi
+    [ -n "$gi" ] || gi=$(grub_installs | head -1 | cut -f2)
     # Reinstall the bootloader
     if [ "$IS_EFI" = true ]; then
-        case "$ARCH" in x86_64) gt=x86_64-efi;; aarch64) gt=arm64-efi;; *) gt="$ARCH-efi";; esac
         bid="${ID:-linux}"; edir="${ESP:-/boot/efi}"
-        gi=""; command -v grub2-install >/dev/null 2>&1 && gi=grub2-install
-        [ -z "$gi" ] && command -v grub-install >/dev/null 2>&1 && gi=grub-install
-        if [ "$DISTRO_FAMILY" = fedora ] && compgen -G "$edir/EFI/$bid/shim*.efi" >/dev/null 2>&1; then
+        # A core image built ON the source machine (grub-install, grub-mkimage -c)
+        # carries its own early config naming that machine's disk: `cryptomount
+        # -u <id>`, a `(cryptouuid/<id>)` prefix, `search --fs-uuid <id>`. A
+        # distro's signed image carries none. Kept as a "signed image", a from-
+        # source GRUB 2.14 behind shim unlocked the OLD disk's /boot and never
+        # found its config on the restored one. It is built again, by the GRUB
+        # that can open this /boot, the way grub-install builds it.
+        # Only the shim branch below keeps the image as it is; every other branch
+        # runs grub-install anyway.
+        core="$edir/EFI/$bid/grub$ea.efi"; LOCAL_CORE=false
+        if [ "$DISTRO_FAMILY" = fedora ] && [ -n "$ea" ] && [ -f "$core" ] && compgen -G "$edir/EFI/$bid/shim*.efi" >/dev/null 2>&1 \
+           && LC_ALL=C grep -qaE 'cryptomount -u [0-9a-fA-F-]{8,}|cryptouuid/[0-9a-fA-F]{32}|search(\.fs_uuid| .*--fs-uuid) [0-9a-fA-F-]{8,}' "$core"; then
+            LOCAL_CORE=true
+            say "${core#"$edir"/} carries an early config naming the source disk — a GRUB core built on that machine, not the distro's signed image"
+        fi
+        if [ "$LOCAL_CORE" = true ]; then
+            # --boot-directory=/boot: the prefix is /boot/grub for grub-install,
+            # /boot/grub2 for Fedora's grub2-install — the config the restore rewrote.
+            if [ -z "$gi" ]; then
+                warn "no grub-install to rebuild ${core#"$edir"/} with — it still names the source disk; the restored disk will not boot through it"
+            elif run env GRUB_ENABLE_CRYPTODISK=y "$gi" --target="$gt" --efi-directory="$edir" --boot-directory=/boot --bootloader-id="$bid" --no-nvram; then
+                say "rebuilt ${core#"$edir"/} with $gi"
+                # grub-install ran with --no-nvram (it would point the entry at
+                # grub, past shim): the entry goes to what loads this core.
+                if [ -f "$edir/EFI/$bid/shim$ea.efi" ]; then efi_boot_entry "$bid" "$edir/EFI/$bid/shim$ea.efi"; else efi_boot_entry "$bid" "$core"; fi
+            else
+                warn "$gi failed to rebuild ${core#"$edir"/} — it still names the source disk; the restored disk will not boot through it"
+            fi
+        elif [ "$DISTRO_FAMILY" = fedora ] && compgen -G "$edir/EFI/$bid/shim*.efi" >/dev/null 2>&1; then
             # Fedora/RHEL boot shim -> the SIGNED grubx64.efi from the grub2-efi
             # package. grub2-install would replace it with an unsigned image
             # (Secure Boot then refuses it) or fail for lack of the modules
@@ -438,6 +493,20 @@ if [ "$USES_GRUB" = true ]; then
                 run "$gi" --target="$gt" --efi-directory="$edir" --bootloader-id="$bid" --recheck --no-nvram --removable || true
             fi
         fi
+        # The removable-media path holding shim (EFI/BOOT/BOOTX64.EFI = shimx64.efi):
+        # shim loads grubx64.efi from its OWN directory, and there is none in
+        # EFI/BOOT on a Fedora ESP — with no firmware entry (an installed-system
+        # restore writes none) the disk boots from the firmware menu only through
+        # that path. Put this ESP's GRUB core beside it (and MokManager, which shim
+        # also loads from there).
+        if [ "$NO_NVRAM" = 1 ] && [ -n "$ea" ]; then
+            _fb="$edir/EFI/BOOT/BOOT$(tr '[:lower:]' '[:upper:]' <<<"$ea").EFI"; _shim="$edir/EFI/$bid/shim$ea.efi"
+            if [ -f "$_fb" ] && [ -f "$_shim" ] && cmp -s "$_fb" "$_shim" && [ -f "$core" ] && ! cmp -s "$core" "$edir/EFI/BOOT/grub$ea.efi" 2>/dev/null; then
+                say "EFI/BOOT/${_fb##*/} is shim: this ESP's GRUB core copied beside it (EFI/BOOT/grub$ea.efi), the loader shim looks for there"
+                run cp -f "$core" "$edir/EFI/BOOT/grub$ea.efi"
+                [ -f "$edir/EFI/$bid/mm$ea.efi" ] && run cp -f "$edir/EFI/$bid/mm$ea.efi" "$edir/EFI/BOOT/mm$ea.efi"
+            fi
+        fi
     else
         disk=$(disk_of "$boot_src" 2>/dev/null || true)
         if [ -n "$disk" ]; then
@@ -453,6 +522,22 @@ if [ "$USES_GRUB" = true ]; then
     elif command -v grub-mkconfig >/dev/null 2>&1; then run grub-mkconfig -o /boot/grub/grub.cfg
     elif command -v grub2-mkconfig >/dev/null 2>&1; then run grub2-mkconfig -o /boot/grub2/grub.cfg
     else warn "no grub config generator found"; fi
+    # A rebuilt local core reads the config under its own prefix, which need not
+    # be the one the distro generator just wrote (a from-source grub-install
+    # reads /boot/grub/ on Fedora, whose generator writes /boot/grub2/). The
+    # restore rewrote that config's ids; it is kept — it is the owner's, with
+    # whatever the owner's own generator put in it. Missing, it is generated by
+    # the mkconfig that belongs to that GRUB.
+    if [ "${LOCAL_CORE:-false}" = true ] && [ -n "$gi" ]; then
+        _gd=grub; case "$(basename "$gi")" in grub2-*) _gd=grub2 ;; esac
+        if [ -f "/boot/$_gd/grub.cfg" ]; then
+            say "/boot/$_gd/grub.cfg (the config the rebuilt core reads) kept as restored — its ids were rewritten for this disk"
+        else
+            _mk="$(dirname "$gi")/$(basename "$gi" | sed 's/install$/mkconfig/')"
+            if [ -x "$_mk" ]; then run "$_mk" -o "/boot/$_gd/grub.cfg"
+            else warn "no /boot/$_gd/grub.cfg for the rebuilt core and no $_mk to generate it — GRUB will stop at a prompt"; fi
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------

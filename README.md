@@ -40,7 +40,7 @@ paths hardcoded.
 > A backup you have never restored is a hope, not a backup; a ⚠️ or ❌ restore
 > row means nobody has yet booted that setup from a restored disk.
 
-> ### Status: ✅ verified on metal, ⚠️ undergoing testing now, ❌ written but not yet verified
+> ### Status: ✅ verified on metal, ⚠️ undergoing testing now, ❌ not written or not yet verified
 >
 > "Universal" is the goal and the design; the proof is per setup. The
 > [Tested / untested](#tested--untested) tables say which distros, root
@@ -168,6 +168,7 @@ column, use the suite for testing only — not in production.**
 | Manjaro (x86_64) | 2019 ASUS ZenBook UX534FTC (i7-10510U, 16 GB RAM, 2 TB NVMe) | btrfs root (`@`/`@home`/`@cache`/`@log`, snapper, swapfile) on LUKS2 opened by sd-encrypt, XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs from mkinitcpio, Secure Boot with sbctl keys; 2 TB USB SATA SSD backup drive (LUKS2) | **total system restore ✅ — success**, 2026-09-14, 3.9.0: restored onto a blank 2 TB USB NVMe and booted into a fully working system with Secure Boot on (Wi-Fi, DNS, Bluetooth up), the original disk untouched. Backups: deploy over a retired borgmatic install, unlock-on-connect, incremental btrfs replicas, borg archive, LUKS headers |
 | Linux Mint 22.3 (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM) — **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**, each on its own SATA SSD; the Mint SSD is the one restored | ext4 root on LVM-on-LUKS2 (`mint-vg`, root + swap LVs, unlocked in the initramfs by a keyfile), encrypted LUKS2 argon2id `/boot` opened by GRUB 2.14 (EFI), ESP at `/boot/efi`, standard `vmlinuz` + `initramfs` from initramfs-tools, SELinux permissive; 2 TB USB SATA SSD backup drive (LUKS2, btrfs) | **total system restore ✅ — success**, 2026-09-14, 4.0.0: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) and booted into a fully working system (Wi-Fi, DNS, login screen; SELinux relabel boot), `testbed.sh collect` → `VERDICT: PASS`, the other two OSes' disks and the original Mint disk untouched |
 | Fedora 44 Workstation (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, GeForce 840M) — the same **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**; the Fedora SSD is the one restored | btrfs root (`root` + `home` subvolumes) on LUKS2 argon2id unlocked in the initramfs by dracut + systemd-cryptsetup (`rd.luks.uuid=`), vfat XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs built by kernel-install (plus a dracut rescue UKI), Secure Boot off, **SELinux enforcing**, Cinnamon on X11; 2 TB USB SATA SSD backup drive (LUKS2, btrfs, shared with another machine) | **total system restore ✅ — success**, 2026-09-14, 4.0.2: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) from a functional test archive (35.8 GB, 587,637 files) and booted into a fully working system (Wi-Fi, DNS, desktop login; SELinux enforcing relabel boot; system state `running`), `testbed.sh collect` → `VERDICT: PASS`, 99.99 % of files restored with the archived size, the other two OSes' disks and the original Fedora disk untouched. Forensic inspection of the first restored drive found `~/.local` and `~/.local/share` restored with the wrong ownership and permissions (`root:root 700`) and package-made `/var/cache` directories missing or root-owned — fixed in 4.0.2, the ownership fix re-verified by a second restore. Backups: deploy over a hand-written pre-suite borg setup, borg archive, LUKS headers |
+| Fedora 44 Workstation (x86_64) | 2014 MacBook Pro 15" Retina (Mid 2014, i7-4870HQ, 16 GB RAM, GeForce GT 750M on the proprietary NVIDIA 470xx driver, Intel AX210 Wi-Fi, 1.92 TB OWC Aura Pro X2 NVMe) | btrfs root (`root` + `home` subvolumes) on LUKS2 argon2id unlocked in the initramfs by dracut + systemd-cryptsetup with a keyfile (`rd.luks.uuid=`), **encrypted LUKS2 argon2id `/boot` (ext4) opened by GRUB 2.14 built from source into `/usr/local`** — its core image on the ESP carries its own early config (`cryptomount -u`) and reads `/boot/grub/grub.cfg`, while Fedora's generator writes `/boot/grub2/` — behind Fedora's shim, BLS entries, ESP at `/boot/efi`, Secure Boot off, **SELinux enforcing**, KDE Plasma on X11; 2 TB USB SATA SSD backup drive (LUKS2, btrfs, another machine's production drive) | **total system restore ✅ — success**, 2026-09-15, 4.0.3: restored from the installed system onto a blank 2 TB USB NVMe (100 GiB test bed) from a functional test archive (22.6 GB, 447,938 files), booted first in a VM by `testbed.sh vmboot` (PASS), then on the machine from the firmware menu (Option key, the drive labelled TEST) into a working system (Wi-Fi, DNS, Bluetooth with its paired devices; SELinux enforcing relabel boot; system state `degraded` by `packagekit.service` alone), `testbed.sh collect` → `VERDICT: PASS`, 99.99 % of files restored with the archived size (every difference a log or state file the booted session wrote), the original disk identical before and after. The first restore of this machine would **not** have booted, with every check passing: the restore kept the from-source GRUB core as a distro-signed image (it unlocked the ORIGINAL disk's `/boot`), never rewrote `/boot/grub/grub.cfg` or the ESP stub (`cryptomount` + `cryptouuid/` prefix, no `search`), and its GRUB checks accepted the original disk's ids because that disk was still installed; the argon2 check compared version numbers (Fedora 44's own GRUB 2.12 has no argon2), and the restore exited 0 after verification FAILs. Fixed in 4.0.3. The test bed found three faults of its own on the first test boots — the restored ESP made the Mac firmware menu show the test drive exactly like the internal disk; a status line with `if … fi` in the test loader's built-in config (GRUB runs it through its rescue parser) unlocked nothing and stopped at `grub>`; the VM boot's report-disk polling popped up the desktop's device notifier — all fixed in 4.0.3 |
 
 **Distros**
 
@@ -186,7 +187,7 @@ column, use the suite for testing only — not in production.**
 |---|---|:--:|:--:|
 | btrfs (subvolumes, swapfile) | btrfs send/receive (`borg-backup.sh`) | ✅ | ✅ |
 | ext4 | Timeshift (`timeshift-backup.sh`) | ✅ | ✅ |
-| xfs / f2fs / anything else | Timeshift | ❌ | ❌ not under test |
+| xfs / f2fs / anything else | Timeshift | ❌ — **contributions wanted** | ❌ not under test |
 | root on LUKS2, unlocked by sd-encrypt (`rd.luks.name=` + `crypttab.initramfs`) | — | ✅ | ✅ |
 | root on LVM-on-LUKS | — | ✅ | ✅ |
 
@@ -200,15 +201,15 @@ column, use the suite for testing only — not in production.**
 | **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed | ✅ | ✅ |
 | Secure Boot through shim (Fedora, Ubuntu) | ✅ | ⚠️ |
 | GRUB (EFI) | ✅ | ✅ |
-| GRUB (legacy BIOS) | ❌ | ❌ not under test |
+| GRUB (legacy BIOS) | ❌ — **contributions wanted** | ❌ not under test |
 | Standard `vmlinuz` + `initramfs` (non-UKI) | ✅ | ✅ |
 | ESP at `/efi` + vfat XBOOTLDR `/boot` | ✅ | ✅ |
-| Encrypted argon2id `/boot` (needs GRUB ≥ 2.12) | ✅ | ✅ |
-| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ | ❌ not under test |
+| Encrypted argon2id `/boot` (needs GRUB 2.14 or later — 2.12 has no argon2) — incl. GRUB built from source into `/usr/local` behind the distro's shim | ✅ | ✅ |
+| Encrypted pbkdf2 `/boot` — LUKS1 (GRUB ≥ 2.02) or LUKS2 with pbkdf2 (GRUB ≥ 2.06), the form stock GRUB opens | ❌ — **contributions wanted** | ❌ not under test |
 | Plain `/boot` (unencrypted /boot) | ✅ | ✅ |
-| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ | ❌ not under test |
-| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ | ❌ not under test |
-| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ | ❌ not under test |
+| Raspberry Pi firmware boot (`/boot/firmware`: `config.txt`, `cmdline.txt`, `kernel*.img`; no bootloader) | ❌ — **contributions wanted** | ❌ not under test |
+| Limine (CachyOS's default) — loader reinstalled, firmware boot entry created | ❌ — **contributions wanted** | ❌ not under test |
+| rEFInd — `refind-install`, or binary + firmware boot entry | ❌ — **contributions wanted** | ❌ not under test |
 | SELinux restore relabel on Linux Mint (SELinux permissive) — `/.autorelabel` on the restored system: the first boot relabeled every file and rebooted once, then booted clean | ✅ | ✅ |
 | SELinux restore relabel on Fedora (SELinux enforcing) — `/.autorelabel` on the restored system: the first boot relabeled every file and rebooted once, then booted clean and enforcing | ✅ | ✅ |
 | Restore from an **installed system** onto a second disk, the original disk still installed — no NVRAM writes, nothing written to the original disk | — | ✅ |
@@ -233,8 +234,9 @@ wiped on every run.
 ```bash
 cp testbed/testbed.conf.example /mnt/backup/testbed/testbed.conf   # the two drives' serials, once
 sudo testbed/testbed.sh plan                                # the test drive laid out like THIS machine
-sudo TB_WIPE=<test-drive-serial> testbed/testbed.sh all     # fingerprint, wipe, partition, LUKS, backup, restore, logger
-# reboot, pick the test drive's "UEFI:" entry in the firmware menu (passphrase: test, unless finish says it unlocks itself), wait five minutes, boot back
+sudo TB_WIPE=<test-drive-serial> testbed/testbed.sh all     # fingerprint, wipe, partition, LUKS, backup, restore, logger, VM boot
+sudo testbed/testbed.sh vmboot                              # (run by finish) boot the test drive in QEMU first — snapshot, no network → VM verdict
+# reboot, pick the test drive's "UEFI:" entry in the firmware menu (a Mac: Option key, the drive labelled TEST; passphrase: test, unless finish says it unlocks itself), wait five minutes, boot back
 sudo testbed/testbed.sh collect                             # boot report, fingerprint diff, byte comparison → VERDICT
 sudo testbed/testbed.sh revert                              # undo every test-only change
 ```
@@ -564,7 +566,7 @@ bed run with its verdict. Then:
 | **SELinux relabel** | `borg-restore.sh` — `SELINUX=` in the restored `/etc/selinux/config`: enforcing or permissive → `/.autorelabel`, so the first boot relabels every file and reboots once. A file carrying a type no loaded policy module defines makes `btrfs receive` refuse the whole replica; `borg-backup.sh` names the path to relabel | Another MAC system (AppArmor needs nothing; Smack does) is a branch there. | The restore log's `created /.autorelabel` line; on the booted drive `/.autorelabel` is gone and `getenforce` answers |
 | **Where btrfs replicas live** | `borg-backup.sh` → `SNAP_DIR="$BACKUP_MOUNT/snapshots"`, pruned per label (`root`, `home`, …) — one directory for every machine that uses the drive | Two btrfs machines on one drive share labels and prune each other's replicas: give each its own drive, or keep the replica layer on one of them. The restore test bed sets `BX_NO_REPLICAS=1` for exactly this reason. | `backup-diag.sh` → *other machines' data on the backup drive* |
 | **Kernel command-line carriers on restore** | `lib-cmdline.sh` → `cl_find_carriers` (BLS/systemd-boot entries, `/etc/kernel/cmdline` + `cmdline.d`, `GRUB_CMDLINE_LINUX` + `grub.d`, `extlinux.conf`, `syslinux.cfg`, `cmdline.txt`, `refind_linux.conf`, `limine.conf`, `/etc/default/limine`) and `cl_rewrite_ids`; called by both restore scripts after the `fstab`/`crypttab` fix-up, checked by `cl_stale_ids` before reboot and by `backup-verify.sh` against the archive | Add your carrier's path to `cl_find_carriers` and, if it uses a new reference syntax, to `CL_REF_PREFIX`. | Add it to `tests/cmdline-fixture-test.sh`; `backup-verify.sh` section 3 reports "carriers agree with fstab/crypttab" |
-| **Encrypted `/boot`, and which GRUB can open it** | `restore-rebuild-boot.sh` — `BOOT_ON_LUKS` from `/boot` (or `/`) being on `/dev/mapper/*`, then the container's LUKS version and KDF decide the GRUB floor (LUKS1 → 2.02, LUKS2/pbkdf2 → 2.06, argon2 → 2.12); `backup-verify.sh` section 6 says the same | A LUKS `/boot` opened under another path, or LVM-on-plain-disk, needs a `cryptsetup status` check instead of the prefix test; a new KDF needs a floor. | The report's boot-layout line `boot_on_luks=` and the rebuild's dry-run `encrypted /boot:` line |
+| **Encrypted `/boot`, and which GRUB can open it** | `restore-rebuild-boot.sh` — `BOOT_ON_LUKS` from `/boot` (or `/`) being on `/dev/mapper/*`, then the container's LUKS version and KDF decide the GRUB floor (LUKS1 → 2.02, LUKS2/pbkdf2 → 2.06, argon2 → 2.14 — the rebuild picks the `grub-install` whose modules include `argon2.mod`); `backup-verify.sh` section 6 says the same | A LUKS `/boot` opened under another path, or LVM-on-plain-disk, needs a `cryptsetup status` check instead of the prefix test; a new KDF needs a floor. | The report's boot-layout line `boot_on_luks=` and the rebuild's dry-run `encrypted /boot:` line |
 | **Ad-hoc vs scheduled** | `deploy.sh` → `detect_schedule_mode` (removable, hotplug, or USB transport → ad-hoc); in ad-hoc mode the backup timers are stopped **before** any unit file is written (an old `Persistent=` timer otherwise fires its missed run on the daemon-reload) | Thunderbolt NVMe, SD readers and LVM stacks can misclassify. Override first: `SCHEDULE_MODE=` in the config or environment. | `sudo ./deploy.sh --dry-run` prints `Schedule mode (…): ` with the evidence |
 | **Which drive is which (restore test bed)** | `testbed/testbed.sh` → `disk_by_serial`: `lsblk`'s serial or udev's `ID_SERIAL_SHORT`; the drive holding this machine's mounts, swap or open containers is refused | A bridge that reports neither needs another stable id. Take serials for `testbed.conf` from `udevadm info -q property -n /dev/sdX \| grep ID_SERIAL_SHORT` — behind some USB bridges `lsblk` shows zeros. | `sudo testbed/testbed.sh status` resolves both serials to devices |
 
@@ -664,7 +666,7 @@ whatever the restored system uses — detected, not configured:
   via `kernel-install` / `dracut --uefi`;
 - **GRUB** (EFI or legacy BIOS, x86_64 or aarch64) reinstalled and its config
   regenerated, with `GRUB_ENABLE_CRYPTODISK=y` set and a warning when GRUB is
-  older than 2.12 on an argon2id `/boot`;
+  without argon2 (older than 2.14) on an argon2id `/boot`;
 - **systemd-boot** reinstalled with `bootctl` and entries recreated;
 - **Limine** and **rEFInd** reinstalled (`limine-install` on CachyOS, or the
   loader binary copied to the ESP; `refind-install`) with a firmware boot
@@ -981,7 +983,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 4.0.2
+- **Version:** 4.0.3
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

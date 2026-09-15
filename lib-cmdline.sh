@@ -87,10 +87,14 @@ cl_find_carriers() {
     # new disk it names the OLD /boot and GRUB lands at a prompt — with every
     # other file correct. Only small files: a full grub.cfg there is Debian's
     # real config with GRUB on the ESP, which grub-mkconfig does regenerate.
+    # A stub in front of an encrypted /boot may find it with no search at all:
+    # `cryptomount -u <id>` + `set prefix=(cryptouuid/<id>)/grub` (a GRUB built
+    # with grub-install from source, Fedora 44) — never counted, never rewritten,
+    # it unlocked the OLD disk's /boot.
     for f in "$root"/boot/efi/EFI/*/grub.cfg "$root"/efi/EFI/*/grub.cfg "$root"/boot/EFI/*/grub.cfg; do
         [ -f "$f" ] || continue
         case "$f" in */EFI/BOOT/*|*/EFI/Boot/*) continue ;; esac
-        [ "$(wc -l < "$f")" -le 40 ] && grep -qsE 'search(\.fs_uuid| .*--fs-uuid)' "$f" && printf 'grubstub\t%s\n' "$f"
+        [ "$(wc -l < "$f")" -le 40 ] && grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -qE 'search(\.fs_uuid| .*--fs-uuid)|cryptomount[[:space:]]+-u|cryptouuid/' && printf 'grubstub\t%s\n' "$f"
     done
     for f in "$root/boot/syslinux/syslinux.cfg" "$root/boot/syslinux.cfg"; do
         [ -f "$f" ] && { printf 'syslinux\t%s\n' "$f"; break; }
@@ -133,7 +137,10 @@ cl_find_carriers() {
 # <id> root` (Ubuntu's) are the two GRUB stub forms. A stub in front of an
 # encrypted /boot also names the LUKS container: `cryptomount -u <id>` and the
 # dashless `cryptouuid/<id>` device — left stale, it unlocks the OLD disk's /boot.
-CL_REF_PREFIX='(UUID=|(rd\.)?luks\.uuid=(luks-)?|(rd\.)?luks\.name=|--fs-uuid([ ]+--set(=[A-Za-z_]+)?)?[= ]+|search\.fs_uuid[ ]+|/dev/disk/by-uuid/|/dev/disk/by-partuuid/|cryptomount[ ]+-u[ ]+|cryptouuid/)'
+# grub-mkconfig puts hints between the option and the id — `search --no-floppy
+# --fs-uuid --set=root --hint='cryptouuid/…' --hint-efi=hd2,gpt1 <id>` — so any
+# --option[=value] may stand there.
+CL_REF_PREFIX='(UUID=|(rd\.)?luks\.uuid=(luks-)?|(rd\.)?luks\.name=|--fs-uuid([ ]+--[A-Za-z-]+(=[^ ]*)?)*[= ]+|search\.fs_uuid[ ]+|/dev/disk/by-uuid/|/dev/disk/by-partuuid/|cryptomount[ ]+-u[ ]+|cryptouuid/)'
 CL_ID='[0-9a-fA-F]{4,}(-[0-9a-fA-F]{2,}){0,4}'
 # In cl_rewrite_ids the character after the id is captured by the group that
 # follows the prefix; its number is one more than the prefix's own groups
@@ -211,9 +218,14 @@ cl_luks_name_pairs() {
 # writes nothing.
 # ---------------------------------------------------------------------------
 cl_rewrite_ids() { # cl_rewrite_ids ROOT MAPFILE
-    local root="${1%/}" map="$2" kind path old new tmp expr
+    local root="${1%/}" map="$2"
     [ -r "$map" ] || return 1
-    expr=""
+    cl_find_carriers "$root" | _cl_rewrite_list "$map"
+}
+# _cl_rewrite_expr MAPFILE — the sed program that rewrites every OLD id of the
+# map to its NEW one, in reference positions only.
+_cl_rewrite_expr() {
+    local old new expr=""
     while read -r old new _; do
         [ -n "$old" ] && [ -n "$new" ] || continue
         case "$old" in \#*) continue ;; esac
@@ -223,8 +235,21 @@ cl_rewrite_ids() { # cl_rewrite_ids ROOT MAPFILE
         expr="${expr}/^[[:space:]]*#/!s~(${CL_REF_PREFIX})${old}($|[^0-9a-fA-F-])~\\1${new}\\${CL_TAIL_GROUP}~gI;"
         # GRUB's cryptouuid/ device names a LUKS UUID without its dashes
         case "$old$new" in *-*) expr="${expr}/^[[:space:]]*#/!s~(cryptouuid/)${old//-/}($|[^0-9a-fA-F])~\\1${new//-/}\\2~gI;" ;; esac
-    done < "$map"
-    [ -n "$expr" ] || return 0
+    done < "$1"
+    printf '%s' "$expr"
+}
+# cl_rewrite_files MAPFILE KIND FILE... — the same rewrite for files that are not
+# carriers (a generated grub.cfg); "KIND<TAB>path" for each file changed.
+cl_rewrite_files() {
+    local map="$1" kind="$2" f
+    [ -r "$map" ] || return 1
+    shift 2
+    for f in "$@"; do printf '%s\t%s\n' "$kind" "$f"; done | _cl_rewrite_list "$map"
+}
+_cl_rewrite_list() { # stdin: "kind<TAB>path" lines
+    local map="$1" kind path tmp expr
+    expr=$(_cl_rewrite_expr "$map")
+    [ -n "$expr" ] || { cat >/dev/null; return 0; }
     while IFS=$'\t' read -r kind path; do
         [ -f "$path" ] || continue
         tmp="$(mktemp "$(dirname "$path")/.lbs-cl.XXXXXX")" || return 1
@@ -236,7 +261,7 @@ cl_rewrite_ids() { # cl_rewrite_ids ROOT MAPFILE
         fi
         cat "$tmp" > "$path" && rm -f "$tmp"
         printf '%s\t%s\n' "$kind" "$path"
-    done < <(cl_find_carriers "$root")
+    done
     return 0
 }
 
@@ -354,9 +379,11 @@ cl_ref_exists() {
 cl_id_exists() {
     local kind="$1" id="$2"
     if [ -n "${CL_ID_EXISTS_CMD:-}" ]; then "$CL_ID_EXISTS_CMD" "$kind" "$id"; return; fi
+    # Ids arrive lowercase (cl_ids_in_file); blkid matches a FAT volume id
+    # (EBA1-A977) only in its own upper case.
     case "$kind" in
         partuuid) [ -n "$(blkid -t "PARTUUID=$id" -o device 2>/dev/null)" ] ;;
-        *)        blkid -U "$id" >/dev/null 2>&1 ;;
+        *)        blkid -U "$id" >/dev/null 2>&1 || blkid -U "$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]')" >/dev/null 2>&1 ;;
     esac
 }
 
@@ -395,7 +422,10 @@ cl_stale_ids() {
 cl_root_luks_id() {
     local root="${1%/}" name="" id="" f ids
     local files=()
-    while IFS=$'\t' read -r _k f; do files+=("$f"); done < <(cl_find_carriers "$root")
+    # Not the ESP GRUB stub: its `cryptomount -u` opens /boot, never the root —
+    # counted, a stub in front of an encrypted /boot made two LUKS ids and the
+    # root container went unmapped.
+    while IFS=$'\t' read -r _k f; do [ "$_k" = grubstub ] || files+=("$f"); done < <(cl_find_carriers "$root")
     [ ${#files[@]} -gt 0 ] || return 0
     name=$(grep -vhE '^[[:space:]]*#' "${files[@]}" 2>/dev/null | grep -ohE 'root=/dev/mapper/[A-Za-z0-9_.:-]+' | head -1 | sed 's#^root=/dev/mapper/##')
     if [ -n "$name" ]; then
@@ -470,6 +500,8 @@ cl_ref_disk() {
     if [ -n "${CL_REF_DISK_CMD:-}" ]; then "$CL_REF_DISK_CMD" "$kind" "$val"; return; fi
     case "$kind" in LUKS) kind=UUID ;; esac
     dev=$(blkid -t "$kind=$val" -o device 2>/dev/null | head -1)
+    # a FAT volume id matches only upper case; carrier ids arrive lowercase
+    [ -n "$dev" ] || dev=$(blkid -t "$kind=$(printf '%s' "$val" | tr '[:lower:]' '[:upper:]')" -o device 2>/dev/null | head -1)
     [ -n "$dev" ] || return 0
     kn=$(basename "$(readlink -f "$dev")")
     while :; do
@@ -567,5 +599,106 @@ cl_ukis() {
     for d in /boot /efi /boot/efi; do
         for f in "$root$d"/EFI/Linux/*.efi "$root$d"/EFI/Linux/*.EFI; do [ -f "$f" ] && printf '%s\n' "$f"; done
     done | sort -u
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# GRUB's own files, beyond the command-line carriers.
+#
+# cl_grub_cfgs ROOT — every full GRUB configuration under ROOT, one path per
+# line: /boot/grub/grub.cfg, /boot/grub2/grub.cfg, and a Debian-style full
+# config on the ESP. Not carriers: they also name other disks (os-prober
+# entries), so they are rewritten through the id map but never checked against
+# fstab. Which one the loader reads depends on the GRUB that built it — a
+# from-source GRUB reads /boot/grub/ on a distro that generates /boot/grub2/ —
+# so every one of them is rewritten and verified.
+#
+# cl_efi_loaders ROOT — every EFI binary under ROOT's ESP locations.
+#
+# cl_efi_embedded_ids FILE — "kind<TAB>id" for every id in the early config a
+# GRUB core image carries (grub-install / grub-mkimage -c): `cryptomount -u`,
+# the `(cryptouuid/…)` prefix, `search --fs-uuid`. No file rewrite reaches it;
+# the image has to be built again.
+#
+# cl_old_ids_in MAPFILE IDFILE — the OLD ids of the map that IDFILE's
+# "kind<TAB>id" lines still name: what still points at the source disk.
+# ---------------------------------------------------------------------------
+cl_grub_cfgs() {
+    local root="${1%/}" f
+    for f in "$root/boot/grub/grub.cfg" "$root/boot/grub2/grub.cfg"; do [ -f "$f" ] && printf '%s\n' "$f"; done
+    for f in "$root"/boot/efi/EFI/*/grub.cfg "$root"/efi/EFI/*/grub.cfg "$root"/boot/EFI/*/grub.cfg; do
+        [ -f "$f" ] && [ "$(wc -l < "$f")" -gt 40 ] && printf '%s\n' "$f"
+    done
+    return 0
+}
+cl_efi_loaders() {
+    local root="${1%/}" d
+    for d in /boot/efi /efi /boot; do
+        [ -d "$root$d/EFI" ] || continue
+        find "$root$d/EFI" -maxdepth 2 -type f -iname '*.efi' 2>/dev/null
+    done | sort -u
+    return 0
+}
+cl_efi_embedded_ids() {
+    local f="$1" t
+    [ -r "$f" ] || return 0
+    t=$(mktemp) || return 0
+    # || true: most images carry no early config, and the restore scripts run
+    # under set -e — grep's "no match" ended the whole check at the first shim.
+    LC_ALL=C grep -a -oiE "${CL_REF_PREFIX}${CL_ID}" "$f" > "$t" 2>/dev/null || true
+    cl_ids_in_file "$t"
+    rm -f "$t"
+    return 0
+}
+cl_old_ids_in() {
+    local map="$1" ids="$2"
+    [ -r "$map" ] && [ -r "$ids" ] || return 0
+    awk 'NR==FNR { if ($1 !~ /^#/ && $2 != "" && tolower($1) != tolower($2)) old[tolower($1)] = 1; next }
+         ($2 in old) && !seen[$2]++ { print $2 }' "$map" FS='\t' "$ids"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# cl_grub_boot_findings ROOT MAPFILE — after a restore: "LEVEL<TAB>message" lines
+# (INFO, OK, WARN, FAIL) for GRUB's own files under ROOT.
+#   - every full grub.cfg: an id the map says belongs to the SOURCE disk is a
+#     FAIL (its disk may still be installed: "found" is not "right"); an id no
+#     device has is a FAIL in the first config, a WARN in the others (a second
+#     config may be a leftover no loader reads);
+#   - every EFI binary's early config: a source-disk id is a FAIL — the image
+#     unlocks or searches the OLD disk and has to be built again.
+# ---------------------------------------------------------------------------
+cl_grub_boot_findings() {
+    # The restore scripts run under set -e, and a process substitution inherits
+    # it: every grep "no match" below (an image with no early config, a config
+    # with no ids) ended the check silently. Its own errexit is off.
+    local -; set +e
+    local root="${1%/}" map="$2" cfg f t old rk id first=1 n=0
+    t=$(mktemp) || return 0
+    while read -r cfg; do
+        [ -n "$cfg" ] || continue
+        printf 'INFO\tVerifying GRUB config (%s)...\n' "${cfg#"$root"}"
+        cl_ids_in_file "$cfg" > "$t"
+        old=$(cl_old_ids_in "$map" "$t" | tr '\n' ' ')
+        [ -n "$old" ] && printf 'FAIL\t%s still names the SOURCE disk: %s— GRUB would unlock, search or boot the old disk\n' "${cfg#"$root"}" "$old"
+        while IFS=$'\t' read -r rk id; do
+            [ -n "$id" ] || continue
+            case " $old " in *" $id "*) continue ;; esac
+            if cl_id_exists "$rk" "$id"; then printf 'OK\tGRUB %s %s found\n' "$rk" "$id"
+            elif [ "$first" = 1 ]; then printf 'FAIL\tGRUB %s %s (%s) NOT FOUND on any device\n' "$rk" "$id" "${cfg#"$root"}"
+            else printf 'WARN\tGRUB %s %s (%s) not found on any device — harmless if no loader reads this config\n' "$rk" "$id" "${cfg#"$root"}"; fi
+        done < <(sort -u "$t")
+        first=0
+    done < <(cl_grub_cfgs "$root")
+    while read -r f; do
+        [ -n "$f" ] || continue
+        cl_efi_embedded_ids "$f" > "$t"
+        [ -s "$t" ] || continue
+        n=$((n + 1))
+        old=$(cl_old_ids_in "$map" "$t" | tr '\n' ' ')
+        if [ -n "$old" ]; then printf 'FAIL\t%s carries an early config naming the SOURCE disk: %s— rebuild it for this disk (grub-install)\n' "${f#"$root"}" "$old"
+        else printf 'OK\t%s: early config names this disk\n' "${f#"$root"}"; fi
+    done < <(cl_efi_loaders "$root")
+    rm -f "$t"
     return 0
 }

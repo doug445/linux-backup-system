@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 4.0.2**
+**linux-backup-system 4.0.3**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -55,6 +55,7 @@ have.
 | Bare-metal restore — Manjaro, btrfs on LUKS2 (sd-encrypt), systemd-boot + mkinitcpio UKIs, Secure Boot with sbctl keys | ✅ total system restore, booted fully working | a report on another distro or boot layout |
 | Bare-metal restore — Fedora 44, btrfs on LUKS2 (dracut), systemd-boot + kernel-install UKIs, SELinux enforcing | ✅ total system restore, booted fully working | a report on RHEL or another dracut distro |
 | Bare-metal restore — EndeavourOS, ext4 on LUKS2 (dracut), systemd-boot Type #1 entries, KDE Plasma | ✅ total system restore, booted fully working | a report on another Type #1 setup (Arch with mkinitcpio, a separate `/home`) |
+| Bare-metal restore — Fedora 44 on a 2014 MacBook Pro, btrfs on LUKS2 (dracut, keyfile), encrypted argon2id `/boot` opened by GRUB 2.14 built from source behind shim, SELinux enforcing | ✅ total system restore, booted working (VM boot and real boot) | a report from another machine running a from-source GRUB, or an Intel Mac on another distro |
 | Bare-metal restore — shim Secure Boot, Limine, rEFInd; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
 | **Bare-metal restore — Raspberry Pi, GRUB legacy BIOS, encrypted pbkdf2 `/boot`, openSUSE, and the distros the package map does not know** | ❌ not under test — **most wanted** | the same test bed run on that hardware |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
@@ -111,10 +112,14 @@ Open an issue with the **New Linux setup** template, titled
    ```
 3. anything you had to fix by hand — **that is the actual finding.**
 4. for a **Bare-metal restore** row: a restore test bed run on a spare drive —
-   `sudo TB_WIPE=<serial> testbed/testbed.sh all`, boot the test drive,
+   `sudo TB_WIPE=<serial> testbed/testbed.sh all` (its `finish` boots the test
+   drive in a VM first — install QEMU and OVMF/AAVMF for that), boot the test drive,
    `sudo testbed/testbed.sh collect` — and from its state directory
    (`/var/lib/linux-backup-testbed/<host>-<stamp>/`) attach `LEDGER.md`,
-   `verdict`, `byte-comparison.md` and `boot-report/boot-report-*.md`. Identify
+   `verdict`, `vmboot`, `byte-comparison.md`, `boot-report/boot-report-*.md` and
+   `vm/boot-report/boot-report-*.md`; when the VM boot failed, `vm/serial.log` and
+   `vm/screen-last.png` too. The troubleshooting report summarises all of it in
+   its *Restore test bed runs* section. Identify
    drives by the serial udev reports (`udevadm info -q property -n /dev/sdX |
    grep ID_SERIAL_SHORT`): behind some USB bridges `lsblk` shows only zeros. If
    the backup drive is shared with another machine, say so — the test bed writes

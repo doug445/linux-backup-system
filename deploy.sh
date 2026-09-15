@@ -1723,8 +1723,10 @@ fi
 log "Verifying BIT config..."
 # check-config also (re)installs BIT's crontab unless told not to; the suite,
 # not cron, runs Back In Time. Older BIT without --no-crontab: skip the check.
+# BIT >= 1.6 logs its EncFS deprecation notice at ERROR level on the first run
+# every 30 days, whatever the profile: not a config error, so it is not shown as one.
 if backintime check-config --help 2>&1 | grep -q -- '--no-crontab'; then
-    backintime --config /root/.config/backintime/config check-config --no-crontab 2>&1 | grep -iE 'done|fine|error' || true
+    backintime --config /root/.config/backintime/config check-config --no-crontab 2>&1 | grep -iE 'done|fine|error' | grep -v 'EncFS encrypted profiles are no longer supported' || true
 else
     log "  (backintime check-config lacks --no-crontab on this version — check skipped rather than let it install a crontab)"
 fi

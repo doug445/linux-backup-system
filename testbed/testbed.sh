@@ -43,7 +43,10 @@
 #                 functional (default): configs, keys, Claude Code and shell setup of
 #                 every home are kept, bulk data is not; minimal: no /home contents
 #   restore       dry run, then the real restore, from a frozen copy of the suite
-#   finish        byte manifest, home skeletons, boot logger, checks; unmount + close
+#   finish        byte manifest, home skeletons, boot logger, checks; unmount + close;
+#                 then vmboot (TB_VMBOOT=0 skips it)
+#   vmboot        boot the closed test drive in QEMU (snapshot: nothing written to it,
+#                 no network) with a report disk for its boot logger → VM verdict
 #   collect       after booting the test drive and back: report, fingerprint diff,
 #                 hard-link-aware byte comparison, verdict
 #   revert [--keep-repo]
@@ -574,10 +577,20 @@ cmd_restore() {
 cmd_finish() {
     local a uid gid hd
     rm -f "$TB_STATE/auto-unlock"
+    # A restore whose verification failed boots nothing worth a verdict.
+    [ "$(st_get restore-rc)" = 0 ] || [ "${TB_FORCE:-}" = 1 ] || die "the restore exited $(st_get restore-rc || echo '(never ran)') — its checks failed ($TB_STATE/restore.log); fix and run restore again (TB_FORCE=1 finishes anyway)"
     a=$(st_get archive); mountpoint -q "$TB_MNT" || die "target not mounted"
     mkdir -p "$TB_MNT/root/restore-test"
-    BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes borg list --format '{type}{TAB}{size}{TAB}{path}{NL}' "$TB_REPO::$a" | gzip -1 > "$TB_MNT/root/restore-test/manifest.tsv.gz" || die "manifest"
-    cp "$TB_MNT/root/restore-test/manifest.tsv.gz" "$TB_STATE/manifest.tsv.gz"
+    # finish again (a fix to the test drive after a failed test boot) runs with the
+    # backup drive already unplugged for that boot: the manifest of this archive
+    # is in the state directory from the first finish.
+    if [ ! -d "$TB_REPO" ] && [ -s "$TB_STATE/manifest.tsv.gz" ]; then
+        cp "$TB_STATE/manifest.tsv.gz" "$TB_MNT/root/restore-test/manifest.tsv.gz" || die "manifest"
+        say "backup drive not connected — the manifest of $a from the first finish is used"
+    else
+        BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes borg list --format '{type}{TAB}{size}{TAB}{path}{NL}' "$TB_REPO::$a" | gzip -1 > "$TB_MNT/root/restore-test/manifest.tsv.gz" || die "manifest"
+        cp "$TB_MNT/root/restore-test/manifest.tsv.gz" "$TB_STATE/manifest.tsv.gz"
+    fi
     # Homes whose contents were not in the archive: from /etc/skel, so logins work.
     while IFS=: read -r _ _ uid gid _ hd _; do
         [ "$uid" -ge 1000 ] && [ "$uid" -lt 60000 ] && [ "${hd#/home/}" != "$hd" ] || continue
@@ -608,6 +621,9 @@ cmd_finish() {
         say "parked stale UKI ${f#"$TB_MNT"}"
     done < <(cl_ukis "$TB_MNT")
     auto_unlock_grub
+    preflight_grub_unlock
+    park_shim_fallback
+    mark_test_drive_picker
     isolate_other_disks
     # The restored boot configuration must name the volume group by its real name:
     # the temporary one exists only while this test bed runs.
@@ -637,12 +653,25 @@ cmd_finish() {
     cmd_fingerprint after >/dev/null
     cmd_fingerprint diff || warn "this machine changed during the test — see $TB_STATE/fingerprint.diff"
     cp "$TB_STATE/fingerprint-after.txt" "$TB_STATE/fingerprint-preboot.txt"
+    # The test drive booted in a VM first: a drive that cannot boot is found here,
+    # not by someone at the firmware menu of this machine.
+    if [ "${TB_VMBOOT:-1}" != 0 ]; then
+        cmd_vmboot
+        case "$(st_get vmboot)" in
+            PASS) ;;
+            SKIPPED) warn "the VM boot was skipped ($(st_get vmboot-why)) — the real boot is the first boot of this drive" ;;
+            *) die "the test drive did not boot in the VM — do not boot it for real yet; evidence: $TB_STATE/vm (TB_VMBOOT=0 skips this check)" ;;
+        esac
+    fi
+    local pick='on a UEFI host the entry that starts with
+     "UEFI:" (the plain one is the legacy BIOS entry and does not boot a UEFI test drive)'
+    grep -qi apple /sys/class/dmi/id/sys_vendor 2>/dev/null && pick='hold Option (⌥) at power-on and pick the drive labelled TEST
+     (a SELinux relabel boot reboots once: pick TEST again)'
     cat <<MSG
 
 [testbed] Ready to boot the test drive.
   1. Leave only the test drive connected (serial $TB_TARGET_SERIAL).
-  2. Reboot, pick it from the firmware boot menu — on a UEFI host the entry that starts with
-     "UEFI:" (the plain one is the legacy BIOS entry and does not boot a UEFI test drive); $( [ "$(st_get auto-unlock)" = grub ] && echo "it unlocks itself (built-in passphrase: test)" || echo "the passphrase is: test")
+  2. Reboot, pick it from the firmware boot menu — $pick; $( [ "$(st_get auto-unlock)" = grub ] && echo "it unlocks itself (built-in passphrase: test) and its GRUB first prints \"TEST DRIVE\"" || echo "the passphrase is: test")
   3. Wait ~2 minutes after the login screen appears (the logger writes its report to
      this machine's $(layout REPORT_MOUNT) — PARTUUID $(layout REPORT_PARTUUID)).
   4. Boot back into this machine and run:  sudo $0 collect
@@ -666,22 +695,29 @@ auto_unlock_grub() {
     u=$(cryptsetup luksUUID "$(partdev boot)" 2>/dev/null) || return 0
     local p all=""
     for p in $(lsblk -rnpo NAME,FSTYPE "$(target_disk)" | awk '$2=="crypto_LUKS"{print $1}'); do all="$all $(cryptsetup luksUUID "$p")"; done
-    for moddir in /usr/local/lib/grub/x86_64-efi /usr/lib/grub/x86_64-efi; do [ -f "$TB_MNT$moddir/cryptodisk.mod" ] && break; moddir=""; done
-    [ -n "$moddir" ] || { warn "auto-unlock: no x86_64-efi GRUB modules in the restored system"; return 0; }
-    kv=$(chroot "$TB_MNT" grub-mkimage --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    # The modules and the grub-mkimage of ONE install: /usr/local's modules
+    # packed by the distro's grub2-mkimage (or the reverse) is a mismatched image.
+    local mkimage=""
+    for moddir in /usr/local/lib/grub/x86_64-efi /usr/lib/grub/x86_64-efi; do
+        [ -f "$TB_MNT$moddir/cryptodisk.mod" ] || continue
+        for mkimage in "${moddir%/lib/grub/x86_64-efi}"/bin/grub-mkimage "${moddir%/lib/grub/x86_64-efi}"/bin/grub2-mkimage; do
+            [ -x "$TB_MNT$mkimage" ] && break; mkimage=""
+        done
+        [ -n "$mkimage" ] && break
+    done
+    [ -n "$mkimage" ] || { warn "auto-unlock: no x86_64-efi GRUB modules with their grub-mkimage in the restored system"; return 0; }
+    kv=$(chroot "$TB_MNT" "$mkimage" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
     if [ -z "$kv" ] || [ "$(printf '2.12\n%s\n' "$kv" | sort -V | head -1)" != 2.12 ]; then
         warn "auto-unlock: GRUB ${kv:-?} in the restored system has no cryptomount -p (needs 2.12) — the test boot asks for the passphrase (test)"; return 0
     fi
-    mods="part_gpt part_msdos cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512 pbkdf2 ext2 fat lvm search search_fs_uuid normal configfile echo"
+    mods="part_gpt part_msdos cryptodisk luks luks2 gcry_rijndael gcry_sha256 gcry_sha512 pbkdf2 ext2 fat lvm search search_fs_uuid normal configfile echo sleep"
     [ -f "$TB_MNT$moddir/argon2.mod" ] && mods="$mods argon2"
     mkdir -p "$TB_MNT/root/restore-test"
     [ -f "$TB_MNT/root/restore-test/BOOTX64.EFI.restored" ] || cp "$loader" "$TB_MNT/root/restore-test/BOOTX64.EFI.restored"
-    # /boot first (the prefix lives there), then every other container of the test drive
-    { printf 'cryptomount -u %s -p %s\n' "$u" "$TB_PASSPHRASE"
-      for p in $all; do [ "$p" = "$u" ] || printf 'cryptomount -u %s -p %s\n' "$p" "$TB_PASSPHRASE"; done
-    } > "$TB_MNT/root/restore-test/grub-early.cfg"
     # shellcheck disable=SC2086
-    if chroot "$TB_MNT" grub-mkimage -d "$moddir" -O x86_64-efi -c /root/restore-test/grub-early.cfg \
+    grub_early_cfg "$u" $all > "$TB_MNT/root/restore-test/grub-early.cfg"
+    # shellcheck disable=SC2086
+    if chroot "$TB_MNT" "$mkimage" -d "$moddir" -O x86_64-efi -c /root/restore-test/grub-early.cfg \
             -p "(cryptouuid/${u//-/})/grub" -o "$(layout ESP_MOUNT)/EFI/BOOT/BOOTX64.EFI" $mods; then
         ledger test "test drive: EFI/BOOT/BOOTX64.EFI rebuilt with the built-in passphrase \"test\" for its LUKS containers ($(echo $all)) — the drive boots unattended" "test drive only; the restore's image is /root/restore-test/BOOTX64.EFI.restored"
         say "auto-unlock: the test drive's fallback loader opens /boot with the built-in passphrase — no prompt at boot"
@@ -690,6 +726,94 @@ auto_unlock_grub() {
         cp "$TB_MNT/root/restore-test/BOOTX64.EFI.restored" "$loader"
         warn "auto-unlock: grub-mkimage failed — the restore's loader is back in place; the test boot asks for the passphrase (test)"
     fi
+    return 0
+}
+# grub_early_cfg BOOT_UUID [UUID...] — the config built into the test loader:
+# /boot's container first (the prefix lives there), then every other one. GRUB
+# runs a built-in config through its RESCUE parser (kern/parser.c,
+# grub_rescue_parse_line), before normal.mod exists: one plain command per line.
+# `if cryptomount …; then … fi` there is not a command — nothing was unlocked
+# and the test boot stopped at the grub> prompt. The banner says which loader
+# is running; cryptomount prints its own error if a container does not open.
+grub_early_cfg() {
+    local u="$1" p
+    shift
+    printf 'echo "linux-backup-system TEST DRIVE %s: opening its LUKS containers with the built-in passphrase"\n' "$TB_TARGET_SERIAL"
+    printf 'cryptomount -u %s -p %s\n' "$u" "$TB_PASSPHRASE"
+    for p in "$@"; do [ "$p" = "$u" ] || printf 'cryptomount -u %s -p %s\n' "$p" "$TB_PASSPHRASE"; done
+}
+# preflight_grub_unlock — before anyone reboots: GRUB's own crypto code (the
+# grub-fstest of the install the test loader was built from) opens each LUKS
+# container of the test drive with the passphrase "test" — and /boot's files are
+# readable through it. A failure here is a test boot that stops at a prompt.
+preflight_grub_unlock() {
+    local fstest="" d p u out bad=0
+    [ "$(layout BOOT_CRYPT)" = 1 ] || [ "$(layout ROOT_CRYPT)" = 1 ] || return 0
+    for d in /usr/local/bin /usr/bin; do
+        for p in grub-fstest grub2-fstest; do [ -x "$d/$p" ] && { fstest="$d/$p"; break 2; }; done
+    done
+    [ -n "$fstest" ] || { warn "preflight: no grub-fstest on this machine — GRUB's unlock of the test drive is not checked before the boot"; return 0; }
+    for p in $(lsblk -rnpo NAME,FSTYPE "$(target_disk)" | awk '$2=="crypto_LUKS"{print $1}'); do
+        u=$(cryptsetup luksUUID "$p" 2>/dev/null) || continue
+        out=$(printf '%s\n' "$TB_PASSPHRASE" | timeout 600 "$fstest" -C "$p" ls "(cryptouuid/${u//-/})/" 2>&1)
+        if grep -q 'opened' <<<"$out"; then
+            say "preflight: GRUB ($fstest) opens $p ($u) with the passphrase \"test\""
+        else
+            warn "preflight: GRUB ($fstest) could NOT open $p ($u) with the passphrase \"test\": $(tail -2 <<<"$out" | tr '\n' ' ')"; bad=1
+        fi
+    done
+    st_set preflight-grub-unlock "$([ "$bad" = 0 ] && echo ok || echo FAILED)"
+    return 0
+}
+# mark_test_drive_picker — TEST DRIVES ONLY: the restore copies the ESP's
+# decorations too, so on a Mac the firmware boot menu (Option key) showed the
+# test drive exactly like this machine's own disk — same volume icon, same
+# label — and the wrong one got picked. The test drive's loader directory gets
+# the label TEST (.disk_label rendered by grub-render-label, .disk_label_2x,
+# .disk_label.contentDetails) and the restored volume icon is parked, so the
+# menu shows a plain drive icon named TEST. Harmless on other firmware.
+mark_test_drive_picker() {
+    local esp dir render="" font="" f
+    [ "$(layout FIRMWARE)" = uefi ] || return 0
+    esp="$TB_MNT$(layout ESP_MOUNT)"; dir="$esp/EFI/BOOT"
+    [ -d "$dir" ] || return 0
+    mkdir -p "$TB_MNT/root/restore-test"
+    if [ -f "$esp/.VolumeIcon.icns" ]; then
+        mv -f "$esp/.VolumeIcon.icns" "$TB_MNT/root/restore-test/VolumeIcon.icns.parked"
+        ledger test "test drive: ESP volume icon parked in /root/restore-test (the firmware menu showed it like this machine's disk)" "test drive only"
+    fi
+    for f in grub-render-label grub2-render-label; do command -v "$f" >/dev/null 2>&1 && { render=$(command -v "$f"); break; }; done
+    for f in /usr/share/grub/unicode.pf2 /usr/share/grub2/unicode.pf2 /usr/local/share/grub/unicode.pf2 /boot/grub/fonts/unicode.pf2 /boot/grub2/fonts/unicode.pf2; do
+        [ -r "$f" ] && { font=$f; break; }
+    done
+    printf 'TEST' > "$dir/.disk_label.contentDetails"
+    if [ -n "$render" ] && [ -n "$font" ] && "$render" -f "$font" -t TEST -b '#cccccc' -c black -o "$dir/.disk_label" 2>/dev/null; then
+        cp -f "$dir/.disk_label" "$dir/.disk_label_2x"
+        say "firmware boot menu: the test drive is labelled TEST (plain drive icon)"
+    else
+        rm -f "$dir/.disk_label" "$dir/.disk_label_2x"
+        warn "no grub-render-label or unicode.pf2 — the test drive's firmware menu entry is not labelled TEST (its volume icon is parked, so it still differs)"
+    fi
+    ledger test "test drive: firmware boot menu label TEST in EFI/BOOT" "test drive only"
+    return 0
+}
+# park_shim_fallback — TEST DRIVES ONLY: shim started as EFI/BOOT/BOOT<arch>.EFI
+# runs fb<arch>.efi first when it sits beside it, and fallback CREATES a firmware
+# boot entry (from EFI/<id>/BOOT<arch>.CSV) before booting — a write to THIS
+# machine's NVRAM, which the verdict forbids. A real restore keeps it: on the
+# machine the disk goes into, that entry is what it should get. The file is
+# kept in /root/restore-test.
+park_shim_fallback() {
+    local esp f
+    [ "$(layout FIRMWARE)" = uefi ] || return 0
+    esp="$TB_MNT$(layout ESP_MOUNT)"
+    for f in "$esp"/EFI/BOOT/fb*.efi "$esp"/EFI/BOOT/FB*.EFI; do
+        [ -f "$f" ] || continue
+        mkdir -p "$TB_MNT/root/restore-test"
+        mv -f "$f" "$TB_MNT/root/restore-test/$(basename "$f").parked"
+        ledger test "test drive: shim fallback ${f#"$TB_MNT"} parked in /root/restore-test — it would write a firmware boot entry on this machine" "test drive only"
+        say "parked shim fallback ${f#"$TB_MNT"} (the test boot writes no firmware entry)"
+    done
     return 0
 }
 # isolate_other_disks — TEST DRIVES ONLY: the restored crypttab and fstab still
@@ -752,6 +876,128 @@ unmount_target() {
         vgchange -an --devices /dev/mapper/tb-root "$(tb_vg)" >/dev/null 2>&1 || true
     fi
     for m in tb-home tb-boot tb-root tb-verify-home tb-verify-boot tb-verify; do [ -e "/dev/mapper/$m" ] && cryptsetup close "$m"; done
+    return 0
+}
+
+# --- vmboot: the test drive booted in a virtual machine ------------------------------------------------------
+# Before anyone reboots this machine: QEMU boots the TEST drive — its own
+# firmware path, loader, built-in passphrase, initramfs, SELinux relabel, the
+# boot logger — and the verdict comes from that logger's own report.
+#   - the test drive is attached with snapshot=on: every write of the VM goes to
+#     a throwaway overlay, the drive stays exactly as finish left it (its relabel
+#     is still to come on the real boot);
+#   - it carries its real serial, so the logger's "running from the test drive"
+#     check holds;
+#   - a small report disk carries this machine's REPORT_PARTUUID: the logger
+#     writes its report there, as it will onto this machine's partition later;
+#   - no network: the restored homes hold real logins and keys, and nothing in
+#     them may sync from a VM; nothing of this machine's disks is attached.
+# UEFI hosts need OVMF (x86_64) or AAVMF (aarch64); a BIOS host boots SeaBIOS.
+# TB_VM_SECONDS (1800) bounds the run; TB_VM_MEM_MIB (4096) the memory.
+vm_firmware() { # "code" or "code<TAB>vars"; nothing when none is installed
+    local c v
+    case "$(uname -m)" in
+        x86_64)
+            for c in /usr/share/edk2/ovmf/OVMF.stateless.fd /usr/share/OVMF/OVMF.stateless.fd; do [ -r "$c" ] && { echo "$c"; return 0; }; done
+            for c in /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.fd /usr/share/qemu/ovmf-x86_64-code.bin; do
+                [ -r "$c" ] || continue
+                for v in "${c/CODE/VARS}" "${c/code/vars}"; do [ "$v" != "$c" ] && [ -r "$v" ] && { printf '%s\t%s\n' "$c" "$v"; return 0; }; done
+            done ;;
+        aarch64)
+            for c in /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw /usr/share/edk2/aarch64/AAVMF_CODE.fd; do
+                [ -r "$c" ] || continue
+                for v in "${c/CODE/VARS}" /usr/share/edk2/aarch64/vars-template-pflash.raw; do [ "$v" != "$c" ] && [ -r "$v" ] && { printf '%s\t%s\n' "$c" "$v"; return 0; }; done
+            done ;;
+    esac
+    return 1
+}
+vm_skip() { st_set vmboot SKIPPED; st_set vmboot-why "$1"; say "VM boot skipped: $1"; return 0; }
+vm_report_read() { # vm_report_read IMG DEST — copy the report directory out of the report disk, read-only
+    # mtools reads the image file itself: a loop device every poll made the
+    # desktop's device notifier (Plasma's Disks & Devices) pop up every 30 s.
+    local img="$1" dest="$2" off loop d rmnt=/run/tb-vmreport got=1
+    off=$(( $(sgdisk -i 1 "$img" 2>/dev/null | awk '/^First sector/{print $3}') * 512 ))
+    if command -v mcopy >/dev/null 2>&1 && [ "$off" -gt 0 ]; then
+        for d in $(MTOOLS_SKIP_CHECK=1 mdir -b -i "$img@@$off" ::/ 2>/dev/null | sed -n 's#^::/\(restore-test-[^/]*\)/*$#\1#p'); do
+            mkdir -p "$dest" && MTOOLS_SKIP_CHECK=1 mcopy -s -n -o -i "$img@@$off" "::/$d/*" "$dest/" 2>/dev/null
+            compgen -G "$dest/boot-report-*.md" >/dev/null && got=0
+        done
+        return "$got"
+    fi
+    loop=$(losetup --find --show --read-only --partscan "$img") || return 1
+    udevadm settle; mkdir -p "$rmnt"
+    if mount -o ro "${loop}p1" "$rmnt" 2>/dev/null; then
+        if compgen -G "$rmnt/restore-test-*/boot-report-*.md" >/dev/null; then mkdir -p "$dest" && cp -a "$rmnt"/restore-test-*/. "$dest/" && got=0; fi
+        umount "$rmnt"
+    fi
+    losetup -d "$loop"
+    return "$got"
+}
+cmd_vmboot() {
+    local t arch qemu fw code vars img loop vm="$TB_STATE/vm" secs mem accel=() firmware=() n=0 sock
+    [ -f "$TB_STATE/plan" ] && [ -s "$TB_STATE/manifest.tsv.gz" ] || die "vmboot runs after finish (no plan or manifest in $TB_STATE)"
+    t=$(target_disk)
+    lsblk -rno MOUNTPOINTS "$t" | grep -q . && die "the test drive has mounted partitions — vmboot needs it closed (finish closes it)"
+    lsblk -rno TYPE "$t" | grep -qE 'crypt|lvm' && die "the test drive has open containers or volumes — close them first"
+    arch=$(uname -m); qemu=$(command -v "qemu-system-$arch" 2>/dev/null)
+    [ -n "$qemu" ] || { vm_skip "no qemu-system-$arch (Fedora: dnf install qemu-system-x86-core edk2-ovmf; Debian/Ubuntu: apt install qemu-system-x86 ovmf; Arch: pacman -S qemu-base edk2-ovmf)"; return 0; }
+    if [ "$(layout FIRMWARE)" = uefi ]; then
+        fw=$(vm_firmware) || { vm_skip "no UEFI firmware for QEMU (OVMF/AAVMF package)"; return 0; }
+        IFS=$'\t' read -r code vars <<<"$fw"
+    fi
+    secs="${TB_VM_SECONDS:-1800}"; mem="${TB_VM_MEM_MIB:-4096}"
+    rm -rf "$vm"; mkdir -p "$vm"
+    if [ -n "${code:-}" ]; then
+        if [ -n "${vars:-}" ]; then cp "$vars" "$vm/vars.fd"; firmware=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$vm/vars.fd")
+        else firmware=(-bios "$code"); fi
+    fi
+    [ -w /dev/kvm ] && accel=(-enable-kvm -cpu host)
+    # the report disk: GPT, one vfat partition with this machine's report PARTUUID
+    img="$vm/report.img"
+    truncate -s 64M "$img" && sgdisk -n "1:0:0" -t 1:0700 -u "1:$(layout REPORT_PARTUUID)" "$img" >/dev/null || die "report disk"
+    # formatted in the image file itself (no loop device for the desktop to announce)
+    local first last
+    first=$(sgdisk -i 1 "$img" | awk '/^First sector/{print $3}'); last=$(sgdisk -i 1 "$img" | awk '/^Last sector/{print $3}')
+    mkfs.vfat -n TB-VMREPORT --offset "$first" "$img" $(( (last - first + 1) / 2 )) >/dev/null 2>&1 || die "mkfs report disk"
+    sock="$vm/monitor.sock"
+    say "VM boot of the test drive ($t, snapshot — nothing is written to it; no network; report disk PARTUUID $(layout REPORT_PARTUUID); up to $((secs / 60)) min) ..."
+    local machine=(); [ "$arch" = x86_64 ] && machine=(-machine q35); [ "$arch" = aarch64 ] && machine=(-machine virt)
+    "$qemu" "${accel[@]}" "${machine[@]}" -m "$mem" -smp 2 "${firmware[@]}" \
+        -drive "file=$t,format=raw,if=none,id=tb,snapshot=on,cache=none" -device "virtio-blk-pci,drive=tb,serial=$TB_TARGET_SERIAL,bootindex=1" \
+        -drive "file=$img,format=raw,if=virtio" \
+        -nic none -display none -vga std -serial "file:$vm/serial.log" -monitor "unix:$sock,server,nowait" \
+        > "$vm/qemu.log" 2>&1 &
+    local qpid=$!
+    ledger test "VM boot of the test drive (snapshot=on: its writes discarded), evidence in $vm" "nothing to revert — the drive is not written"
+    vm_monitor() { python3 -c 'import socket,sys,time
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.recv(65536)
+s.sendall((sys.argv[2]+"\n").encode()); time.sleep(1); s.close()' "$sock" "$1" 2>/dev/null; }
+    while [ "$n" -lt "$secs" ] && kill -0 "$qpid" 2>/dev/null; do
+        sleep 30; n=$((n + 30))
+        [ $((n % 120)) -eq 0 ] && vm_monitor "screendump $vm/screen-$(printf '%04d' "$n").ppm"
+        if vm_report_read "$img" "$vm/boot-report" && grep -qh '_report complete_' "$vm"/boot-report/boot-report-*.md 2>/dev/null; then break; fi
+    done
+    vm_monitor "screendump $vm/screen-last.ppm"; sleep 2
+    vm_monitor system_powerdown
+    for _ in $(seq 1 12); do kill -0 "$qpid" 2>/dev/null || break; sleep 5; done
+    kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
+    vm_report_read "$img" "$vm/boot-report" || true
+    command -v magick >/dev/null 2>&1 && for f in "$vm"/screen-*.ppm; do [ -f "$f" ] && magick "$f" "${f%.ppm}.png" && rm -f "$f"; done
+    # the verdict
+    local verdict=PASS why=""
+    if [ "$(layout BOOT_CRYPT)" = 1 ] && [ "$(st_get auto-unlock)" = grub ]; then
+        grep -q 'TEST DRIVE' "$vm/serial.log" || { verdict=FAIL; why="$why the test loader never ran (no TEST DRIVE banner on the serial console);"; }
+    fi
+    if ! compgen -G "$vm/boot-report/boot-report-*.md" >/dev/null; then
+        verdict=FAIL; why="$why no boot report — the system never came up far enough for its logger (see $vm/screen-last.png, $vm/serial.log);"
+    else
+        grep -qh '_report complete_' "$vm"/boot-report/boot-report-*.md || { verdict=FAIL; why="$why the boot report is partial (the logger did not finish within $((secs / 60)) min);"; }
+        grep -h '\*\*' "$(ls -1 "$vm"/boot-report/boot-report-*.md | sort | tail -1)" | sed 's/^/    /'
+        grep -qh 'FAIL' "$(ls -1 "$vm"/boot-report/boot-report-*.md | sort | tail -1)" && { verdict=FAIL; why="$why the boot report has FAIL lines;"; }
+    fi
+    st_set vmboot "$verdict"; st_set vmboot-why "${why:-}"
+    if [ "$verdict" = PASS ]; then say "VM boot: PASS — the test drive booted, unlocked itself and its logger reported (evidence: $vm)"
+    else warn "VM boot: FAIL —$why"; fi
     return 0
 }
 
@@ -872,6 +1118,7 @@ case "$cmd" in
     backup)      cmd_backup "$@" ;;
     restore)     cmd_restore ;;
     finish)      cmd_finish ;;
+    vmboot)      cmd_vmboot ;;
     collect)     cmd_collect ;;
     revert)      cmd_revert "$@" ;;
     all)         cmd_fingerprint before && cmd_prepare && cmd_format && cmd_mount && cmd_backup "${1:-functional}" && cmd_restore && cmd_finish ;;
