@@ -164,7 +164,7 @@ column, use the suite for testing only — not in production.**
 | Fedora Asahi Remix (aarch64) | MacBook Pro, M1 Pro | btrfs root, GRUB on `arm64-efi` behind m1n1/U-Boot | development platform; restore over a fresh Asahi install boots — September 2026, earlier 3.x |
 | Linux Mint 22.3 (x86_64) | 2014 MacBook Pro, i7-4870HQ, 16GB RAM, NVMe 2TB, AX210 Wi-Fi | ext4 root on LVM-on-LUKS, encrypted argon2id `/boot`, GRUB EFI | backups + `backup-verify` 2026-09-11; Timeshift retention (count prune, free-space prune, `MIN_KEEP` floor, aborted-snapshot cleanup) 2026-09-12, on a loop-device drive and then a real count prune on the production drive |
 | Fedora 44 (x86_64) | 2019 System76 laptop (Clevo-based, 32 GB RAM, two NVMe) | btrfs root, systemd-boot, UKI, Secure Boot | backups + `backup-verify` |
-| EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, SATA SSD) | ext4 root on LUKS2, plain vfat `/boot` (XBOOTLDR) + ESP at `/efi`, systemd-boot Type #1 entries, dracut; USB NVMe backup drive | deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL; the two warnings are the deliberately unencrypted test drive and a 477 GiB drive under the 2x recommendation) — 2026-09-14, 3.7.0 |
+| EndeavourOS (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, GeForce 840M, Atheros AR9485 Wi-Fi) — the same **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**; the EndeavourOS SSD (1 TB Crucial MX300) is the one restored | ext4 root on LUKS2 argon2id (4 GiB memory cost) unlocked by passphrase in the initramfs by dracut + systemd-cryptsetup (`rd.luks.uuid=`), plain vfat XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot **Type #1 entries** (kernel-install `layout=bls`, `linux` + `initrd` per kernel) for `linux` 7.2 and `linux-lts` 6.18, dracut initramfs, swapfile on the root, Secure Boot off, KDE Plasma 6.7 on Wayland (Plasma Login Manager); a LUKS2 f2fs SD card opened from crypttab by keyfile (`nofail`); 2 TB USB SATA SSD backup drive (LUKS2, btrfs, shared with the Mint and Fedora systems) | **total system restore ✅ — success**, 2026-09-14, 4.0.2: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) from a functional test archive (31.4 GB, 583,535 files) and booted into a fully working system (Wi-Fi, DNS, Plasma desktop with its panel, launcher and terminals; system state `running`, no failed units), `testbed.sh collect` → `VERDICT: PASS`, 99.96 % of files restored with the archived size (every missing file Firefox site storage the booted session cleared), the original EndeavourOS disk and the SD card identical before and after. The first test boot logged in to no panel and no launcher — the functional test archive had left out `~/.local/share` (Plasma's panel theme, plasmoids, color schemes, icons) — and its restored crypttab unlocked the host's SD card: both test-bed faults, fixed in 4.0.2 and re-verified by a second restore. Backups: deploy (drive set-up included) + borg, Back In Time, Timeshift, LUKS headers + `backup-verify` (0 FAIL) on a USB NVMe drive — 3.7.0 |
 | Manjaro (x86_64) | 2019 ASUS ZenBook UX534FTC (i7-10510U, 16 GB RAM, 2 TB NVMe) | btrfs root (`@`/`@home`/`@cache`/`@log`, snapper, swapfile) on LUKS2 opened by sd-encrypt, XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs from mkinitcpio, Secure Boot with sbctl keys; 2 TB USB SATA SSD backup drive (LUKS2) | **total system restore ✅ — success**, 2026-09-14, 3.9.0: restored onto a blank 2 TB USB NVMe and booted into a fully working system with Secure Boot on (Wi-Fi, DNS, Bluetooth up), the original disk untouched. Backups: deploy over a retired borgmatic install, unlock-on-connect, incremental btrfs replicas, borg archive, LUKS headers |
 | Linux Mint 22.3 (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM) — **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**, each on its own SATA SSD; the Mint SSD is the one restored | ext4 root on LVM-on-LUKS2 (`mint-vg`, root + swap LVs, unlocked in the initramfs by a keyfile), encrypted LUKS2 argon2id `/boot` opened by GRUB 2.14 (EFI), ESP at `/boot/efi`, standard `vmlinuz` + `initramfs` from initramfs-tools, SELinux permissive; 2 TB USB SATA SSD backup drive (LUKS2, btrfs) | **total system restore ✅ — success**, 2026-09-14, 4.0.0: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) and booted into a fully working system (Wi-Fi, DNS, login screen; SELinux relabel boot), `testbed.sh collect` → `VERDICT: PASS`, the other two OSes' disks and the original Mint disk untouched |
 | Fedora 44 Workstation (x86_64) | 2014 ASUS X750JN (i7-4710HQ, 16 GB RAM, GeForce 840M) — the same **3-SSD triple-boot machine: Linux Mint, Fedora and EndeavourOS**; the Fedora SSD is the one restored | btrfs root (`root` + `home` subvolumes) on LUKS2 argon2id unlocked in the initramfs by dracut + systemd-cryptsetup (`rd.luks.uuid=`), vfat XBOOTLDR `/boot` + ESP at `/efi`, systemd-boot + UKIs built by kernel-install (plus a dracut rescue UKI), Secure Boot off, **SELinux enforcing**, Cinnamon on X11; 2 TB USB SATA SSD backup drive (LUKS2, btrfs, shared with another machine) | **total system restore ✅ — success**, 2026-09-14, 4.0.2: restored from the installed system onto a blank 2 TB USB SATA SSD (100 GiB test bed) from a functional test archive (35.8 GB, 587,637 files) and booted into a fully working system (Wi-Fi, DNS, desktop login; SELinux enforcing relabel boot; system state `running`), `testbed.sh collect` → `VERDICT: PASS`, 99.99 % of files restored with the archived size, the other two OSes' disks and the original Fedora disk untouched. Forensic inspection of the first restored drive found `~/.local` and `~/.local/share` restored with the wrong ownership and permissions (`root:root 700`) and package-made `/var/cache` directories missing or root-owned — fixed in 4.0.2, the ownership fix re-verified by a second restore. Backups: deploy over a hand-written pre-suite borg setup, borg archive, LUKS headers |
@@ -176,7 +176,7 @@ column, use the suite for testing only — not in production.**
 | Fedora | ✅ | ✅ |
 | Fedora Asahi Remix (Apple Silicon, aarch64) | ✅ | ✅ over a fresh Asahi install (never bare metal — see the FAQ) |
 | Debian / Ubuntu / Linux Mint | ✅ | ✅ |
-| Arch / Manjaro / EndeavourOS | ✅ | ✅ Manjaro, ⚠️ EndeavourOS |
+| Arch / Manjaro / EndeavourOS | ✅ | ✅ |
 | openSUSE (Leap / Tumbleweed) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ not under test |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — package managers the map does not know yet (`slackpkg`, `emerge`, `apk`, `xbps`, `nix`, `eopkg`) | ❌ — **contributions wanted**, see [Contributing](#contributing) | ❌ not under test |
 
@@ -194,7 +194,7 @@ column, use the suite for testing only — not in production.**
 
 | Setup | Backup + verify | Bare-metal restore |
 |---|:--:|:--:|
-| systemd-boot (Type #1 entries, no UKI) | ✅ | ⚠️ |
+| systemd-boot (Type #1 entries, no UKI) | ✅ | ✅ |
 | systemd-boot + UKI (unified kernel image), rebuilt by mkinitcpio presets | ✅ | ✅ |
 | UKI rebuilt by dracut or kernel-install | ✅ | ✅ |
 | **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed | ✅ | ✅ |
@@ -247,7 +247,8 @@ crypttab names, root on LVM (the volume group is created under a temporary name,
 since the host holds the real one, and renamed by `finish`), the btrfs
 subvolumes fstab mounts. The test archive goes to
 its own repository (`borg-testbed-<host>`), keeping every home's configuration,
-keys, shell setup and Claude Code state but no bulk data; the host config is not
+keys, shell setup, desktop state (`~/.local/share`'s panel themes, plasmoids,
+color schemes, icons, terminal profiles) and Claude Code but no bulk data; the host config is not
 touched, and no btrfs replica is written or pruned — the backup drive can be
 another machine's production drive, and replicas share one directory pruned by
 label. `testbed.conf` is copied into the run's state directory, so `collect`
@@ -259,7 +260,10 @@ firmware reordering its boot menu) changed. The booted test drive leaves its
 report and journal on the host's unencrypted boot partition, the one place it
 writes — as soon as the verdict and health sections exist, and again when the
 byte comparison is done (`collect` fails a partial report); every
-step is recorded in a ledger with its revert. Test drives always get the
+step is recorded in a ledger with its revert. `finish` sets `noauto` on the
+restored crypttab and fstab entries for the host's other disks (a data drive,
+an SD card — their keyfiles come back with the restore), never on the boot
+chain's own, so the test boot unlocks and mounts none of them. Test drives always get the
 passphrase `test`. Where the host's own boot chain opens them without a prompt,
 so does the test drive: containers the restored crypttab opens by keyfile get the
 host's keyfile as a second key, and an encrypted `/boot` is opened by a test-only

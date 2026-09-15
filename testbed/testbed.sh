@@ -97,7 +97,13 @@ TB_HOST="$BACKUP_HOST_ID"
 TB_REPO="${TB_REPO:-$BACKUP_MOUNT/borg-testbed-$TB_HOST}"
 TB_BIG_EXCLUDES="${TB_BIG_EXCLUDES:-/var/lib/ollama/* /usr/lib/ollama/* /var/lib/docker/* /var/lib/containers/* /var/lib/libvirt/images/* /var/lib/plocate/* /var/lib/mlocate/* /var/lib/chrootbuild/* /opt/cuda/* /usr/share/doc/* /usr/lib/jvm/*}"
 TB_EXTRA_EXCLUDES="${TB_EXTRA_EXCLUDES:-}"
-TB_HOME_KEEP="${TB_HOME_KEEP:-.config .local/bin .local/share/keyrings .local/share/applications .local/share/fonts .ssh .gnupg .pki .claude .claude.json .bashrc .bash_profile .bash_logout .profile .zshrc .zprofile .zshenv .zlogin .oh-my-zsh .xinitrc .xprofile .xsession .Xresources .tmux.conf .tmux .gitconfig .dotfiles .vimrc .nanorc}"
+# A functional home is one the desktop comes up in: ~/.config alone is not. Plasma's
+# panel theme, plasmoids, wallpapers and activities, color schemes, icons and
+# terminal profiles live in ~/.local/share — without them a restored EndeavourOS
+# KDE drive logged in to no panel, no launcher and no way to open a terminal. The
+# programs ~/.local/bin links into (Claude Code, pipx) and a shell's plug-ins
+# (ble.sh) are kept for the same reason: the rc files and links kept above need them.
+TB_HOME_KEEP="${TB_HOME_KEEP:-.config .local/bin .local/state .local/share/keyrings .local/share/applications .local/share/fonts .local/share/plasma .local/share/plasmashell .local/share/kactivitymanagerd .local/share/color-schemes .local/share/icons .local/share/themes .local/share/wallpapers .local/share/aurorae .local/share/kwin .local/share/kxmlgui5 .local/share/konsole .local/share/knewstuff3 .local/share/mime .local/share/user-places.xbel .local/share/gnome-shell .local/share/cinnamon .local/share/nemo .local/share/xfce4 .local/share/claude .local/share/pipx .local/share/blesh .themes .icons .fonts .ssh .gnupg .pki .claude .claude.json .bashrc .bash_profile .bash_logout .profile .zshrc .zprofile .zshenv .zlogin .oh-my-zsh .xinitrc .xprofile .xsession .Xresources .tmux.conf .tmux .gitconfig .dotfiles .vimrc .nanorc}"
 TB_TARGET_GIB="${TB_TARGET_GIB:-100}"     # the test bed's part of the test drive, from its start; the rest stays unpartitioned (0 = whole drive)
 TB_SECTORS_KB="${TB_SECTORS_KB:-128}"     # smaller USB transfers for bridges that reset under load; 0 = leave alone
 
@@ -558,7 +564,8 @@ cmd_restore() {
     say "restore ($a) ..."
     "$TB_STATE/suite/borg-restore.sh" "$TB_MNT" "$TB_REPO" "$a" < /dev/null > "$TB_STATE/restore.log" 2>&1
     local rrc=$?
-    sed 's/\x1b\[[0-9;]*m//g' "$TB_STATE/restore.log" | grep -E 'FAIL|ERROR\(S\)|ALL CHECKS|WARNING\(S\)' | tail -12
+    # the verification's own lines only: borg's file list names MEMORY_FAILURE, CURLOPT_FAILONERROR.3 …
+    sed 's/\x1b\[[0-9;]*m//g' "$TB_STATE/restore.log" | grep -E '^[[:space:]]+FAIL:|ERROR\(S\)|ALL CHECKS|WARNING\(S\)' | tail -12
     st_set restore-rc "$rrc"
     [ "$rrc" -eq 0 ] || warn "restore exited $rrc — $TB_STATE/restore.log"
 }
@@ -601,6 +608,7 @@ cmd_finish() {
         say "parked stale UKI ${f#"$TB_MNT"}"
     done < <(cl_ukis "$TB_MNT")
     auto_unlock_grub
+    isolate_other_disks
     # The restored boot configuration must name the volume group by its real name:
     # the temporary one exists only while this test bed runs.
     if [ -n "$(layout ROOT_VG)" ] && grep -rlsF "/dev/mapper/$(tb_vg | sed 's/-/--/g')-" "$TB_MNT/boot/grub" "$TB_MNT/boot/grub2" "$TB_MNT/etc/fstab" "$TB_MNT/etc/default/grub" "$TB_MNT/etc/initramfs-tools/conf.d" 2>/dev/null | grep -q .; then
@@ -682,6 +690,53 @@ auto_unlock_grub() {
         cp "$TB_MNT/root/restore-test/BOOTX64.EFI.restored" "$loader"
         warn "auto-unlock: grub-mkimage failed — the restore's loader is back in place; the test boot asks for the passphrase (test)"
     fi
+    return 0
+}
+# isolate_other_disks — TEST DRIVES ONLY: the restored crypttab and fstab still
+# name this machine's other disks — a data drive, an SD card — and the restore
+# brought their keyfiles along, so the booted test drive unlocked them
+# (EndeavourOS: a nofail crypttab entry opened the host's SD card, and the boot
+# report FAILed "source-machine containers open"). Every entry whose device
+# resolves, here, to a disk other than the test drive gets noauto on the test
+# drive; so does an fstab entry on one of those containers. A real restore keeps
+# them: the restore itself is right to leave them alone. The restored files are
+# kept in /root/restore-test.
+isolate_other_disks() {
+    local t f line dev name opts disk names=" " n=0 a=()
+    t=$(target_disk)
+    for f in crypttab fstab; do
+        [ -f "$TB_MNT/etc/$f" ] || continue
+        [ -f "$TB_MNT/root/restore-test/$f.restored" ] || cp -p "$TB_MNT/etc/$f" "$TB_MNT/root/restore-test/$f.restored"
+        : > "$TB_MNT/etc/$f.tb"
+        while IFS= read -r line || [ -n "$line" ]; do
+            read -ra a <<<"$line"
+            if [ "${#a[@]}" -lt 2 ] || [ "${a[0]#\#}" != "${a[0]}" ]; then printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue; fi
+            if [ "$f" = crypttab ]; then name=${a[0]}; dev=${a[1]}; else name=""; dev=${a[0]}; fi
+            opts=${a[3]:-}
+            disk=""
+            case "$dev" in
+                UUID=*|PARTUUID=*|LABEL=*|PARTLABEL=*) disk=$(bx_disk_of "$(blkid -t "$dev" -o device 2>/dev/null | head -1)" 2>/dev/null) ;;
+                /dev/mapper/*) case "$names" in *" ${dev#/dev/mapper/} "*) disk="a container of another disk" ;; esac ;;
+                /dev/*) [ -b "$dev" ] && disk=$(bx_disk_of "$dev" 2>/dev/null) ;;
+            esac
+            if [ -z "$disk" ] || [ "$disk" = "$t" ] || [[ ",$opts," == *,noauto,* ]]; then
+                printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue
+            fi
+            # The boot chain naming another disk is a restore failure, never isolated away.
+            if { [ "$f" = crypttab ] && { [ "$name" = "$(layout ROOT_MAPPER)" ] || [ "$name" = "$(layout BOOT_MAPPER)" ]; }; } \
+               || { [ "$f" = fstab ] && case "${a[1]}" in /|/boot|/efi|/boot/efi|/usr|/var|/home) true ;; *) false ;; esac; }; then
+                warn "the restored /etc/$f still names $dev (on $disk) for ${name:-${a[1]}} — the restore did not move it to the test drive; left as-is"
+                printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue
+            fi
+            [ -n "$name" ] && names="$names$name "
+            if [ "$f" = crypttab ]; then [ -n "${a[2]:-}" ] || a[2]=none; else [ -n "${a[2]:-}" ] || a[2]=auto; fi
+            a[3]="${opts:+$opts,}noauto"
+            printf '%s\n' "${a[*]}" >> "$TB_MNT/etc/$f.tb"; n=$((n+1))
+            say "test drive: /etc/$f entry for $dev (on $disk, not the test drive) → noauto"
+        done < "$TB_MNT/etc/$f"
+        cat "$TB_MNT/etc/$f.tb" > "$TB_MNT/etc/$f"; rm -f "$TB_MNT/etc/$f.tb"
+    done
+    [ "$n" -gt 0 ] && ledger test "test drive: $n crypttab/fstab entries for disks other than the test drive set noauto — the booted test drive unlocks and mounts nothing of this machine's (originals: /root/restore-test/*.restored)" "test drive only"
     return 0
 }
 unmount_mounts() {
