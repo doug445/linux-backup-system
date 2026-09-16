@@ -34,11 +34,11 @@
 # Fedora/Asahi, Arch/Manjaro, openSUSE), the root filesystem (btrfs -> snapper
 # and send/receive replicas; anything else -> Timeshift), the backup drive and
 # whether it is removable (ad-hoc: timers masked) or installed (scheduled),
-# an existing borg setup (never overwritten), and the architecture.
+# a hand-written borg setup (never overwritten), and the architecture.
 #
 # Environment overrides:
 #   BACKUP_MOUNT=/path/to/backup  — force a specific backup mount path
-#   FORCE_BORG=1                  — overwrite existing borg scripts even if present
+#   FORCE_BORG=1                  — replace a hand-written borg setup (a copy is kept)
 #   SCHEDULE_MODE=adhoc|scheduled — override the drive-type detection
 # Run by sh (dash), zsh or `bash`-less invocation: re-exec under bash — the
 # shebang is ignored when a script is handed to another shell by name.
@@ -303,6 +303,24 @@ adopt_label_mount() {
     esac
 }
 
+# find_backup_by_contents — "SOURCE<TAB>MOUNT" of a mounted filesystem that
+# already holds this suite's backups although it has no Borg-backup label (a
+# drive set up by hand, or shared with another machine): a borg repository,
+# this host's Back In Time tree, or the test bed's config. This machine's own
+# boot chain and data mounts are never candidates. Desktop automounts are
+# found too; adopt_label_mount moves them to /mnt/backup.
+find_backup_by_contents() {
+    local m src
+    while read -r m src; do
+        m=$(printf '%b' "$m")    # findmnt -r writes a space as \x20
+        case "$m" in /|/boot|/boot/*|/efi|/home|/home/*|/usr|/var|/var/*|/srv|/opt|/tmp|/proc|/sys|/dev|/run/user/*) continue ;; esac
+        { [ -f "$m/borg-backup/config" ] || [ -d "$m/backintime/$(hostname)" ] || [ -f "$m/testbed/testbed.conf" ]; } || continue
+        printf '%s\t%s\n' "$src" "$m"
+        return 0
+    done < <(findmnt -rno TARGET,SOURCE -t btrfs,ext4,xfs,exfat,vfat 2>/dev/null | sed 's/\[.*//')
+    return 1
+}
+
 detect_backup_mount() {
     # Priority 1: Environment variable override
     if [ -n "${BACKUP_MOUNT:-}" ]; then
@@ -382,6 +400,14 @@ detect_backup_mount() {
                 fi
             fi
         done
+    fi
+
+    # Priority 3b: an unlabeled drive that already holds this suite's backups
+    local found
+    if found=$(find_backup_by_contents); then
+        log "found a backup drive by its contents (no Borg-backup label): ${found%%$'\t'*} at ${found#*$'\t'}"
+        adopt_label_mount "${found%%$'\t'*}" "${found#*$'\t'}"
+        return
     fi
 
     # Priority 4: Check /mnt/backup
@@ -872,10 +898,19 @@ explain_encrypt_first() {
 ###############################################################################
 # Check if borg is already deployed and working
 ###############################################################################
+# Only a borg setup that is NOT this suite's is preserved: the suite's own
+# borg-backup.sh sources backup-common.sh, which every deploy upgrades, so an
+# older copy of it is upgraded with it. A hand-written one is kept (FORCE_BORG=1
+# replaces it, keeping it as borg-backup.sh.pre-suite-<stamp>) — and said to
+# be foreign: it reads none of /etc/backup-system.conf (a pre-suite script
+# still backed up to /run/media/will/Borg-backup after the drive had moved).
+BORG_FOREIGN=false
 detect_existing_borg() {
     BORG_ALREADY_DEPLOYED=false
-    if [ -f /usr/local/sbin/borg-backup.sh ] && \
-       [ -f /etc/systemd/system/borg-backup.service ] && \
+    [ -f /usr/local/sbin/borg-backup.sh ] || return 0
+    grep -q 'backup-common\.sh' /usr/local/sbin/borg-backup.sh 2>/dev/null && return 0
+    BORG_FOREIGN=true
+    if [ -f /etc/systemd/system/borg-backup.service ] && \
        [ -f /etc/systemd/system/borg-backup.timer ] && \
        systemctl is-active borg-backup.timer &>/dev/null; then
         BORG_ALREADY_DEPLOYED=true
@@ -1121,7 +1156,7 @@ deploy_systemd_units() {
         install -m 644 "$SCRIPT_DIR/borg-backup.timer" /etc/systemd/system/borg-backup.timer
         log "  Borg units deployed."
     else
-        log "  Borg units: existing setup preserved (use FORCE_BORG=1 to overwrite)."
+        warn "  Borg units: existing hand-written setup preserved (use FORCE_BORG=1 to overwrite)."
     fi
 
     systemctl daemon-reload
@@ -1473,10 +1508,15 @@ done
 
 # Borg backup script — only if not already deployed
 if [ "$BORG_ALREADY_DEPLOYED" = false ] || [ "${FORCE_BORG:-0}" = "1" ]; then
+    if [ "$BORG_FOREIGN" = true ]; then
+        _keep="/usr/local/sbin/borg-backup.sh.pre-suite-$(date +%Y%m%d-%H%M%S)"
+        /usr/bin/cp -a /usr/local/sbin/borg-backup.sh "$_keep"
+        log "  hand-written borg-backup.sh replaced — kept as $_keep"
+    fi
     install -m 755 "$SCRIPT_DIR/borg-backup.sh" /usr/local/sbin/borg-backup.sh
     log "  Borg script deployed."
 else
-    log "  Borg script: existing /usr/local/sbin/borg-backup.sh preserved."
+    warn "  Borg script: existing /usr/local/sbin/borg-backup.sh preserved — it is NOT this suite's (it reads none of /etc/backup-system.conf); FORCE_BORG=1 replaces it, keeping a copy."
 fi
 # Universal library + verifier + header backup + drive-attach + snapper patch
 install -m 644 "$SCRIPT_DIR/backup-common.sh" /usr/local/sbin/backup-common.sh
@@ -1501,10 +1541,26 @@ log "Scripts deployed."
 # Step 3: Deploy backup tray
 log "Deploying backup tray indicator..."
 install -m 755 "$SCRIPT_DIR/backup-tray.py" /usr/local/bin/backup-tray
-mkdir -p "$USER_HOME/.config/autostart"
-cp "$SCRIPT_DIR/backup-tray.desktop" "$USER_HOME/.config/autostart/"
-chown "$SUDO_USER:" "$USER_HOME/.config/autostart/backup-tray.desktop"
-restart_tray
+# A systemd user unit that already starts the tray (a hand-rolled setup) is
+# the launcher: an autostart entry beside it put two icons in the panel.
+tray_unit=$(grep -lsE '^ExecStart=.*/usr/local/bin/backup-tray([[:space:]]|$)' \
+    "$USER_HOME"/.config/systemd/user/*.service 2>/dev/null \
+    | while read -r u; do [ -e "$USER_HOME/.config/systemd/user/graphical-session.target.wants/$(basename "$u")" ] \
+        || [ -e "$USER_HOME/.config/systemd/user/default.target.wants/$(basename "$u")" ] && echo "$u"; done | head -1 || true)
+if [ -n "$tray_unit" ]; then
+    rm -f "$USER_HOME/.config/autostart/backup-tray.desktop"
+    log "  the tray is started by the user unit $(basename "$tray_unit") — no autostart entry (it would start a second one)"
+else
+    mkdir -p "$USER_HOME/.config/autostart"
+    cp "$SCRIPT_DIR/backup-tray.desktop" "$USER_HOME/.config/autostart/"
+    chown "$SUDO_USER:" "$USER_HOME/.config/autostart/backup-tray.desktop"
+fi
+if [ -n "$tray_unit" ] && runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="/run/user/$(id -u "$SUDO_USER")" \
+        systemctl --user try-restart "$(basename "$tray_unit")" 2>/dev/null; then
+    log "  tray: $(basename "$tray_unit") restarted with the new build"
+else
+    restart_tray
+fi
 log "Tray indicator deployed."
 
 # Step 4: Generate BIT config
@@ -1754,13 +1810,14 @@ if [ "$PLAIN_DRIVE_ACCEPTED" = 1 ]; then
     echo -e "  ${YELLOW}Reminder:${NC} the backup drive is unencrypted. Protect the backups on it when you"
     echo "     can: LinuxLocker encrypts it in place — https://github.com/doug445/LinuxLocker"
 fi
-echo "  1. Verify backup drive: mountpoint $BACKUP_MOUNT"
-if [ "$BORG_ALREADY_DEPLOYED" = false ]; then
-    echo "  2. Init Borg repo (if new): sudo borg init --encryption=none $BACKUP_MOUNT/borg-backup"
-    echo "  3. First Borg backup:       sudo /usr/local/sbin/borg-backup.sh"
+_n=1
+echo "  $((_n++)). Verify backup drive: mountpoint $BACKUP_MOUNT"
+if [ "$BORG_ALREADY_DEPLOYED" = false ] || [ "${FORCE_BORG:-0}" = "1" ]; then
+    echo "  $((_n++)). Init Borg repo (if new): sudo borg init --encryption=none $BACKUP_MOUNT/borg-backup"
+    echo "  $((_n++)). First Borg backup:       sudo /usr/local/sbin/borg-backup.sh"
 fi
-echo "  4. First BIT backup:        sudo /usr/local/sbin/backintime-backup.sh"
-echo "  5. Tray: restarted if it was running; otherwise it starts at the next login"
+echo "  $((_n++)). First BIT backup:        sudo /usr/local/sbin/backintime-backup.sh"
+echo "  $((_n++)). Tray: restarted if it was running; otherwise it starts at the next login"
 echo ""
 echo "Shell commands:"
 echo "  timeback [list|info|log]     — Borg operations"

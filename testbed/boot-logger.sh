@@ -78,6 +78,19 @@ for s in $HOST_DISK_SERIALS; do
 done
 [ -z "$host_open" ] && out "- **PASS: no container on the source machine's disks is open**" || out "- **FAIL: source-machine containers open: $host_open**"
 [ -z "$host_mounted" ] && out "- **PASS: nothing from the source machine's disks is mounted**" || out "- **FAIL: source-machine mounts: $host_mounted**"
+# Secure Boot refusing a module the source machine loads (nvidia, zfs signed
+# with a MOK key) boots to a desktop on a fallback driver. The MOK keys come
+# from shim: where the source machine starts shim and this boot did not (the
+# firmware menu started the loader without it), the modules cannot be judged.
+rej_re="Key was rejected by service|Loading of unsigned module is rejected|Loading of module with unavailable key is rejected"
+rejected=$(journalctl -b --no-pager -o cat 2>/dev/null | grep -E "$rej_re" | sed -n "s/.*insert module '\([^']*\)'.*/\1/p" | sort -u | tr '\n' ' ')
+if ! journalctl -b --no-pager -o cat 2>/dev/null | grep -qE "$rej_re"; then
+    out "- **PASS: no kernel module rejected by Secure Boot**"
+elif [ "${SOURCE_SHIM:-0}" = 1 ] && ! journalctl -b -k --no-pager -o cat 2>/dev/null | grep -q 'UEFI:MokListRT'; then
+    out "- WARN: kernel modules rejected by Secure Boot (${rejected:-see the journal}) — this boot did not start shim, the source machine's firmware entry does: its MOK keys were not loaded, so modules signed with them are not verifiable by this test boot"
+else
+    out "- **FAIL: kernel modules rejected by Secure Boot: ${rejected:-see the journal}**"
+fi
 state=$(systemctl is-system-running 2>/dev/null)
 out "- system state: \`$state\`$( [ "$state" = running ] && echo ' — **PASS**' || echo " — failed units: $(systemctl --failed --no-legend --plain 2>/dev/null | awk '{printf "%s ", $1}')")"
 
