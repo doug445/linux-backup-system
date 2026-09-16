@@ -1,6 +1,6 @@
 # Security Policy
 
-**linux-backup-system 4.0.3**
+**linux-backup-system 4.0.4**
 
 ## Supported Versions
 

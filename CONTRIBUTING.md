@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 4.0.3**
+**linux-backup-system 4.0.4**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -38,7 +38,7 @@ have.
 
 | Setup | Status | What to confirm |
 |---|---|---|
-| Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint, Arch / Manjaro / EndeavourOS | ✅ | still worth a report on a different boot layout — the machines are listed under *Verified on* in the README |
+| Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Mint, Arch / Manjaro / EndeavourOS | ✅ | still worth a report on a different boot layout — the machines are listed in [docs/TESTED-SYSTEMS.md](docs/TESTED-SYSTEMS.md) |
 | **openSUSE** | ❌ — **contributions wanted** | `zypper` package names; a real backup + verify pass |
 | **Slackware, Gentoo, Turbolinux, Alpine, Void, NixOS, Solus** — a package manager the map does not know | ❌ **most wanted** | the family token, its non-interactive install command, the package names for borg / Back In Time / Timeshift / the tray, a synthetic `os-release` fixture, and a real backup + verify pass |
 | btrfs root → snapper + send/receive replicas | ✅ | |

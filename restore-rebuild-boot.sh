@@ -546,6 +546,18 @@ fi
 if [ "$USES_SDBOOT" = true ]; then
     say "===== systemd-boot ====="
     if command -v bootctl >/dev/null 2>&1; then
+        # A shim where bootctl installs (firmware → shim → grubx64.efi, which is
+        # systemd-boot): shim puts the MOK keys that DKMS/akmods sign out-of-tree
+        # modules with into the kernel's keyring. bootctl install replaced it with
+        # plain systemd-boot, and the restored disk booted without them — nvidia
+        # and zfs "Key was rejected by service". Kept; the new systemd-boot becomes
+        # its chain target.
+        sd_shims=()
+        for f in "${ESP:-/boot/efi}"/EFI/systemd/systemd-boot*.efi; do
+            [ -f "$f" ] && grep -aq MokListRT "$f" && ! grep -aq '#### LoaderInfo: systemd-boot' "$f" || continue
+            sd_shims+=("$f")
+            (( DRY )) || cp -f "$f" "$f.restore-shim"
+        done
         if [ "$NO_NVRAM" = 1 ]; then
             say "RESTORE_NO_NVRAM=1: systemd-boot installed without touching EFI variables (EFI/BOOT/BOOT*.EFI is the entry point)"
             run bootctl ${ESP:+--esp-path="$ESP"} --no-variables install
@@ -553,6 +565,16 @@ if [ "$USES_SDBOOT" = true ]; then
             warn "bootctl install failed — retrying without NVRAM variables (the firmware boots EFI/BOOT/BOOT*.EFI, which bootctl also writes)"
             run bootctl ${ESP:+--esp-path="$ESP"} --no-variables install || true
         fi
+        for f in "${sd_shims[@]}"; do
+            say "shim kept at ${f#"${ESP:-/boot/efi}"} (the source's chain: shim → grubx64.efi = systemd-boot)"
+            run cp -f "$f" "$(dirname "$f")/grubx64.efi"
+            (( DRY )) || mv -f "$f.restore-shim" "$f"
+            case "$ARCH" in x86_64) b=BOOTX64.EFI ;; aarch64) b=BOOTAA64.EFI ;; *) b="" ;; esac
+            b="${ESP:-/boot/efi}/EFI/BOOT/$b"
+            if [ "$NO_NVRAM" = 1 ] && [ -f "$b" ] && ! grep -aq MokListRT "$b"; then
+                warn "no firmware entry is written, and the firmware's fallback ${b#"${ESP:-/boot/efi}"} is not shim: booted from it, the restored system has no MOK keys — out-of-tree modules signed with them (nvidia, zfs) are rejected under Secure Boot. Boot it through a firmware entry for ${f#"${ESP:-/boot/efi}"} (RESTORE_NO_NVRAM=0), or put shim on the fallback path."
+            fi
+        done
         # kernel-install writes Type#1 entries (or UKIs) per the install layout.
         # Only where kernel-install owns the entries: on a mkinitcpio host the
         # restored entries are already right (their ids were rewritten) and
@@ -666,6 +688,19 @@ fi
 if command -v sbctl >/dev/null 2>&1 && { [ -d /var/lib/sbctl ] || [ -d /usr/share/secureboot/keys ]; }; then
     say "===== Secure Boot (sbctl keys present) ====="
     run sbctl sign-all || warn "sbctl sign-all reported errors — sign the loader and kernels by hand before rebooting"
+    # sign-all signs only sbctl's database. bootctl install (step 5) wrote
+    # EFI/systemd/systemd-boot<arch>.efi fresh and unsigned; a host that signed
+    # it outside the database (a systemd-boot-update drop-in, by hand) kept
+    # booting, and the restored disk would not: sign what bootctl wrote.
+    if [ "$USES_SDBOOT" = true ] && (( ! DRY )); then
+        sb_unsigned=$(sbctl verify 2>/dev/null | sed -n 's/^.*✗ \(.*\) is not signed$/\1/p')
+        for f in "${ESP:-/boot/efi}"/EFI/systemd/systemd-boot*.efi "${ESP:-/boot/efi}"/EFI/systemd/grubx64.efi "${ESP:-/boot/efi}"/EFI/BOOT/BOOT*.EFI; do
+            [ -f "$f" ] && grep -qxF "$f" <<<"$sb_unsigned" || continue
+            # systemd-boot only: a shim or GRUB on these paths is not bootctl's (and shim is Microsoft-signed)
+            grep -aq '#### LoaderInfo: systemd-boot' "$f" || continue
+            run sbctl sign -s "$f" || warn "could not sign $f — the firmware refuses it with Secure Boot on"
+        done
+    fi
     if (( ! DRY )); then sbctl verify 2>&1 | sed 's/^/[rebuild-boot]   /' || true; fi
 elif [ "$IS_EFI" = true ] && command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -q enabled; then
     if ! compgen -G "${ESP:-/boot/efi}/EFI/*/shim*.efi" >/dev/null 2>&1; then

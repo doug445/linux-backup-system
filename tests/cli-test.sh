@@ -239,6 +239,16 @@ grep -v '^#' "$ROOT/99-borg-backup.rules" | grep -q 'UDISKS_AUTO_CLEAR' && bad "
 grep -q '@BACKUP_FS_UUID@' "$ROOT/99-borg-backup.rules" && ok "udev rule covers the filesystem UUID too" || bad "udev rule ignores the inner filesystem UUID"
 grep -q 'BORG_REPO=\\\$(. /etc/backup-system.conf' "$ROOT/deploy.sh" && ok "timeback() resolves BORG_REPO from the config at call time" || bad "timeback() hardcodes the repo path"
 
+echo "== deploy: an unlabeled backup drive is found by what is on it, a borg-lookalike directory is not"
+mkdir -p "$T/fbc/media/My Drive/borg-backup" "$T/fbc/data/borg-backup"; : > "$T/fbc/media/My Drive/borg-backup/config"
+eval "$(sed -n '/^find_backup_by_contents() {/,/^}/p' "$ROOT/deploy.sh")"
+findmnt() { printf '%s %s\n' "$T/fbc/data" /dev/sdz1 "$T/fbc/media/My\\x20Drive" '/dev/mapper/luks-x[/]'; }
+r=$(find_backup_by_contents); expect "found: the mount holding a borg repository (escaped space decoded)" "$T/fbc/media/My Drive" "${r#*$'\t'}"
+expect "found: its source, subvolume suffix dropped" /dev/mapper/luks-x "${r%%$'\t'*}"
+findmnt() { printf '%s %s\n' "$T/fbc/data" /dev/sdz1 / /dev/nvme0n1p3; }
+find_backup_by_contents >/dev/null && bad "a borg-backup directory without a repository config was taken for a drive" || ok "no repository config, no drive"
+unset -f findmnt find_backup_by_contents
+
 echo "== deploy: a running backup is judged by its lock, never by a command line that names the script"
 sed -n '/^backup_lock_held()/,/^}/p' "$ROOT/deploy.sh" > "$T/lockfn.sh"
 out=$(BX_LOCK_FILE="$T/lbs.lock" bash -c "source '$T/lockfn.sh'; : /usr/local/sbin/borg-backup.sh; backup_lock_held && echo held || echo free")
@@ -352,6 +362,32 @@ grep -q '| byte-identical size, same name | 2 |' <<<"$out" && ok "compare: same-
 grep -q '| hard-link names of a restored inode (borg lists them as 0 bytes) | 1 |' <<<"$out" && ok "compare: a hard link listed as 0 bytes is not a difference" || bad "compare hardlink: $out"
 grep -q '| size differs | 1 |' <<<"$out" && grep -q '/etc/state' <<<"$out" && ok "compare: a changed file is named" || bad "compare differ: $out"
 grep -q '| missing | 1 |' <<<"$out" && grep -q '^/etc/gone$' <<<"$out" && ok "compare: a missing file is named" || bad "compare missing: $out"
+
+echo "== test bed fingerprint: a loader re-signed by the machine's own boot is the same code"
+eval "$(sed -n "/^EFI_CODE_HASH='/,/^'\$/p" "$ROOT/testbed/testbed.sh")"
+python3 - "$T/pe" <<'PY'
+import struct, sys
+d = sys.argv[1]
+def image(sig):
+    b = bytearray(512)
+    b[0:2] = b"MZ"; struct.pack_into("<I", b, 0x3C, 64); b[64:68] = b"PE\0\0"
+    opt = 64 + 24; struct.pack_into("<H", b, opt, 0x20B); b[300:320] = b"loader code here...."
+    if sig:
+        struct.pack_into("<I", b, opt + 64, len(sig))            # checksum changes too
+        struct.pack_into("<II", b, opt + 112 + 32, len(b), len(sig))
+        b += sig
+    return bytes(b)
+import os; os.makedirs(d, exist_ok=True)
+open(d + "/u.efi", "wb").write(image(b""))
+open(d + "/a.efi", "wb").write(image(b"SIGNATURE-ONE-xx"))
+open(d + "/b.efi", "wb").write(image(b"SIGNATURE-TWO-yyyy"))
+c = bytearray(image(b"SIGNATURE-ONE-xx")); c[305] ^= 1; open(d + "/c.efi", "wb").write(bytes(c))
+PY
+h=$(cd "$T/pe" && python3 -c "$EFI_CODE_HASH" a.efi b.efi u.efi c.efi | cut -d' ' -f1)
+expect "two signatures of one image hash the same" "$(sed -n 1p <<<"$h")" "$(sed -n 2p <<<"$h")"
+expect "the signed image hashes like the unsigned one" "$(sed -n 1p <<<"$h")" "$(sed -n 3p <<<"$h")"
+[ "$(sed -n 1p <<<"$h")" != "$(sed -n 4p <<<"$h")" ] && ok "a changed code byte is a different hash" || bad "a code change was hidden by the signature-insensitive hash"
+grep -q "sys_vendor" <<<"$(awk '/^mirror_firmware_entry\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")" && ok "Acer firmware: no grubx64.efi on the test drive's fallback path (Linpus lite entry)" || bad "mirror_firmware_entry ignores Acer's Linpus lite entries"
 
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")

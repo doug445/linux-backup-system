@@ -231,6 +231,16 @@ detect_layout() {
     if [ -n "$esp" ]; then
         echo "ESP_MOUNT=$esp"; echo "ESP_MIB=$(( $(lsblk -bdno SIZE "$(findmnt -no SOURCE "$esp")") / 1048576 ))"
         [ "$esp" = /boot ] && boot_is_esp=1
+        # the loader this machine's firmware entry starts (read only): the test
+        # drive gets no entry, so finish points its fallback path at the same chain
+        if [ -d /sys/firmware/efi ] && command -v efibootmgr >/dev/null 2>&1; then
+            local cur espuuid fl
+            cur=$(efibootmgr 2>/dev/null | sed -n 's/^BootCurrent: *//p')
+            espuuid=$(lsblk -dno PARTUUID "$(findmnt -no SOURCE "$esp")" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+            fl=$(efibootmgr -v 2>/dev/null | awk -v b="Boot$cur" -v u="$espuuid" '
+                u != "" && index($0, b) == 1 && index(tolower($0), u) {p = $0; sub(/.*\)\//, "", p); sub(/[[:space:]].*/, "", p); gsub(/\\/, "/", p); print p; exit}')
+            case "$fl" in /EFI/*) echo "FW_LOADER=$fl" ;; esac
+        fi
     fi
     if mountpoint -q /boot && [ "$boot_is_esp" = 0 ]; then
         boot_dev=$(findmnt -no SOURCE /boot | sed 's/\[.*//'); boot_fs=$(findmnt -no FSTYPE /boot)
@@ -269,6 +279,27 @@ detect_layout() {
 layout() { [ -f "$TB_STATE/host-layout" ] || { mkdir -p "$TB_STATE"; detect_layout > "$TB_STATE/host-layout"; }; grep "^$1=" "$TB_STATE/host-layout" | head -1 | cut -d= -f2-; }
 layout_all() { [ -f "$TB_STATE/host-layout" ] || { mkdir -p "$TB_STATE"; detect_layout > "$TB_STATE/host-layout"; }; grep "^$1=" "$TB_STATE/host-layout" | cut -d= -f2-; }
 
+# EFI_CODE_HASH — sha256 of a PE image without its signature (checksum field,
+# certificate-table entry and table): a loader re-signed by the machine's own
+# boot (an sbctl drop-in on systemd-boot-update) is the same code. The files
+# section keeps the whole-file hashes; the diff compares .efi files by code.
+EFI_CODE_HASH='
+import hashlib, struct, sys
+for p in sys.argv[1:]:
+    b = open(p, "rb").read()
+    try:
+        pe = struct.unpack_from("<I", b, 0x3C)[0]
+        assert b[pe:pe + 4] == b"PE\0\0"
+        opt = pe + 24
+        ck = opt + 64
+        sec = opt + (96 if struct.unpack_from("<H", b, opt)[0] == 0x10B else 112) + 4 * 8
+        off, size = struct.unpack_from("<II", b, sec)
+        end = off if off and size else len(b)
+        body = b[:ck] + b[ck + 4:sec] + b[sec + 8:end] + (b[off + size:] if off and size else b"")
+    except (AssertionError, struct.error):
+        body = b
+    print(hashlib.sha256(body).hexdigest() + "  " + p)
+'
 # --- fingerprint: this machine's own disks ----------------------------------------------
 cmd_fingerprint() {
     local tag="${1:-}" out d p
@@ -284,11 +315,19 @@ cmd_fingerprint() {
             local both
             both=$(comm -12 <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-before.txt" | sort -u) \
                             <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-after.txt" | sort -u))
+            local bycode=0
+            grep -q '^## efi code ' "$TB_STATE/fingerprint-before.txt" && grep -q '^## efi code ' "$TB_STATE/fingerprint-after.txt" && bycode=1
             fp_norm() { # the fingerprint without the expected noise and without disks absent from the other side
-                awk -v both="$both" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1}
-                    /^## disk / {sub(/^## disk [^ ]* serial /, "", $0); skip = !($0 in keep); if (!skip) print "## disk serial " $0; next}
-                    /^## / {skip=0}
+                awk -v both="$both" -v bycode="$bycode" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1}
+                    /^## files / {infiles=1; skip=0; dev=""; print; next}
+                    /^## / {infiles=0}
+                    bycode && infiles && tolower($0) ~ /\.efi$/ {next}
+                    /^## disk / {dev=$3; sub(/^## disk [^ ]* serial /, "", $0); skip = !($0 in keep); if (!skip) print "## disk serial " $0; next}
+                    /^## / && !/^## LUKS header / {skip=0; dev=""}
                     skip {next}
+                    # the kernel may number the same disk differently after a reboot (nvme1n1 → nvme0n1):
+                    # the serial identifies it, its device name is not compared
+                    dev != "" {gsub(dev, "DISK")}
                     /restore-test|loader\/random-seed|^BootOrder:/ {next}
                     /^Boot[0-9A-Fa-f]{4}/ && /BBS\(|\/USB\(/ {next}
                     {print}' "$1"
@@ -300,9 +339,15 @@ cmd_fingerprint() {
                      <(grep -E '^Boot[0-9A-Fa-f]{4}' "$TB_STATE/fingerprint-after.txt" | grep -E 'BBS\(|/USB\(') >/dev/null \
                     || say "  note: the firmware's own removable-media boot entries changed (BBS / USB device paths) — made by the firmware at power-on"
                 local gone
-                gone=$(comm -3 <(sed -n 's/^## disk \([^ ]*\) serial \(.*\)/\2 \1/p' "$TB_STATE/fingerprint-before.txt" | sort -u) \
-                               <(sed -n 's/^## disk \([^ ]*\) serial \(.*\)/\2 \1/p' "$TB_STATE/fingerprint-after.txt" | sort -u) | sed 's/^\t/after only: /; s/^\([^a]\)/before only: \1/' | tr '\n' ';')
+                gone=$(comm -3 <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-before.txt" | sort -u) \
+                               <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-after.txt" | sort -u) | sed 's/^\t/after only: /; s/^\([^a]\)/before only: \1/' | tr '\n' ';')
                 [ -n "$gone" ] && say "  note: disks present in only one fingerprint (plugged in or pulled out, not compared): $gone"
+                if [ "$bycode" = 1 ]; then
+                    local resigned
+                    resigned=$(diff <(awk '/^## files /{f=1; next} /^## /{f=0} f && tolower($0) ~ /\.efi$/' "$TB_STATE/fingerprint-before.txt") \
+                                    <(awk '/^## files /{f=1; next} /^## /{f=0} f && tolower($0) ~ /\.efi$/' "$TB_STATE/fingerprint-after.txt") | sed -n 's/^> [0-9a-f]*  //p' | sort -u | tr '\n' ' ')
+                    [ -n "$resigned" ] && say "  note: re-signed, same code (this machine's own boot signs its loaders): $resigned"
+                fi
                 return 0
             fi
             warn "this machine's disks CHANGED:"; cat "$TB_STATE/fingerprint.diff" >&2; return 1 ;;
@@ -323,6 +368,7 @@ cmd_fingerprint() {
         for m in /boot /efi /boot/efi; do
             mountpoint -q "$m" || continue
             echo "## files $m"; (cd "$m" && find . -xdev -type f -print0 | sort -z | xargs -0 -r sha256sum)
+            echo "## efi code $m"; (cd "$m" && find . -xdev -type f -iname '*.efi' -print0 | sort -z | xargs -0 -r python3 -c "$EFI_CODE_HASH")
         done
         [ -d /sys/firmware/efi ] && { echo "## NVRAM"; efibootmgr 2>/dev/null | grep -v '^BootCurrent'; }
         echo "## boot configs"; sha256sum /etc/fstab /etc/crypttab /etc/crypttab.initramfs /etc/kernel/cmdline /etc/default/grub 2>/dev/null
@@ -622,6 +668,7 @@ cmd_finish() {
     done < <(cl_ukis "$TB_MNT")
     auto_unlock_grub
     preflight_grub_unlock
+    mirror_firmware_entry
     park_shim_fallback
     mark_test_drive_picker
     isolate_other_disks
@@ -665,8 +712,12 @@ cmd_finish() {
     fi
     local pick='on a UEFI host the entry that starts with
      "UEFI:" (the plain one is the legacy BIOS entry and does not boot a UEFI test drive)'
-    grep -qi apple /sys/class/dmi/id/sys_vendor 2>/dev/null && pick='hold Option (⌥) at power-on and pick the drive labelled TEST
-     (a SELinux relabel boot reboots once: pick TEST again)'
+    grep -qi apple /sys/class/dmi/id/sys_vendor 2>/dev/null && pick='hold Option (⌥) at power-on and pick the drive labelled TEST'
+    # The VM boot ran the relabel on a throwaway overlay: /.autorelabel is still
+    # on the drive, and the real first boot relabels and reboots — into this
+    # machine's own disk unless the test drive is picked again.
+    sed 's/\x1b\[[0-9;]*m//g' "$TB_STATE/restore.log" 2>/dev/null | grep -q 'created /.autorelabel' && pick="$pick
+     (SELinux relabel boot: it relabels every file and reboots once — pick the test drive again)"
     cat <<MSG
 
 [testbed] Ready to boot the test drive.
@@ -797,6 +848,52 @@ mark_test_drive_picker() {
     ledger test "test drive: firmware boot menu label TEST in EFI/BOOT" "test drive only"
     return 0
 }
+# mirror_firmware_entry — TEST DRIVES ONLY: this machine boots through its
+# firmware entry (FW_LOADER); the test drive, which gets no entry, is picked by
+# its fallback path EFI/BOOT/BOOT<arch>.EFI. Where the entry starts shim and the
+# fallback does not, the test boot skipped shim: no MOK keys in the kernel, and
+# the modules signed with them (nvidia, zfs) were rejected — a failure of the
+# test path, not of the restore. The fallback is made to start the same chain:
+# the entry's shim, with its chain target (grub<arch>.efi) beside it; a
+# systemd-boot-update drop-in on the test drive keeps it so across boots, after
+# the restored system's own drop-ins rewrite the fallback. Originals are kept
+# in /root/restore-test.
+mirror_firmware_entry() {
+    local espm esp fl src tgt a fb
+    [ "$(layout FIRMWARE)" = uefi ] || return 0
+    fl=$(layout FW_LOADER); [ -n "$fl" ] || return 0
+    case "$(uname -m)" in x86_64) a=x64 ;; aarch64) a=aa64 ;; *) return 0 ;; esac
+    espm=$(layout ESP_MOUNT); esp="$TB_MNT$espm"
+    src="$esp$fl"; tgt="$(dirname "$src")/grub$a.efi"; fb="$esp/EFI/BOOT/BOOT${a^^}.EFI"
+    [ -f "$src" ] && [ -f "$fb" ] || return 0
+    grep -aq MokListRT "$src" && ! grep -aq MokListRT "$fb" || return 0
+    # the boot logger tells a restore fault from a test path without shim
+    grep -qx 'SOURCE_SHIM=1' "$TB_MNT/root/restore-test/testbed.env" 2>/dev/null || echo 'SOURCE_SHIM=1' >> "$TB_MNT/root/restore-test/testbed.env"
+    # Acer's Insyde firmware turns any \EFI\Boot\grubx64.efi it sees into a
+    # "Linpus lite" boot entry of its own, first in BootOrder — an NVRAM write on
+    # this machine, and that entry starts systemd-boot without shim anyway.
+    if grep -qi '^acer' /sys/class/dmi/id/sys_vendor 2>/dev/null; then
+        warn "Acer firmware: shim cannot be put on the test drive's fallback path (the firmware makes a boot entry for EFI/BOOT/grub$a.efi) — the test boot has no MOK keys; modules signed with them (nvidia, zfs) are reported as not verifiable by this test"
+        return 0
+    fi
+    [ -f "$tgt" ] || { warn "firmware entry $fl is shim, but its chain target ${tgt#"$esp"} is not on the test drive — the fallback path stays as restored (no MOK keys on the test boot)"; return 0; }
+    mkdir -p "$TB_MNT/root/restore-test"
+    [ -f "$TB_MNT/root/restore-test/BOOT${a^^}.EFI.fallback" ] || cp "$fb" "$TB_MNT/root/restore-test/BOOT${a^^}.EFI.fallback"
+    cp -f "$src" "$fb" && cp -f "$tgt" "$esp/EFI/BOOT/grub$a.efi" || { warn "could not put the shim chain on the fallback path"; return 0; }
+    if [ -f "$TB_MNT/usr/lib/systemd/system/systemd-boot-update.service" ]; then
+        mkdir -p "$TB_MNT/etc/systemd/system/systemd-boot-update.service.d"
+        cat > "$TB_MNT/etc/systemd/system/systemd-boot-update.service.d/zz-testbed-fallback-shim.conf" <<EOF
+# linux-backup-system TEST DRIVE only (testbed.sh finish): the fallback path starts
+# the chain the source machine's firmware entry starts ($fl).
+[Service]
+ExecStartPost=-/usr/bin/cp -f $espm$fl $espm/EFI/BOOT/BOOT${a^^}.EFI
+ExecStartPost=-/usr/bin/cp -f ${tgt#"$TB_MNT"} $espm/EFI/BOOT/grub$a.efi
+EOF
+    fi
+    ledger test "test drive: fallback EFI/BOOT/BOOT${a^^}.EFI starts shim like this machine's firmware entry ($fl), chain target grub$a.efi beside it; drop-in zz-testbed-fallback-shim.conf keeps it" "test drive only; the restored fallback is /root/restore-test/BOOT${a^^}.EFI.fallback"
+    say "test drive: fallback path starts shim, as this machine's firmware entry $fl does (MOK keys for nvidia/zfs)"
+    return 0
+}
 # park_shim_fallback — TEST DRIVES ONLY: shim started as EFI/BOOT/BOOT<arch>.EFI
 # runs fb<arch>.efi first when it sits beside it, and fallback CREATES a firmware
 # boot entry (from EFI/<id>/BOOT<arch>.CSV) before booting — a write to THIS
@@ -893,7 +990,8 @@ unmount_target() {
 #   - no network: the restored homes hold real logins and keys, and nothing in
 #     them may sync from a VM; nothing of this machine's disks is attached.
 # UEFI hosts need OVMF (x86_64) or AAVMF (aarch64); a BIOS host boots SeaBIOS.
-# TB_VM_SECONDS (1800) bounds the run; TB_VM_MEM_MIB (4096) the memory.
+# TB_VM_SECONDS (1800) bounds the run; TB_VM_MEM_MIB the memory (4096, or the
+# largest argon2 memory cost of the test drive's containers + 2048).
 vm_firmware() { # "code" or "code<TAB>vars"; nothing when none is installed
     local c v
     case "$(uname -m)" in
@@ -945,7 +1043,17 @@ cmd_vmboot() {
         fw=$(vm_firmware) || { vm_skip "no UEFI firmware for QEMU (OVMF/AAVMF package)"; return 0; }
         IFS=$'\t' read -r code vars <<<"$fw"
     fi
-    secs="${TB_VM_SECONDS:-1800}"; mem="${TB_VM_MEM_MIB:-4096}"
+    # argon2 allocates its whole memory cost to open a keyslot: a 4 GiB-cost
+    # container cannot be opened inside a 4096 MiB guest.
+    local kdf_kib=0 k v
+    for k in ROOT_LUKS_MEMORY BOOT_LUKS_MEMORY; do v=$(layout "$k"); [ "${v:-0}" -gt "$kdf_kib" ] 2>/dev/null && kdf_kib=$v; done
+    secs="${TB_VM_SECONDS:-1800}"; mem="${TB_VM_MEM_MIB:-$(( kdf_kib / 1024 + 2048 > 4096 ? kdf_kib / 1024 + 2048 : 4096 ))}"
+    # A root the initramfs unlocks by passphrase: the VM has no one at the prompt.
+    # systemd-cryptsetup takes it from the cryptsetup.passphrase credential, which
+    # a VM's systemd imports from SMBIOS type 11 — no keystrokes (a key pressed at
+    # the systemd-boot menu edits the entry). The real test boot still asks.
+    local cred=()
+    [ "$(layout ROOT_CRYPT)" = 1 ] && [ -z "$(layout ROOT_KEYFILE)" ] && cred=(-smbios "type=11,value=io.systemd.credential:cryptsetup.passphrase=$TB_PASSPHRASE")
     rm -rf "$vm"; mkdir -p "$vm"
     if [ -n "${code:-}" ]; then
         if [ -n "${vars:-}" ]; then cp "$vars" "$vm/vars.fd"; firmware=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$vm/vars.fd")
@@ -962,7 +1070,7 @@ cmd_vmboot() {
     sock="$vm/monitor.sock"
     say "VM boot of the test drive ($t, snapshot — nothing is written to it; no network; report disk PARTUUID $(layout REPORT_PARTUUID); up to $((secs / 60)) min) ..."
     local machine=(); [ "$arch" = x86_64 ] && machine=(-machine q35); [ "$arch" = aarch64 ] && machine=(-machine virt)
-    "$qemu" "${accel[@]}" "${machine[@]}" -m "$mem" -smp 2 "${firmware[@]}" \
+    "$qemu" "${accel[@]}" "${machine[@]}" -m "$mem" -smp 2 "${firmware[@]}" "${cred[@]}" \
         -drive "file=$t,format=raw,if=none,id=tb,snapshot=on,cache=none" -device "virtio-blk-pci,drive=tb,serial=$TB_TARGET_SERIAL,bootindex=1" \
         -drive "file=$img,format=raw,if=virtio" \
         -nic none -display none -vga std -serial "file:$vm/serial.log" -monitor "unix:$sock,server,nowait" \
