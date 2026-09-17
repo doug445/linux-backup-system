@@ -40,7 +40,7 @@
 # shellcheck disable=SC2034  # read by every script that sources this file
 # Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
 [ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
-BX_VERSION="4.0.4"
+BX_VERSION="4.0.5"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.

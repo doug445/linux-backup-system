@@ -35,7 +35,8 @@
 #
 # Handles:
 #   - initramfs: dracut / update-initramfs / mkinitcpio
-#   - UKI (unified kernel image): kernel-install / dracut --uefi
+#   - UKI (unified kernel image): kernel-install / dracut --uefi / mkinitcpio, or
+#     update-initramfs where the host's own hook builds the UKIs (Debian family)
 #   - bootloader: GRUB (EFI + BIOS, x86_64/aarch64), systemd-boot (bootctl),
 #     Limine and rEFInd (untested on metal), with a firmware boot entry
 #   - encrypted /boot: enables GRUB cryptodisk; warns when no GRUB has the argon2 module (2.14+) for an argon2 /boot
@@ -153,6 +154,13 @@ if [ "$IS_UKI" = true ]; then
         UKI_TOOL=dracut
     elif grep -qs 'layout[[:space:]]*=[[:space:]]*uki' /etc/kernel/install.conf /etc/kernel/install.conf.d/*.conf 2>/dev/null && command -v kernel-install >/dev/null 2>&1; then
         UKI_TOOL=kernel-install
+    # Debian family, UKIs built by a local hook (ukify/objcopy in kernel
+    # postinst.d or initramfs post-update.d): update-initramfs is what makes the
+    # hook rebuild each image. kernel-install with layout=none did nothing, and
+    # every UKI kept the source disk's initramfs.
+    elif command -v update-initramfs >/dev/null 2>&1 \
+         && grep -qsE 'ukify|objcopy.*\.linux|EFI/Linux' /etc/kernel/postinst.d/* /etc/initramfs/post-update.d/* 2>/dev/null; then
+        UKI_TOOL=update-initramfs
     elif command -v kernel-install >/dev/null 2>&1; then UKI_TOOL=kernel-install
     elif command -v dracut >/dev/null 2>&1; then UKI_TOOL=dracut
     elif command -v mkinitcpio >/dev/null 2>&1; then UKI_TOOL=mkinitcpio
@@ -179,6 +187,23 @@ elif [ -n "$ESP" ] && [ -d "$ESP/loader/entries" ] && [ ! -f /boot/grub2/grub.cf
     USES_SDBOOT=true
 fi
 command -v bootctl >/dev/null 2>&1 && bootctl --quiet is-installed 2>/dev/null && [ "$USES_GRUB" = false ] && USES_SDBOOT=true
+# Both found on a UEFI host: GRUB counts only if the ESP holds a GRUB image. A
+# Debian-family systemd-boot host with the grub packages still installed has a
+# grub.cfg that update-grub rewrites on every kernel change, and no GRUB on the
+# ESP — its "grubx64.efi" is systemd-boot behind shim. grub-install + update-grub
+# put shim → GRUB on the fallback path of the restored disk, and GRUB had no
+# kernel to boot (the kernels are UKIs). The markers: "GNU GRUB" (distro-signed
+# images), "grub rescue> " / grub_mod_init (a bare grub-install core).
+if [ "$USES_GRUB" = true ] && [ "$USES_SDBOOT" = true ] && [ "$IS_EFI" = true ] && [ -n "$ESP" ]; then
+    _grub_img=""
+    while IFS= read -r -d '' _f; do
+        grep -aqE 'GNU GRUB|grub rescue> |grub_mod_init' "$_f" && { _grub_img=$_f; break; }
+    done < <(find "$ESP" -xdev -type f -iname '*.efi' -print0 2>/dev/null)
+    if [ -z "$_grub_img" ]; then
+        USES_GRUB=false
+        say "grub.cfg present, but no GRUB image on $ESP (its loaders are systemd-boot/shim) — GRUB is not this system's boot loader; left alone"
+    fi
+fi
 
 # Limine (CachyOS's default): limine.conf wherever Limine reads it, or its EFI
 # binary under EFI/limine. rEFInd: its binary or refind.conf under EFI/refind.
@@ -278,6 +303,62 @@ say "kernels: ${KVERS[*]:-none}"
 say "has_luks=$HAS_LUKS boot_on_luks=$BOOT_ON_LUKS uki=$IS_UKI grub=$USES_GRUB systemd-boot=$USES_SDBOOT limine=$USES_LIMINE refind=$USES_REFIND pi_firmware=$IS_PI_FW"
 [ ${#KVERS[@]} -eq 0 ] && warn "no kernels found under /lib/modules — cannot rebuild"
 
+# debian_initramfs_all — update-initramfs for every installed kernel.
+# One kernel at a time, newest first, and every one of them: `-k all -c`
+# writes each new image beside the old one and STOPS at the first
+# failure. On a small /boot (a 732 MiB encrypted one holding four
+# kernels) the first write hit ENOSPC and every initramfs stayed the
+# source disk's — whose crypttab unlocks the OLD root. The old image
+# moves aside to the root filesystem while its replacement is written,
+# and comes back if the new one fails.
+# With UKI_TOOL=update-initramfs the host's post-update hook turns each new
+# initramfs into a UKI; such hooks swallow their own failures, so the UKI of
+# each kernel must have changed afterwards.
+DONE_KVERS=()
+debian_initramfs_all() {
+    local kv img aside=/var/tmp/restore-initrd-aside u before _h
+    (( DRY )) || mkdir -p "$aside"
+    # Installed kernels only: /lib/modules keeps directories of kernels
+    # long removed (module leftovers, DKMS builds), and an initramfs for
+    # each of those filled /boot again. A UKI-only host keeps no
+    # /boot/vmlinuz-*: the package database says what is installed.
+    while read -r kv; do
+        [ -n "$kv" ] || continue
+        if [ ! -f "/boot/vmlinuz-$kv" ]; then
+            if [ "$UKI_TOOL" = update-initramfs ] && dpkg-query -W -f='${db:Status-Status}\n' "linux-image-$kv" "linux-image-unsigned-$kv" 2>/dev/null | grep -qx installed; then
+                :
+            else
+                say "skipping $kv — /lib/modules only, no /boot/vmlinuz-$kv"; continue
+            fi
+        fi
+        img="/boot/initrd.img-$kv"
+        before=""
+        if [ "$UKI_TOOL" = update-initramfs ]; then
+            for u in /boot/EFI/Linux/*"$kv"*.efi /efi/EFI/Linux/*"$kv"*.efi /boot/efi/EFI/Linux/*"$kv"*.efi; do
+                [ -f "$u" ] && before+="$(sha256sum "$u")"$'\n'
+            done
+        fi
+        if [ -f "$img" ] && (( ! DRY )); then mv "$img" "$aside/"; fi
+        if run update-initramfs -c -k "$kv"; then
+            DONE_KVERS+=("$kv")
+            (( DRY )) || rm -f "$aside/initrd.img-$kv"
+            if [ -n "$before" ] && (( ! DRY )); then
+                while read -r _h u; do
+                    [ -n "$u" ] || continue
+                    if [ ! -f "$u" ]; then warn "$u is gone after update-initramfs for $kv — the host's UKI hook did not write it back"
+                    elif [ "$(sha256sum "$u" | cut -d' ' -f1)" = "$_h" ]; then
+                        warn "$u was not rebuilt by the host's UKI hook — it still holds the SOURCE disk's initramfs: do not boot this kernel"
+                    else say "UKI rebuilt: $u"; fi
+                done <<<"$before"
+            fi
+        else
+            warn "update-initramfs failed for $kv — its previous initramfs is put back (it still describes the SOURCE disk: do not boot this kernel)"
+            (( DRY )) || { rm -f "$img"; [ -f "$aside/initrd.img-$kv" ] && mv "$aside/initrd.img-$kv" "$img"; }
+        fi
+    done < <(printf '%s\n' "${KVERS[@]}" | sort -rV)
+    (( DRY )) || rmdir "$aside" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # 1. Rebuild kernels: UKI or plain initramfs, distro-appropriate.
 # ---------------------------------------------------------------------------
@@ -294,6 +375,7 @@ if [ "$IS_UKI" = true ]; then
                     run kernel-install add "$kv" "$img"
                 done
             fi ;;
+        update-initramfs) debian_initramfs_all ;;
         *) warn "no mkinitcpio, dracut or kernel-install — cannot regenerate UKIs" ;;
     esac
     # kernel-install and dracut name each image after its kernel version and
@@ -303,13 +385,16 @@ if [ "$IS_UKI" = true ]; then
     # Type #1 rescue entries only, so it is rebuilt here with dracut), and the
     # images of kernels removed since (a package removal that left its UKI;
     # no modules, nothing to rebuild from — moved off the boot partitions).
-    case "$UKI_TOOL" in kernel-install|dracut)
+    case "$UKI_TOOL" in kernel-install|dracut|update-initramfs)
         _newest=$(printf '%s\n' "${KVERS[@]}" | sort -V | tail -1)
         _stale=/var/lib/linux-backup-system/stale-ukis
         for _u in /boot/EFI/Linux/*.efi /efi/EFI/Linux/*.efi /boot/efi/EFI/Linux/*.efi; do
             [ -f "$_u" ] || continue
             _b=$(basename "$_u"); _known=false
-            for kv in "${KVERS[@]}"; do case "$_b" in *"$kv"*) _known=true; break ;; esac; done
+            # the hook path rebuilt only packaged kernels: a UKI of a kernel with
+            # leftover modules and no package kept the source disk's initramfs
+            _kl=("${KVERS[@]}"); [ "$UKI_TOOL" = update-initramfs ] && _kl=("${DONE_KVERS[@]}")
+            for kv in "${_kl[@]}"; do case "$_b" in *"$kv"*) _known=true; break ;; esac; done
             [ "$_known" = true ] && continue
             case "$_b" in
                 *rescue*)
@@ -328,31 +413,8 @@ if [ "$IS_UKI" = true ]; then
     esac
 else
     if command -v update-initramfs >/dev/null 2>&1; then
-        # One kernel at a time, newest first, and every one of them: `-k all -c`
-        # writes each new image beside the old one and STOPS at the first
-        # failure. On a small /boot (a 732 MiB encrypted one holding four
-        # kernels) the first write hit ENOSPC and every initramfs stayed the
-        # source disk's — whose crypttab unlocks the OLD root. The old image
-        # moves aside to the root filesystem while its replacement is written,
-        # and comes back if the new one fails.
         say "Debian family — update-initramfs, one kernel at a time (newest first)"
-        aside=/var/tmp/restore-initrd-aside; (( DRY )) || mkdir -p "$aside"
-        # Installed kernels only: /lib/modules keeps directories of kernels
-        # long removed (module leftovers, DKMS builds), and an initramfs for
-        # each of those filled /boot again.
-        while read -r kv; do
-            [ -n "$kv" ] || continue
-            [ -f "/boot/vmlinuz-$kv" ] || { say "skipping $kv — /lib/modules only, no /boot/vmlinuz-$kv"; continue; }
-            img="/boot/initrd.img-$kv"
-            if [ -f "$img" ] && (( ! DRY )); then mv "$img" "$aside/"; fi
-            if run update-initramfs -c -k "$kv"; then
-                (( DRY )) || rm -f "$aside/initrd.img-$kv"
-            else
-                warn "update-initramfs failed for $kv — its previous initramfs is put back (it still describes the SOURCE disk: do not boot this kernel)"
-                (( DRY )) || { rm -f "$img"; [ -f "$aside/initrd.img-$kv" ] && mv "$aside/initrd.img-$kv" "$img"; }
-            fi
-        done < <(printf '%s\n' "${KVERS[@]}" | sort -rV)
-        (( DRY )) || rmdir "$aside" 2>/dev/null || true
+        debian_initramfs_all
     elif command -v dracut >/dev/null 2>&1; then
         say "Fedora family — dracut --regenerate-all --force"
         if ! run dracut --regenerate-all --force; then
@@ -687,7 +749,22 @@ fi
 # ---------------------------------------------------------------------------
 if command -v sbctl >/dev/null 2>&1 && { [ -d /var/lib/sbctl ] || [ -d /usr/share/secureboot/keys ]; }; then
     say "===== Secure Boot (sbctl keys present) ====="
-    run sbctl sign-all || warn "sbctl sign-all reported errors — sign the loader and kernels by hand before rebooting"
+    # sign-all fails as a whole when its database names a file that is gone (a
+    # kernel removed since it was enrolled): not a signing failure — say which.
+    if (( DRY )); then run sbctl sign-all
+    else
+        echo "[rebuild-boot] + sbctl sign-all"
+        sb_out=$(sbctl sign-all 2>&1); sb_rc=$?
+        printf '%s\n' "$sb_out"
+        if [ "$sb_rc" != 0 ]; then
+            sb_gone=$(sed -n 's/^failed signing \(.*\): .* does not exist$/\1/p' <<<"$sb_out")
+            if [ -n "$sb_gone" ] && ! grep -v -e '^failed signing .* does not exist$' <<<"$sb_out" | grep -qiE 'fail|error'; then
+                say "sbctl's database names files that are no longer there (not a signing failure; drop them with sbctl remove-file): $(tr '\n' ' ' <<<"$sb_gone")"
+            else
+                warn "sbctl sign-all reported errors — sign the loader and kernels by hand before rebooting"
+            fi
+        fi
+    fi
     # sign-all signs only sbctl's database. bootctl install (step 5) wrote
     # EFI/systemd/systemd-boot<arch>.efi fresh and unsigned; a host that signed
     # it outside the database (a systemd-boot-update drop-in, by hand) kept
