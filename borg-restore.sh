@@ -698,7 +698,21 @@ if [ -f "$CRYPTTAB" ] && [ "$HAS_LUKS" = true ]; then
                 # the volume group's physical volume, as its restored metadata backup names it
                 pv=$(sed -n 's/^[[:space:]]*device = "\([^"]*\)".*/\1/p' "$TARGET/etc/lvm/backup/$vg" 2>/dev/null | head -1)
                 n=${pv#/dev/mapper/}
-                [ "$pv" != "$n" ] && [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$n")" ] && echo "$n"
+                if [ "$pv" != "$n" ] && [ -n "$(cl_crypttab_ref "$CRYPTTAB" "$n")" ]; then echo "$n"; return 0; fi
+                # The backup's device is only a hint, and it can be stale: one
+                # written while another disk's group of this name was open named
+                # that disk's container. The source's own entry: the one whose
+                # container, open on this system, holds a group of this name.
+                [ -n "$vg" ] || return 0
+                local e ek ev ed em
+                while read -r e; do
+                    IFS=$'\t' read -r ek ev < <(cl_crypttab_ref "$CRYPTTAB" "$e") || true
+                    case "$ek" in UUID|PARTUUID|LABEL|PARTLABEL) ;; *) continue ;; esac
+                    ed=$(blkid -t "$ek=$ev" -o device 2>/dev/null | head -1); [ -n "$ed" ] || continue
+                    for em in $(lsblk -rno NAME,TYPE "$ed" 2>/dev/null | awk '$2=="crypt"{print $1}'); do
+                        [ "$(pvs --config 'backup { backup = 0 archive = 0 }' --noheadings -o vg_name "/dev/mapper/$em" 2>/dev/null | tr -d ' ')" = "$vg" ] && { echo "$e"; return 0; }
+                    done
+                done < <(awk '$1 !~ /^#/ && NF >= 2 {print $1}' "$CRYPTTAB")
                 ;;
             UUID|PARTUUID|LABEL|PARTLABEL)
                 kn=$(blkid -t "$k=$v" -o device 2>/dev/null | head -1)

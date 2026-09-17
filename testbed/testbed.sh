@@ -110,6 +110,15 @@ TB_HOME_KEEP="${TB_HOME_KEEP:-.config .local/bin .local/state .local/share/keyri
 TB_TARGET_GIB="${TB_TARGET_GIB:-100}"     # the test bed's part of the test drive, from its start; the rest stays unpartitioned (0 = whole drive)
 TB_SECTORS_KB="${TB_SECTORS_KB:-128}"     # smaller USB transfers for bridges that reset under load; 0 = leave alone
 
+# LVM writes a metadata backup and archive to THIS host's /etc/lvm for every
+# volume group a command touches — even vgs, when the backup looks stale. The
+# test drive's group carries this host's name after finish: its metadata
+# replaced this host's /etc/lvm/backup/<vg> (a vgcfgrestore from it would write
+# the test drive's layout onto this machine), and the next test backup restored
+# that file, so the restore paired the root container with nothing. Every LVM
+# command on the test drive writes neither.
+TB_LVM=(--config 'backup { backup = 0 archive = 0 }')
+
 # --- state + ledger ---------------------------------------------------------------
 if [ -z "${TB_STATE:-}" ]; then
     TB_STATE=$(ls -1d "/var/lib/linux-backup-testbed/$TB_HOST"-* 2>/dev/null | sort | tail -1)
@@ -227,6 +236,9 @@ detect_layout() {
     case "$root_fs" in btrfs|ext4|xfs|f2fs) ;; *) echo "NOT_MIRRORED=root filesystem $root_fs (the test bed cannot format it yet)" ;; esac
     esp=$(bx_esp_mount 2>/dev/null || true)
     echo "ROOT_FS=$root_fs"; echo "ROOT_CRYPT=${crypt:-0}"
+    # Debian's initramfs-tools unlocks the root with its own askpass (plymouth or
+    # the console): no systemd credential reaches it — the VM boot types.
+    [ "${crypt:-0}" = 1 ] && [ "$(dpkg-query -W -f='${db:Status-Status}' initramfs-tools 2>/dev/null)" = installed ] && echo "ROOT_UNLOCK=initramfs-tools"
     [ -d /sys/firmware/efi ] && echo "FIRMWARE=uefi" || echo "FIRMWARE=bios"
     if [ -n "$esp" ]; then
         echo "ESP_MOUNT=$esp"; echo "ESP_MIB=$(( $(lsblk -bdno SIZE "$(findmnt -no SOURCE "$esp")") / 1048576 ))"
@@ -238,7 +250,11 @@ detect_layout() {
             cur=$(efibootmgr 2>/dev/null | sed -n 's/^BootCurrent: *//p')
             espuuid=$(lsblk -dno PARTUUID "$(findmnt -no SOURCE "$esp")" 2>/dev/null | tr '[:upper:]' '[:lower:]')
             fl=$(efibootmgr -v 2>/dev/null | awk -v b="Boot$cur" -v u="$espuuid" '
-                u != "" && index($0, b) == 1 && index(tolower($0), u) {p = $0; sub(/.*\)\//, "", p); sub(/[[:space:]].*/, "", p); gsub(/\\/, "/", p); print p; exit}')
+                u != "" && index($0, b) == 1 && index(tolower($0), u) {
+                    p = $0   # efibootmgr 18 on Ubuntu: …)/File(\EFI\…); elsewhere …)/\EFI\…
+                    if (match(p, /File\([^)]*\)/)) p = substr(p, RSTART + 5, RLENGTH - 6)
+                    else { sub(/.*\)\//, "", p); sub(/[[:space:]].*/, "", p) }
+                    gsub(/\\/, "/", p); print p; exit}')
             case "$fl" in /EFI/*) echo "FW_LOADER=$fl" ;; esac
         fi
     fi
@@ -317,8 +333,14 @@ cmd_fingerprint() {
                             <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-after.txt" | sort -u))
             local bycode=0
             grep -q '^## efi code ' "$TB_STATE/fingerprint-before.txt" && grep -q '^## efi code ' "$TB_STATE/fingerprint-after.txt" && bycode=1
+            # Firmware entries for a partition no disk here has: stale, and the firmware
+            # drops them at power-on (Acer removed its "Linpus lite" entry for a wiped
+            # test drive) — not compared.
+            local parts
+            parts=$(lsblk -rno PARTUUID 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep . | tr '\n' ' ')
             fp_norm() { # the fingerprint without the expected noise and without disks absent from the other side
-                awk -v both="$both" -v bycode="$bycode" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1}
+                awk -v both="$both" -v bycode="$bycode" -v parts="$parts" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1
+                        n=split(parts, b, " "); for (i=1;i<=n;i++) exists[b[i]]=1}
                     /^## files / {infiles=1; skip=0; dev=""; print; next}
                     /^## / {infiles=0}
                     bycode && infiles && tolower($0) ~ /\.efi$/ {next}
@@ -330,6 +352,10 @@ cmd_fingerprint() {
                     dev != "" {gsub(dev, "DISK")}
                     /restore-test|loader\/random-seed|^BootOrder:/ {next}
                     /^Boot[0-9A-Fa-f]{4}/ && /BBS\(|\/USB\(/ {next}
+                    /^Boot[0-9A-Fa-f]{4}/ && match($0, /HD\([0-9]+,GPT,[0-9A-Fa-f-]+,/) {
+                        u = tolower(substr($0, RSTART, RLENGTH)); sub(/^hd\([0-9]+,gpt,/, "", u); sub(/,$/, "", u)
+                        if (!(u in exists)) next
+                    }
                     {print}' "$1"
             }
             if diff <(fp_norm "$TB_STATE/fingerprint-before.txt") <(fp_norm "$TB_STATE/fingerprint-after.txt") > "$TB_STATE/fingerprint.diff"; then
@@ -342,6 +368,10 @@ cmd_fingerprint() {
                 gone=$(comm -3 <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-before.txt" | sort -u) \
                                <(sed -n 's/^## disk [^ ]* serial //p' "$TB_STATE/fingerprint-after.txt" | sort -u) | sed 's/^\t/after only: /; s/^\([^a]\)/before only: \1/' | tr '\n' ';')
                 [ -n "$gone" ] && say "  note: disks present in only one fingerprint (plugged in or pulled out, not compared): $gone"
+                local stale
+                stale=$(grep -hE '^Boot[0-9A-Fa-f]{4}' "$TB_STATE/fingerprint-before.txt" "$TB_STATE/fingerprint-after.txt" | sort | uniq -u \
+                    | while read -r l; do u=$(grep -oiE 'HD\([0-9]+,GPT,[0-9a-f-]+,' <<<"$l" | cut -d, -f3 | tr '[:upper:]' '[:lower:]'); [ -n "$u" ] && [[ " $parts " != *" $u "* ]] && printf '%s; ' "${l%%$'\t'*}"; done)
+                [ -n "$stale" ] && say "  note: firmware entries for partitions no disk here has (stale — the firmware adds and drops those): $stale"
                 if [ "$bycode" = 1 ]; then
                     local resigned
                     resigned=$(diff <(awk '/^## files /{f=1; next} /^## /{f=0} f && tolower($0) ~ /\.efi$/' "$TB_STATE/fingerprint-before.txt") \
@@ -372,6 +402,11 @@ cmd_fingerprint() {
         done
         [ -d /sys/firmware/efi ] && { echo "## NVRAM"; efibootmgr 2>/dev/null | grep -v '^BootCurrent'; }
         echo "## boot configs"; sha256sum /etc/fstab /etc/crypttab /etc/crypttab.initramfs /etc/kernel/cmdline /etc/default/grub 2>/dev/null
+        # this host's volume group metadata backup: the test drive's group once replaced it
+        if [ -n "$(layout ROOT_VG)" ]; then
+            echo "## LVM metadata backup"
+            sed '/^description\|^creation_\|^#/d' "/etc/lvm/backup/$(layout ROOT_VG)" 2>/dev/null | sha256sum | sed "s|-\$|/etc/lvm/backup/$(layout ROOT_VG)|"
+        fi
     } > "$out"
     say "fingerprint $tag: $out ($(grep -c . "$out") lines, disks: $(host_disks | tr '\n' ' '))"
     [ "$tag" = before ] && st_set fingerprint-before-at "$(date -Is)"
@@ -488,7 +523,7 @@ open_target() {
         printf '%s' "$TB_PASSPHRASE" | cryptsetup open --key-file=- "$(partdev boot)" tb-boot || die "open $(partdev boot)"
     fi
     if [ -n "$(layout ROOT_VG)" ] && [ ! -e "$(root_blk)" ]; then
-        vgchange -ay --devices "$(root_pv)" "$(tb_vg)" >/dev/null || die "volume group $(tb_vg) not found on $(root_pv) — after finish it is called $(layout ROOT_VG); collect reads it without activating it"
+        vgchange "${TB_LVM[@]}" -ay --devices "$(root_pv)" "$(tb_vg)" >/dev/null || die "volume group $(tb_vg) not found on $(root_pv) — after finish it is called $(layout ROOT_VG); collect reads it without activating it"
     fi
     return 0
 }
@@ -507,13 +542,13 @@ cmd_format() {
     p=$(partdev root)
     [ "$(layout ROOT_CRYPT)" = 1 ] && luks_format ROOT "$p" tb-root
     if [ -n "$(layout ROOT_VG)" ]; then
-        pvcreate -ff -y "$(root_pv)" >/dev/null && vgcreate "$(tb_vg)" "$(root_pv)" >/dev/null || die "LVM volume group $(tb_vg) on $(root_pv)"
+        pvcreate "${TB_LVM[@]}" -ff -y "$(root_pv)" >/dev/null && vgcreate "${TB_LVM[@]}" "$(tb_vg)" "$(root_pv)" >/dev/null || die "LVM volume group $(tb_vg) on $(root_pv)"
         while IFS=: read -r lv mib role; do    # fixed-size volumes first, the root takes the rest
             [ "$role" = root ] && continue
-            lvcreate -y -W y -n "$lv" -L "${mib}m" "$(tb_vg)" >/dev/null || die "lvcreate $lv"
+            lvcreate "${TB_LVM[@]}" -y -W y -n "$lv" -L "${mib}m" "$(tb_vg)" >/dev/null || die "lvcreate $lv"
             [ "$role" = swap ] && { mkswap "/dev/$(tb_vg)/$lv" >/dev/null || die "mkswap $lv"; }
         done < <(layout_all LV)
-        lvcreate -y -W y -n "$(root_lv)" -l 100%FREE "$(tb_vg)" >/dev/null || die "lvcreate $(root_lv)"
+        lvcreate "${TB_LVM[@]}" -y -W y -n "$(root_lv)" -l 100%FREE "$(tb_vg)" >/dev/null || die "lvcreate $(root_lv)"
         ledger test "LVM volume group $(tb_vg) on $(root_pv): $(layout_all LV | cut -d: -f1 | tr '\n' ' ')" "renamed $(layout ROOT_VG) by finish; wiped with the drive on the next run"
     fi
     root_blk=$(root_blk)
@@ -680,18 +715,18 @@ cmd_finish() {
     sync
     say "unmounting and closing the test drive ..."
     unmount_mounts
-    if [ -n "$(layout ROOT_VG)" ] && vgs --devices "$(root_pv)" "$(tb_vg)" >/dev/null 2>&1; then
-        vgchange -an --devices "$(root_pv)" "$(tb_vg)" >/dev/null || die "cannot deactivate $(tb_vg) (still in use?)"
+    if [ -n "$(layout ROOT_VG)" ] && vgs "${TB_LVM[@]}" --devices "$(root_pv)" "$(tb_vg)" >/dev/null 2>&1; then
+        vgchange "${TB_LVM[@]}" -an --devices "$(root_pv)" "$(tb_vg)" >/dev/null || die "cannot deactivate $(tb_vg) (still in use?)"
         # vgrename refuses a name /dev already has (this host's group), and
         # vgcfgrestore's "active volumes" question counts this host's volumes by
         # name. The metadata goes only to the test drive's physical volume
         # (--devices): back it up, rename it in the file, write it back there.
         local vgf; vgf=$(mktemp /run/tb-vg.XXXXXX)
-        vgcfgbackup --devices "$(root_pv)" -f "$vgf" "$(tb_vg)" >/dev/null || die "cannot back up the metadata of $(tb_vg)"
+        vgcfgbackup "${TB_LVM[@]}" --devices "$(root_pv)" -f "$vgf" "$(tb_vg)" >/dev/null || die "cannot back up the metadata of $(tb_vg)"
         sed -i "s/^$(tb_vg) {\$/$(layout ROOT_VG) {/" "$vgf"
         grep -q "^$(layout ROOT_VG) {\$" "$vgf" || die "renaming $(tb_vg) in its metadata backup failed ($vgf)"
-        echo y | vgcfgrestore --devices "$(root_pv)" -f "$vgf" "$(layout ROOT_VG)" >/dev/null 2>&1 \
-            && vgs --devices "$(root_pv)" "$(layout ROOT_VG)" >/dev/null 2>&1 || die "cannot rename $(tb_vg) → $(layout ROOT_VG) on $(root_pv) (metadata: $vgf)"
+        echo y | vgcfgrestore "${TB_LVM[@]}" --devices "$(root_pv)" -f "$vgf" "$(layout ROOT_VG)" >/dev/null 2>&1 \
+            && vgs "${TB_LVM[@]}" --devices "$(root_pv)" "$(layout ROOT_VG)" >/dev/null 2>&1 || die "cannot rename $(tb_vg) → $(layout ROOT_VG) on $(root_pv) (metadata: $vgf)"
         rm -f "$vgf"
         ledger test "test drive: volume group $(tb_vg) renamed $(layout ROOT_VG), the name the restored system mounts" "test drive only"
         say "volume group $(tb_vg) renamed $(layout ROOT_VG) (inactive; this host never activates it)"
@@ -800,6 +835,12 @@ grub_early_cfg() {
 preflight_grub_unlock() {
     local fstest="" d p u out bad=0
     [ "$(layout BOOT_CRYPT)" = 1 ] || [ "$(layout ROOT_CRYPT)" = 1 ] || return 0
+    # An encrypted root beside a plain /boot (or /boot on the ESP) is opened by
+    # the initramfs, not by GRUB: nothing for GRUB to open — and a distro GRUB
+    # without argon2 "failed" on a root it never reads.
+    if [ "$(layout BOOT_CRYPT)" != 1 ] && { [ -n "$(layout BOOT_FS)" ] || [ "$(layout ESP_MOUNT)" = /boot ]; }; then
+        return 0
+    fi
     for d in /usr/local/bin /usr/bin; do
         for p in grub-fstest grub2-fstest; do [ -x "$d/$p" ] && { fstest="$d/$p"; break 2; }; done
     done
@@ -970,7 +1011,7 @@ unmount_target() {
     unmount_mounts
     [ -e /dev/mapper/tb-verify-root ] && dmsetup remove tb-verify-root
     if [ -n "$(layout ROOT_VG 2>/dev/null)" ] && [ -e /dev/mapper/tb-root ]; then
-        vgchange -an --devices /dev/mapper/tb-root "$(tb_vg)" >/dev/null 2>&1 || true
+        vgchange "${TB_LVM[@]}" -an --devices /dev/mapper/tb-root "$(tb_vg)" >/dev/null 2>&1 || true
     fi
     for m in tb-home tb-boot tb-root tb-verify-home tb-verify-boot tb-verify; do [ -e "/dev/mapper/$m" ] && cryptsetup close "$m"; done
     return 0
@@ -1052,8 +1093,10 @@ cmd_vmboot() {
     # systemd-cryptsetup takes it from the cryptsetup.passphrase credential, which
     # a VM's systemd imports from SMBIOS type 11 — no keystrokes (a key pressed at
     # the systemd-boot menu edits the entry). The real test boot still asks.
-    local cred=()
+    local cred=() askpass=0
     [ "$(layout ROOT_CRYPT)" = 1 ] && [ -z "$(layout ROOT_KEYFILE)" ] && cred=(-smbios "type=11,value=io.systemd.credential:cryptsetup.passphrase=$TB_PASSPHRASE")
+    # initramfs-tools reads no credential: the passphrase is typed, at its prompt only
+    [ ${#cred[@]} -gt 0 ] && [ "$(layout ROOT_UNLOCK)" = initramfs-tools ] && askpass=1
     rm -rf "$vm"; mkdir -p "$vm"
     if [ -n "${code:-}" ]; then
         if [ -n "${vars:-}" ]; then cp "$vars" "$vm/vars.fd"; firmware=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$vm/vars.fd")
@@ -1080,9 +1123,40 @@ cmd_vmboot() {
     vm_monitor() { python3 -c 'import socket,sys,time
 s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.recv(65536)
 s.sendall((sys.argv[2]+"\n").encode()); time.sleep(1); s.close()' "$sock" "$1" 2>/dev/null; }
+    # vm_idle — the screen and the serial console both unchanged since the last
+    # call, and no loader menu on the console: the boot waits for input. The
+    # loader mirrors its menu to the serial console and clears it when it starts
+    # an entry; the kernel writes nothing there (no console=ttyS0). A key sent to
+    # the menu would edit an entry — never then.
+    local idle_prev="" typed=0 typed_shot="" typed_at=0
+    vm_idle() {
+        local shot cur
+        vm_monitor "screendump $vm/probe.ppm"
+        shot=$(sha256sum "$vm/probe.ppm" 2>/dev/null | cut -d' ' -f1)
+        cur="$shot $(stat -c %s "$vm/serial.log" 2>/dev/null)"
+        [ -n "$shot" ] && [ "$cur" = "$idle_prev" ] || { idle_prev=$cur; return 1; }
+        python3 -c 'import re,sys
+t = open(sys.argv[1], "rb").read().decode("utf-8", "replace")
+tail = t.rsplit("\x1b[2J", 1)[-1]
+sys.exit(1 if re.sub(r"\x1b\[[0-9;=?]*[A-Za-z]", "", tail).strip() else 0)' "$vm/serial.log" 2>/dev/null
+    }
+    vm_type() { # the passphrase and Enter, one key at a time
+        local i c
+        for ((i = 0; i < ${#1}; i++)); do
+            c=${1:i:1}
+            case "$c" in [a-z0-9]) vm_monitor "sendkey $c" ;; [A-Z]) vm_monitor "sendkey shift-${c,}" ;; *) warn "VM boot: cannot type '$c' — the passphrase prompt is left unanswered"; return 1 ;; esac
+        done
+        vm_monitor "sendkey ret"
+    }
     while [ "$n" -lt "$secs" ] && kill -0 "$qpid" 2>/dev/null; do
         sleep 30; n=$((n + 30))
         [ $((n % 120)) -eq 0 ] && vm_monitor "screendump $vm/screen-$(printf '%04d' "$n").ppm"
+        # typed once at the first idle screen; again (up to 3) only while the same screen waits on
+        if [ "$askpass" = 1 ] && [ "$typed" -lt 3 ] && [ $((n - typed_at)) -ge 120 ] && vm_idle \
+           && { [ "$typed" = 0 ] || [ "${idle_prev%% *}" = "$typed_shot" ]; }; then
+            cp -f "$vm/probe.ppm" "$vm/askpass-$typed.ppm"
+            vm_type "$TB_PASSPHRASE" && { typed=$((typed + 1)); typed_shot=${idle_prev%% *}; typed_at=$n; say "VM boot: the initramfs waits at its passphrase prompt — typed the test passphrase ($typed)"; }
+        fi
         if vm_report_read "$img" "$vm/boot-report" && grep -qh '_report complete_' "$vm"/boot-report/boot-report-*.md 2>/dev/null; then break; fi
     done
     vm_monitor "screendump $vm/screen-last.ppm"; sleep 2
@@ -1136,9 +1210,9 @@ cmd_collect() {
         # The test drive's volume group carries this host's name now: never activate
         # it here. Map its root volume read-only by hand, from its own metadata only.
         local ps ext
-        ps=$(pvs --devices "$p" --noheadings --units s --nosuffix -o pe_start "$p" 2>/dev/null | tr -d ' ')
-        ext=$(vgs --devices "$p" --noheadings --units s --nosuffix -o vg_extent_size "$(layout ROOT_VG)" 2>/dev/null | tr -d ' ')
-        lvs --devices "$p" --noheadings --units s --nosuffix -o seg_start,seg_size,seg_pe_ranges "$(layout ROOT_VG)/$(root_lv)" 2>/dev/null \
+        ps=$(pvs "${TB_LVM[@]}" --devices "$p" --noheadings --units s --nosuffix -o pe_start "$p" 2>/dev/null | tr -d ' ')
+        ext=$(vgs "${TB_LVM[@]}" --devices "$p" --noheadings --units s --nosuffix -o vg_extent_size "$(layout ROOT_VG)" 2>/dev/null | tr -d ' ')
+        lvs "${TB_LVM[@]}" --devices "$p" --noheadings --units s --nosuffix -o seg_start,seg_size,seg_pe_ranges "$(layout ROOT_VG)/$(root_lv)" 2>/dev/null \
             | awk -v ps="${ps%%.*}" -v ex="${ext%%.*}" -v d="$p" '{r=$3; sub(/^.*:/, "", r); split(r, a, "-"); printf "%d %d linear %s %d\n", $1, $2, d, ps + a[1] * ex}' \
             | dmsetup create --readonly tb-verify-root || die "map the root volume $(layout ROOT_VG)/$(root_lv) of the test drive"
         p=/dev/mapper/tb-verify-root

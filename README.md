@@ -157,7 +157,7 @@ Two columns, two different claims:
 **Unless every row that describes your machine is ✅ in the Bare-metal restore
 column, use the suite for testing only — not in production.**
 
-**Verified on 9 tested systems** — the machines behind the ✅ rows: [docs/TESTED-SYSTEMS.md](docs/TESTED-SYSTEMS.md).
+**Verified on 10 tested systems** — the machines behind the ✅ rows: [docs/TESTED-SYSTEMS.md](docs/TESTED-SYSTEMS.md).
 
 **Distros**
 
@@ -973,7 +973,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 4.0.4
+- **Version:** 4.0.5
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system
