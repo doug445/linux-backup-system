@@ -247,7 +247,12 @@ r=$(find_backup_by_contents); expect "found: the mount holding a borg repository
 expect "found: its source, subvolume suffix dropped" /dev/mapper/luks-x "${r%%$'\t'*}"
 findmnt() { printf '%s %s\n' "$T/fbc/data" /dev/sdz1 / /dev/nvme0n1p3; }
 find_backup_by_contents >/dev/null && bad "a borg-backup directory without a repository config was taken for a drive" || ok "no repository config, no drive"
-unset -f findmnt find_backup_by_contents
+eval "$(sed -n '/^adopt_label_mount() {/,/^}/p' "$ROOT/deploy.sh")"
+findmnt() { case "$*" in *--mountpoint*/mnt/backup*) echo '/dev/mapper/luks-x[/]' ;; esac; }
+out=$(DRY=1 WAITING_FOR_DRIVE=0; : "$DRY"; log() { echo "LOG $*"; }; warn() { echo "WARN $*"; }
+      adopt_label_mount /dev/mapper/luks-x "/media/u/My Drive"; echo "M=$BACKUP_MOUNT W=$WAITING_FOR_DRIVE")
+grep -q 'M=/mnt/backup W=0' <<<"$out" && ! grep -q WARN <<<"$out" && ok "a drive also mounted at /mnt/backup is used there, not waited for" || bad "desktop automount beside /mnt/backup: $out"
+unset -f findmnt find_backup_by_contents adopt_label_mount
 
 echo "== deploy: a running backup is judged by its lock, never by a command line that names the script"
 sed -n '/^backup_lock_held()/,/^}/p' "$ROOT/deploy.sh" > "$T/lockfn.sh"
@@ -263,6 +268,30 @@ echo "== restore-rebuild-boot.sh: RESTORE_NO_NVRAM=1 writes no firmware boot ent
 grep -q -- '--no-variables install' "$ROOT/restore-rebuild-boot.sh" && ok "systemd-boot path has a --no-variables install" || bad "no --no-variables bootctl path"
 grep -q -- '--no-nvram --removable' "$ROOT/restore-rebuild-boot.sh" && ok "GRUB path installs --no-nvram --removable" || bad "no --no-nvram GRUB path"
 sed -n '/^efi_boot_entry()/,/^}/p' "$ROOT/restore-rebuild-boot.sh" | grep -q 'NO_NVRAM" = 1' && ok "efibootmgr entry creation is skipped" || bad "efi_boot_entry ignores NO_NVRAM"
+echo "== restore-rebuild-boot.sh: a grub.cfg beside systemd-boot is GRUB only if the ESP holds a GRUB image"
+blk=$(awk '/^# Both found on a UEFI host/{f=1} f; f && /^fi$/{exit}' "$ROOT/restore-rebuild-boot.sh")
+mkdir -p "$T/gesp/EFI/systemd" "$T/gesp/EFI/BOOT"
+printf 'MZ shim MokListRT' > "$T/gesp/EFI/systemd/systemd-bootx64.efi"; printf 'MZ #### LoaderInfo: systemd-boot 255' > "$T/gesp/EFI/systemd/grubx64.efi"
+cp "$T/gesp/EFI/systemd/grubx64.efi" "$T/gesp/EFI/BOOT/BOOTX64.EFI"
+r=$(USES_GRUB=true USES_SDBOOT=true IS_EFI=true ESP="$T/gesp"; say() { :; }; : "$USES_SDBOOT$IS_EFI$ESP"; eval "$blk"; echo "$USES_GRUB")
+expect "systemd-boot behind shim, no GRUB image: GRUB left alone (Mint with grub packages)" false "$r"
+printf 'MZ grub rescue> ' > "$T/gesp/EFI/BOOT/core.efi"
+r=$(USES_GRUB=true USES_SDBOOT=true IS_EFI=true ESP="$T/gesp"; say() { :; }; : "$USES_SDBOOT$IS_EFI$ESP"; eval "$blk"; echo "$USES_GRUB")
+expect "a bare grub-install core on the ESP: GRUB is in use" true "$r"
+r=$(USES_GRUB=true USES_SDBOOT=false IS_EFI=true ESP="$T/gesp/none"; say() { :; }; : "$USES_SDBOOT$IS_EFI$ESP"; eval "$blk"; echo "$USES_GRUB")
+expect "no systemd-boot: a grub.cfg still means GRUB" true "$r"
+grep -q "grep -qsE 'ukify" "$ROOT/restore-rebuild-boot.sh" && grep -q 'update-initramfs) debian_initramfs_all' "$ROOT/restore-rebuild-boot.sh" \
+    && ok "UKIs built by a Debian initramfs/postinst hook are rebuilt through update-initramfs" || bad "hook-built UKIs are not rebuilt"
+sb=$(awk '/sign-all fails as a whole/{f=1} f; f && /^    fi$/{exit}' "$ROOT/restore-rebuild-boot.sh")
+r=$(DRY=""; say() { echo "SAY $*"; }; warn() { echo "WARN $*"; }; sbctl() { printf 'failed signing /boot/EFI/Linux/a.efi: /boot/EFI/Linux/a.efi does not exist\n✓ Signed /efi/EFI/BOOT/BOOTX64.EFI\n'; return 1; }; eval "$sb")
+grep -q '^SAY .*no longer there.*a.efi' <<<"$r" && ! grep -q '^WARN' <<<"$r" && ok "sbctl: entries for deleted files are named, not a signing failure" || bad "sbctl gone-files: $r"
+r=$(DRY=""; say() { echo "SAY $*"; }; warn() { echo "WARN $*"; }; sbctl() { printf 'failed signing /boot/EFI/Linux/a.efi: /boot/EFI/Linux/a.efi does not exist\nfailed signing /efi/x.efi: permission denied\n'; return 1; }; eval "$sb")
+grep -q '^WARN sbctl sign-all reported errors' <<<"$r" && ok "sbctl: a real signing failure still warns" || bad "sbctl real failure: $r"
+
+for r in '/_entry_for_mount() {/,/^    }/p' '/^_crypt_under() {/,/^}/p' '/^release_crypttab() {/,/^fi$/p'; do
+    a=$(sed -n "$r" "$ROOT/borg-restore.sh"); b=$(sed -n "$r" "$ROOT/backintime-restore.sh")
+    [ -n "$a" ] && [ "$a" = "$b" ] && ok "restore scripts share the crypttab pairing code: ${r%%/,*}/" || bad "borg and Back In Time restores differ in ${r%%/,*}/"
+done
 for f in borg-restore.sh backintime-restore.sh; do
     grep -q 'mount -o remount,bind,ro "$TARGET/sys/firmware/efi/efivars"' "$ROOT/$f" && grep -q 'env RESTORE_NO_NVRAM="$RESTORE_NO_NVRAM"' "$ROOT/$f" \
         && ok "$f: efivars read-only in the chroot and the mode passed in when run from an installed system" || bad "$f: NVRAM guard missing"
@@ -387,6 +416,20 @@ h=$(cd "$T/pe" && python3 -c "$EFI_CODE_HASH" a.efi b.efi u.efi c.efi | cut -d' 
 expect "two signatures of one image hash the same" "$(sed -n 1p <<<"$h")" "$(sed -n 2p <<<"$h")"
 expect "the signed image hashes like the unsigned one" "$(sed -n 1p <<<"$h")" "$(sed -n 3p <<<"$h")"
 [ "$(sed -n 1p <<<"$h")" != "$(sed -n 4p <<<"$h")" ] && ok "a changed code byte is a different hash" || bad "a code change was hidden by the signature-insensitive hash"
+aw=$(sed -n "/fl=\$(efibootmgr -v/,/exit}')/p" "$ROOT/testbed/testbed.sh" | sed "1s/.*awk -v b=\"Boot\$cur\" -v u=\"\$espuuid\" '//; \$s/')\$//")
+u=3332ce4a-8003-4816-b5c4-1fe9c0fc53dd
+expect "firmware loader from efibootmgr 18's File(…) form" /EFI/systemd/systemd-bootx64.efi \
+    "$(printf 'Boot0000* Linux Boot Manager\tHD(1,GPT,%s,0x800,0x90000)/File(\\EFI\\systemd\\systemd-bootx64.efi)\n' "$u" | awk -v b=Boot0000 -v u="$u" "$aw")"
+expect "firmware loader from the bare …)/\\EFI\\… form" /EFI/fedora/shimx64.efi \
+    "$(printf 'Boot0000* Fedora\tHD(1,GPT,%s,0x800,0x90000)/\\EFI\\fedora\\shimx64.efi\n' "$u" | awk -v b=Boot0000 -v u="$u" "$aw")"
+py=$(sed -n "/python3 -c 'import re,sys/,/serial.log/p" "$ROOT/testbed/testbed.sh" | sed "1s/.*python3 -c 'import re,sys/import re,sys/; \$s/' \"\$vm.*//")
+printf '\033[2J\033[01;01HBoot in 1s.\033[2J\033[01;01H' > "$T/ser-handoff"; printf '\033[2J\033[08;06H   Linux Mint (linuxmint.efi)   ' > "$T/ser-menu"
+python3 -c "$py" "$T/ser-handoff" && ok "VM askpass: the loader has handed off — typing allowed" || bad "VM askpass: handoff not recognised"
+python3 -c "$py" "$T/ser-menu" && bad "VM askpass: would type into the loader menu (edits an entry)" || ok "VM askpass: never types while the loader menu is on the console"
+grep -q 'ROOT_UNLOCK=initramfs-tools' "$ROOT/testbed/testbed.sh" && ok "VM askpass: only for initramfs-tools unlocks (systemd reads the credential)" || bad "VM askpass gate missing"
+nob=$(grep -nE '(^|[;&|(]|then|do)[[:space:]]*(echo y \| )?(vgchange|vgcreate|pvcreate|lvcreate|vgs|pvs|lvs|vgcfgbackup|vgcfgrestore|vgrename) ' "$ROOT/testbed/testbed.sh" \
+      | grep -v 'TB_LVM' | grep -v 'root_src\|-S "vg_name=\$vg"' || true)
+[ -z "$nob" ] && ok "test bed: every LVM command on the test drive writes no metadata backup to this host" || bad "LVM commands that write this host's /etc/lvm: $nob"
 grep -q "sys_vendor" <<<"$(awk '/^mirror_firmware_entry\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")" && ok "Acer firmware: no grubx64.efi on the test drive's fallback path (Linpus lite entry)" || bad "mirror_firmware_entry ignores Acer's Linpus lite entries"
 
 echo "== version stamp"
