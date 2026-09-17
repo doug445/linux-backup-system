@@ -288,6 +288,13 @@ adopt_label_mount() {
     local dev="$1" mnt="$2"
     case "$mnt" in
         /run/media/*|/media/*)
+            # the same filesystem is also mounted at /mnt/backup (by hand, or by
+            # the drive-attach unit beside a desktop automount): that is the mount
+            if [ "$(findmnt -rno SOURCE --mountpoint /mnt/backup 2>/dev/null | sed 's/\[.*//')" = "$dev" ]; then
+                BACKUP_MOUNT=/mnt/backup
+                log "the backup drive is mounted at /mnt/backup (the desktop's mount at $mnt is not used)"
+                return
+            fi
             if (( DRY )) || [ ! -t 0 ]; then
                 warn "the backup drive is mounted by the desktop at $mnt — that path cannot be the backup mount. Unmount it (or run deploy.sh on a terminal to have it remounted at /mnt/backup)."
                 BACKUP_MOUNT=/mnt/backup; WAITING_FOR_DRIVE=1
@@ -1244,8 +1251,8 @@ detect_schedule_mode() {
     base=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1 || true)
     [ -n "$base" ] || base=$(basename "${src:-none}")
     rm=$(cat "/sys/block/$base/removable" 2>/dev/null || echo 0)
-    hp=$(lsblk -no HOTPLUG "/dev/$base" 2>/dev/null | head -1 || true)
-    tran=$(lsblk -no TRAN "/dev/$base" 2>/dev/null | head -1 || true)
+    hp=$(lsblk -dno HOTPLUG "/dev/$base" 2>/dev/null | head -1 | tr -d "[:space:]" || true)
+    tran=$(lsblk -dno TRAN "/dev/$base" 2>/dev/null | head -1 | tr -d "[:space:]" || true)
     # A Thunderbolt / USB4 NVMe enclosure reports tran=nvme, hotplug=0: it is
     # an external drive all the same.
     readlink -f "/sys/block/$base" 2>/dev/null | grep -qE 'thunderbolt|usb4' && hp=1
