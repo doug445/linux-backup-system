@@ -46,6 +46,7 @@
 #   rx_chroot_rebuild   restore-rebuild-boot.sh inside the target; the LVM name bridge
 #   rx_verify           what a boot needs, checked against the new disk (ERRORS, WARNINGS)
 #   rx_finish LOGNAME   the checklist, the log copy, the exit status
+[ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
 
 # rx_check_target — see the header
 rx_check_target() {
