@@ -49,9 +49,12 @@
 #                 no network) with a report disk for its boot logger → VM verdict
 #   collect       after booting the test drive and back: report, fingerprint diff,
 #                 hard-link-aware byte comparison, verdict
+#   collect --vm  the same from the VM boot's report — for a disk image (TB_TARGET_IMAGE),
+#                 which this machine's firmware never boots: the verdict is VM-only
 #   revert [--keep-repo]
 #                 undo every TEST-ONLY change: mounts, mappings, transfer sizes,
 #                 the report left on this host, the test repository
+#                 (TB_DELETE_TARGET=1: also the test partitions of TB_TARGET_ESP)
 #   all           fingerprint before → prepare → format → mount → backup → restore → finish
 #
 # Test drives only ever get the passphrase "test": they hold a copy of this machine
@@ -60,6 +63,21 @@
 # that crypttab opens with it, and an encrypted /boot is opened by a test-only GRUB
 # fallback loader with "test" built in. A root unlocked by passphrase asks for "test".
 # The suite's real restore scripts never carry a passphrase.
+#
+# One disk only, and its firmware boots nothing else (Apple Silicon): TB_TARGET_ESP=
+# <PARTUUID> names a SPARE EFI System partition on the running disk with free space
+# after it — on a Mac the ESP of a second "UEFI environment only" Asahi install,
+# whose stub the boot picker starts. The test bed adds its partitions in that free
+# space (new numbers, one table write each, never a zap), keeps the ESP and its
+# m1n1/firmware files, and the restored system is picked at power-on like any
+# other install. This machine's own partitions, containers, boot files and entries
+# are fingerprinted like always; the added partitions are what revert
+# TB_DELETE_TARGET=1 removes.
+#
+# No spare drive: TB_TARGET_IMAGE=<file> on the backup drive is a sparse disk image
+# of TB_TARGET_GIB, attached as a loop device and used like a test drive. A file is
+# nothing this machine's firmware can boot: its boot is the VM boot, its verdict
+# `collect --vm` — evidence for the restore, not for the Bare-metal restore column.
 #
 # Configuration (testbed.conf, see testbed.conf.example): $TESTBED_CONF, then
 # <backup drive>/testbed/testbed.conf, then ~/.config/linux-backup-system/testbed.conf,
@@ -93,6 +111,21 @@ for _c in "${TESTBED_CONF:-}" "$BACKUP_MOUNT/testbed/testbed.conf" \
     if [ -n "$_c" ] && [ -r "$_c" ]; then TB_CONF="$_c"; # shellcheck disable=SC1090
         . "$_c"; break; fi
 done
+# TB_BACKUP_MOUNT=<mount>: the test archive goes to this mounted drive instead of
+# the configured backup drive — another machine's production drive plugged in
+# for the test (the test bed writes only its own repository there). The suite's
+# wrong-drive guard is told that drive's filesystem UUID; unlock-on-attach and
+# the keyfile do not apply to it.
+if [ -n "${TB_BACKUP_MOUNT:-}" ]; then
+    mountpoint -q "$TB_BACKUP_MOUNT" || die "TB_BACKUP_MOUNT=$TB_BACKUP_MOUNT is not a mounted drive"
+    BACKUP_MOUNT="$TB_BACKUP_MOUNT"; BACKUP_FS_UUID=$(findmnt -no UUID "$BACKUP_MOUNT" 2>/dev/null); BACKUP_LUKS_UUID=""; BACKUP_KEYFILE=""
+    export BACKUP_MOUNT BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE
+fi
+TB_TARGET_IMAGE="${TB_TARGET_IMAGE:-}"     # a disk image as the test drive (see the header); its "serial" is made from its path
+TB_TARGET_ESP="${TB_TARGET_ESP:-}"         # a spare ESP on the running disk + the free space after it (see the header)
+[ -n "$TB_TARGET_IMAGE" ] && [ -n "$TB_TARGET_ESP" ] && die "TB_TARGET_IMAGE and TB_TARGET_ESP are two different test targets — set one"
+[ -n "$TB_TARGET_IMAGE" ] && TB_TARGET_SERIAL="tb-img-$(printf '%s' "$TB_TARGET_IMAGE" | sha256sum | cut -c1-12)"
+[ -n "$TB_TARGET_ESP" ] && TB_TARGET_SERIAL="tb-part-$(printf '%s' "$TB_TARGET_ESP" | tr '[:upper:]' '[:lower:]' | cut -c1-12)"
 TB_PASSPHRASE="test"                       # test drives only — see the header
 export LVM_SUPPRESS_FD_WARNINGS=1          # lvm run inside read loops: no "file descriptor leaked" noise
 TB_MNT="${TB_MNT:-/mnt/tb-target}"
@@ -147,6 +180,10 @@ disk_has_serial() { # disk_has_serial DISK SERIAL
 disk_by_serial() {
     local d
     [ -n "$1" ] || return 1
+    # the disk image, while attached (image_loop attaches it)
+    if [ -n "$TB_TARGET_IMAGE" ] && [ "$1" = "$TB_TARGET_SERIAL" ]; then losetup -j "$TB_TARGET_IMAGE" 2>/dev/null | head -1 | cut -d: -f1 | grep .; return; fi
+    # the spare ESP's disk — this machine's own disk, which the same-disk mode shares
+    if [ -n "$TB_TARGET_ESP" ] && [ "$1" = "$TB_TARGET_SERIAL" ]; then bx_disk_of "$(esp_part)" 2>/dev/null | grep .; return; fi
     for d in $(lsblk -dnpo NAME 2>/dev/null); do disk_has_serial "$d" "$1" && { echo "$d"; return 0; }; done
     return 1
 }
@@ -155,6 +192,7 @@ disk_by_serial() {
 host_disks() {
     local t b s d
     t=$(disk_by_serial "$TB_TARGET_SERIAL"); b=$(disk_by_serial "$TB_BACKUP_SERIAL")
+    same_disk && t=""   # the target shares this machine's disk: fingerprinted like always
     { findmnt -rno SOURCE 2>/dev/null | sed 's/\[.*//' | grep '^/dev/'
       awk 'NR>1 && $2=="partition" {print $1}' /proc/swaps
       lsblk -rnpo NAME,TYPE 2>/dev/null | awk '$2=="crypt"{print $1}'
@@ -162,10 +200,57 @@ host_disks() {
       | sort -u | grep -vxF -e "${t:-/nonexistent}" -e "${b:-/nonexistent}" -e "$(bx_disk_of "$(findmnt -no SOURCE "$BACKUP_MOUNT" 2>/dev/null | sed 's/\[.*//')" 2>/dev/null || echo /nonexistent)"
     return 0
 }
+# image_loop — the loop device of TB_TARGET_IMAGE: the file is created sparse (no
+# CoW, so btrfs does not fragment it) if missing, and attached if not. It must
+# not live on one of this machine's own disks: the fingerprint promises those
+# are not written, and the backup drive is where the test archive goes anyway.
+image_loop() {
+    local f="$TB_TARGET_IMAGE" l fsdev
+    [ -n "$f" ] || return 1
+    if [ ! -e "$f" ]; then
+        [ "$TB_TARGET_GIB" -gt 0 ] 2>/dev/null || die "TB_TARGET_GIB must be > 0 to create the disk image $f"
+        mkdir -p "$(dirname "$f")" || die "cannot create $(dirname "$f")"
+        : > "$f" || die "cannot create the disk image $f"
+        chattr +C "$f" 2>/dev/null
+        truncate -s "${TB_TARGET_GIB}G" "$f" || die "cannot size the disk image $f"
+        ledger test "disk image $f created (sparse, ${TB_TARGET_GIB} GiB, no CoW)" "delete the file"
+    fi
+    fsdev=$(findmnt -no SOURCE -T "$f" 2>/dev/null | sed 's/\[.*//')
+    [ -n "$fsdev" ] && host_disks | grep -qxF "$(bx_disk_of "$fsdev" 2>/dev/null || echo /nonexistent)" \
+        && die "the disk image $f is on one of this machine's own disks ($(bx_disk_of "$fsdev")) — put it on the backup drive"
+    l=$(losetup -j "$f" 2>/dev/null | head -1 | cut -d: -f1)
+    [ -n "$l" ] || l=$(losetup --find --show --partscan "$f") || die "losetup $f"
+    echo "$l"
+}
+# esp_part — the spare ESP of the same-disk mode: an EFI System partition that is
+# not mounted and is not this machine's own ESP.
+esp_part() {
+    local p
+    p=$(readlink -f "/dev/disk/by-partuuid/$(tr '[:upper:]' '[:lower:]' <<<"$TB_TARGET_ESP")" 2>/dev/null)
+    [ -b "${p:-/nonexistent}" ] || die "TB_TARGET_ESP=$TB_TARGET_ESP: no partition with that PARTUUID (lsblk -o NAME,PARTUUID,PARTTYPENAME)"
+    [ "$(lsblk -dno PARTTYPE "$p" 2>/dev/null | tr '[:upper:]' '[:lower:]')" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b ] || die "TB_TARGET_ESP=$TB_TARGET_ESP ($p) is not typed EFI System"
+    [ -z "$(findmnt -no TARGET "$p" 2>/dev/null)" ] || die "TB_TARGET_ESP=$TB_TARGET_ESP ($p) is mounted at $(findmnt -no TARGET "$p" | head -1) — a spare ESP is never mounted"
+    for m in /boot/efi /efi /boot; do
+        [ "$(findmnt -no SOURCE "$m" 2>/dev/null | sed 's/\[.*//')" = "$p" ] && die "TB_TARGET_ESP=$TB_TARGET_ESP ($p) is this machine's own ESP ($m)"
+    done
+    echo "$p"
+}
+same_disk() { [ -n "$TB_TARGET_ESP" ]; }
 target_disk() {
-    [ -n "$TB_TARGET_SERIAL" ] || die "TB_TARGET_SERIAL is not set (config: $TB_CONF) — which drive is the test target?"
-    local t; t=$(disk_by_serial "$TB_TARGET_SERIAL")
-    [ -n "$t" ] || die "test drive (serial $TB_TARGET_SERIAL) is not connected"
+    local t
+    if same_disk; then
+        # the running disk itself: the test bed's partitions sit beside this
+        # machine's own, and only those are ever written, formatted or mounted
+        t=$(bx_disk_of "$(esp_part)") || die "no disk behind TB_TARGET_ESP"
+        echo "$t"; return 0
+    fi
+    if [ -n "$TB_TARGET_IMAGE" ]; then
+        t=$(image_loop) || die "no disk image to test on"
+    else
+        [ -n "$TB_TARGET_SERIAL" ] || die "TB_TARGET_SERIAL is not set (config: $TB_CONF) — which drive is the test target? (or TB_TARGET_IMAGE=<file> for a disk image)"
+        t=$(disk_by_serial "$TB_TARGET_SERIAL")
+        [ -n "$t" ] || die "test drive (serial $TB_TARGET_SERIAL) is not connected"
+    fi
     host_disks | grep -qxF "$t" && die "test drive $t holds a mounted filesystem, swap or open container of THIS machine — refusing"
     [ "$(bx_disk_of "$(findmnt -no SOURCE / | sed 's/\[.*//')")" = "$t" ] && die "test drive $t is the running root — refusing"
     echo "$t"
@@ -174,6 +259,7 @@ part() { case "$1" in *[0-9]) echo "${1}p$2" ;; *) echo "$1$2" ;; esac; }
 set_sectors() { # set_sectors DISK — remember the kernel's value, lower it
     local d kn f; d="$1"; kn=$(basename "$d"); f="/sys/block/$kn/queue/max_sectors_kb"
     [ "$TB_SECTORS_KB" -gt 0 ] 2>/dev/null && [ -w "$f" ] || return 0
+    [ "$(lsblk -dno TRAN "$d" 2>/dev/null)" = usb ] || return 0   # a bridge's workaround: not for NVMe, SATA or a loop device
     # lower only: a bridge already below the test value keeps its own (raising 120 → 128 is not "smaller")
     [ "$(cat "$f")" -gt "$TB_SECTORS_KB" ] 2>/dev/null || return 0
     [ -f "$TB_STATE/sectors.$kn" ] || cat "$f" > "$TB_STATE/sectors.$kn"
@@ -336,11 +422,18 @@ cmd_fingerprint() {
             # Firmware entries for a partition no disk here has: stale, and the firmware
             # drops them at power-on (Acer removed its "Linpus lite" entry for a wiped
             # test drive) — not compared.
-            local parts
+            local parts tbparts=""
             parts=$(lsblk -rno PARTUUID 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep . | tr '\n' ' ')
+            # same-disk mode: the test partitions the test bed itself added to this
+            # machine's disk (and the spare ESP's line, which does not change) are
+            # the expected difference; everything else on that table is compared
+            same_disk && [ -f "$TB_STATE/plan" ] && tbparts=$(test_parts | tr '\n' ' ')
             fp_norm() { # the fingerprint without the expected noise and without disks absent from the other side
-                awk -v both="$both" -v bycode="$bycode" -v parts="$parts" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1
-                        n=split(parts, b, " "); for (i=1;i<=n;i++) exists[b[i]]=1}
+                awk -v both="$both" -v bycode="$bycode" -v parts="$parts" -v tbparts="$tbparts" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1
+                        n=split(parts, b, " "); for (i=1;i<=n;i++) exists[b[i]]=1
+                        n=split(tbparts, c, " "); for (i=1;i<=n;i++) if (c[i] != "") tb[c[i]]=1}
+                    /^## LUKS header / && ($4 in tb) {next}
+                    /^\/dev\/[^ ]+ : / && (substr($0, 1, index($0, " :") - 1) in tb) {next}
                     /^## files / {infiles=1; skip=0; dev=""; print; next}
                     /^## / {infiles=0}
                     bycode && infiles && tolower($0) ~ /\.efi$/ {next}
@@ -420,17 +513,37 @@ cmd_plan() {
     say "this host ($TB_HOST):"; sed 's/^/    /' "$TB_STATE/host-layout"
     # The suite restores these; the test bed cannot lay them out on a test drive yet.
     uns=$(layout_all NOT_MIRRORED); [ -n "$uns" ] && { printf '%s\n' "$uns" | sed 's/^/[testbed] test bed cannot mirror this host yet: /' >&2; return 1; }
-    t=$(target_disk); size_mib=$(( $(lsblk -bdno SIZE "$t") / 1048576 ))
-    local disk_mib=$size_mib
-    [ "$TB_TARGET_GIB" -gt 0 ] 2>/dev/null && [ $(( TB_TARGET_GIB * 1024 )) -lt "$size_mib" ] && size_mib=$(( TB_TARGET_GIB * 1024 ))
+    t=$(target_disk)
     esp=$(layout ESP_MIB); boot=$(layout BOOT_MIB); swap=$(layout SWAP_MIB); home_fs=$(layout HOME_FS)
     : > "$TB_STATE/plan"
-    say "test drive: $t ($(lsblk -dno MODEL,SERIAL "$t" | xargs), ${disk_mib} MiB) — the test bed's part: the first ${size_mib} MiB$( [ "$size_mib" -lt "$disk_mib" ] && echo ", the rest left unpartitioned (TB_TARGET_GIB=$TB_TARGET_GIB)"), laid out like this host:"
+    local disk_mib
+    if same_disk; then
+        # The spare ESP as it is, and the largest free region of the running disk
+        # for the rest; the partition numbers continue after the disk's highest.
+        local ep ss fs fe fmib
+        ep=$(esp_part); [ -n "$esp" ] || die "this host boots without an ESP — the same-disk mode needs one (TB_TARGET_ESP)"
+        [ "$(layout FIRMWARE)" = uefi ] || die "the same-disk mode is for UEFI hosts"
+        ss=$(blockdev --getss "$t"); read -r fs fe <<<"$(free_region "$t")"
+        [ -n "${fs:-}" ] || die "no unpartitioned space on $t — the same-disk mode lays the test bed out in free space after the spare ESP"
+        fmib=$(( (fe - fs + 1) * ss / 1048576 )); size_mib=$fmib; disk_mib=$fmib
+        [ "$TB_TARGET_GIB" -gt 0 ] 2>/dev/null && [ $(( TB_TARGET_GIB * 1024 )) -lt "$size_mib" ] && size_mib=$(( TB_TARGET_GIB * 1024 ))
+        n=$(( $(lsblk -rno NAME "$t" | sed -n "s/^$(basename "$t")p\{0,1\}\([0-9]*\)$/\1/p" | sort -n | tail -1) + 1 ))
+        echo "FREE=$fs:$fe:$ss" >> "$TB_STATE/plan"
+        echo "KEEP_ESP=${ep##*[!0-9]}" >> "$TB_STATE/plan"
+        say "test target: this machine's disk $t — the spare ESP $ep (PARTUUID $TB_TARGET_ESP, $(( $(lsblk -bdno SIZE "$ep") / 1048576 )) MiB, kept) and ${size_mib} MiB of its free region (sectors $fs–$fe, ${fmib} MiB$( [ "$size_mib" -lt "$fmib" ] && echo "; TB_TARGET_GIB=$TB_TARGET_GIB")), laid out like this host:"
+        [ $(( fs * ss )) -le $(( ($(sgdisk -i "${ep##*[!0-9]}" "$t" 2>/dev/null | awk '/^Last sector/{print $3}') + 1) * ss + 2097152 )) ] || warn "the free region does not start right after the spare ESP — fine for the boot chain, just not adjacent"
+        echo "PART=${ep##*[!0-9]}:esp:$(( $(lsblk -bdno SIZE "$ep") / 1048576 )):ef00:$(layout ESP_MOUNT)" >> "$TB_STATE/plan"
+    else
+    size_mib=$(( $(lsblk -bdno SIZE "$t") / 1048576 )); disk_mib=$size_mib
+    [ "$TB_TARGET_GIB" -gt 0 ] 2>/dev/null && [ $(( TB_TARGET_GIB * 1024 )) -lt "$size_mib" ] && size_mib=$(( TB_TARGET_GIB * 1024 ))
+    local what; if [ -n "$TB_TARGET_IMAGE" ]; then what="the disk image $TB_TARGET_IMAGE as $t"; else what="$t ($(lsblk -dno MODEL,SERIAL "$t" | xargs)"; fi
+    say "test drive: $what, ${disk_mib} MiB) — the test bed's part: the first ${size_mib} MiB$( [ "$size_mib" -lt "$disk_mib" ] && echo ", the rest left unpartitioned (TB_TARGET_GIB=$TB_TARGET_GIB)"), laid out like this host:"
     if [ "$(layout FIRMWARE)" = bios ]; then echo "PART=$n:bios_grub:1:ef02:-" >> "$TB_STATE/plan"; n=$((n+1)); fi
     [ -n "$esp" ] && { echo "PART=$n:esp:$(( esp < 300 ? 300 : esp )):ef00:$(layout ESP_MOUNT)" >> "$TB_STATE/plan"; n=$((n+1)); }
+    fi
     [ -n "$boot" ] && { echo "PART=$n:boot:$boot:$(layout BOOT_PARTTYPE):/boot" >> "$TB_STATE/plan"; n=$((n+1)); }
     [ -n "$swap" ] && { echo "PART=$n:swap:$swap:8200:swap" >> "$TB_STATE/plan"; n=$((n+1)); }
-    local used=0 v; while IFS=: read -r _ _ v _ _; do used=$((used + v)); done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
+    local used=0 v r; while IFS=: read -r _ r v _ _; do same_disk && [ "$r" = esp ] && continue; used=$((used + v)); done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
     local rest=$(( size_mib - used - 16 ))
     [ "$rest" -ge 20480 ] || die "only $rest MiB left for the root in the test bed's ${size_mib} MiB — raise TB_TARGET_GIB"
     local rtype=8304; [ -n "$(layout ROOT_VG)" ] && rtype=8e00; [ "$(layout ROOT_CRYPT)" = 1 ] && rtype=8309
@@ -458,11 +571,13 @@ cmd_plan() {
 cmd_prepare() {
     local t; t=$(target_disk)
     cmd_plan >/dev/null || die "plan failed — run: testbed.sh plan"
-    [ "${TB_WIPE:-}" = "$TB_TARGET_SERIAL" ] || die "this ERASES $t ($(lsblk -dno MODEL,SIZE "$t" | xargs)). Confirm with TB_WIPE=$TB_TARGET_SERIAL"
+    if [ -n "$TB_TARGET_IMAGE" ]; then say "test drive: the disk image $TB_TARGET_IMAGE ($t) — its previous contents are erased"
+    else [ "${TB_WIPE:-}" = "$TB_TARGET_SERIAL" ] || die "this ERASES $t ($(lsblk -dno MODEL,SIZE "$t" | xargs)). Confirm with TB_WIPE=$TB_TARGET_SERIAL"; fi
     # every tool prepare + format run, checked (and installed) BEFORE the drive is touched
     bx_ensure_deps sgdisk wipefs cryptsetup mkfs.vfat "mkfs.$(layout ROOT_FS)" | sed 's/^/[testbed] /'
     [ "${PIPESTATUS[0]}" -eq 0 ] || die "missing tools — install them and re-run prepare"
     unmount_target    # a previous run's mounts, volume group and containers on the test drive
+    if same_disk; then prepare_same_disk; else
     local m; for m in $(lsblk -rnpo MOUNTPOINTS "$t" 2>/dev/null | grep .); do umount "$m" || die "cannot unmount $m on the test drive (a shell inside it?)"; done
     for m in $(lsblk -rnpo NAME,TYPE "$t" | awk '$2=="crypt"{print $1}'); do cryptsetup close "$(basename "$m")" 2>/dev/null; done
     set_sectors "$t"
@@ -474,11 +589,86 @@ cmd_prepare() {
     done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
     sgdisk "${args[@]}" "$t" >/dev/null || die "sgdisk partitioning failed"
     udevadm settle; sleep 1
-    ledger test "test drive $t (serial $TB_TARGET_SERIAL) wiped and partitioned like $TB_HOST" "none — the test drive is wiped again on the next run"
+    fi
+    [ -b "$(part "$t" 1)" ] || { partprobe "$t" 2>/dev/null || partx -u "$t" 2>/dev/null; udevadm settle; sleep 1; }
+    [ -b "$(part "$t" 1)" ] || die "the kernel does not show the new partitions of $t"
+    same_disk || ledger test "test drive $t (serial $TB_TARGET_SERIAL) wiped and partitioned like $TB_HOST" "none — the test drive is wiped again on the next run"
     say "partitioned $t:"; lsblk -o NAME,SIZE,PARTTYPENAME "$t" | sed 's/^/    /'
     st_set target "$t"
 }
 
+# test_parts — every partition of the test target named by the plan (same-disk mode:
+# the spare ESP and the added ones; otherwise the whole test drive's).
+test_parts() {
+    local t; t=$(target_disk)
+    if same_disk; then sed -n 's/^PART=//p' "$TB_STATE/plan" 2>/dev/null | cut -d: -f1 | while read -r n; do part "$t" "$n"; done
+    else lsblk -rnpo NAME,TYPE "$t" 2>/dev/null | awk '$2=="part"{print $1}'; fi
+}
+# target_luks_parts — the LUKS containers of the test target (never this machine's own)
+target_luks_parts() { local p; for p in $(test_parts); do [ "$(lsblk -dno FSTYPE "$p" 2>/dev/null)" = crypto_LUKS ] && echo "$p"; done; return 0; }
+# tb_part_of DEV — the partition under a device (a container, a volume): the first
+# `part` on the way down, or the device itself
+tb_part_of() {
+    local d kn sl
+    d=$(readlink -f "$1" 2>/dev/null) || return 1; kn=$(basename "$d")
+    while [ "$(lsblk -dno TYPE "/dev/$kn" 2>/dev/null)" != part ]; do
+        sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1); [ -n "$sl" ] || break; kn=$sl
+    done
+    echo "/dev/$kn"
+}
+# on_target DEV — on the test target: its disk, and in same-disk mode one of the
+# test partitions (this machine's own, on the same disk, are not)
+on_target() {
+    local t d
+    t=$(target_disk); d=$(bx_disk_of "$1" 2>/dev/null) || return 1
+    [ "$d" = "$t" ] || return 1
+    same_disk || return 0
+    test_parts | grep -qxF "$(tb_part_of "$1")"
+}
+# free_region DISK — "START END" (sectors) of the largest unpartitioned region
+free_region() {
+    sfdisk -F -q "$1" 2>/dev/null | awk 'NF>=3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {n=$2-$1+1; if (n>best) {best=n; s=$1; e=$2}} END{if (best>0) print s, e}'
+}
+# prepare_same_disk — the test partitions added to the running disk, in the free
+# region the plan chose, which is checked again now: nothing else on the disk is
+# touched. A previous run's tb-* partitions (never the spare ESP) go first.
+# Each partition is one sgdisk call; the kernel is told about them one by one
+# (partx -a: a disk in use cannot re-read its whole table), and the new
+# partitions alone are wiped of old signatures.
+prepare_same_disk() {
+    local t ep fs fe ss num role mib type mnt start end first="" last="" old
+    t=$(target_disk); ep=$(esp_part)
+    IFS=: read -r fs fe ss <<<"$(sed -n 's/^FREE=//p' "$TB_STATE/plan")"
+    [ "$(free_region "$t")" = "$fs $fe" ] || die "the free region of $t changed since the plan (was sectors $fs–$fe, now $(free_region "$t" || echo none)) — run plan again"
+    old=$(lsblk -rnpo NAME,PARTLABEL,TYPE "$t" 2>/dev/null | awk '$3=="part" && $2 ~ /^tb-/ {print $1}')
+    for num in $old; do
+        [ "$num" = "$ep" ] && continue
+        [ -z "$(findmnt -no TARGET "$num" 2>/dev/null)" ] && [ -z "$(lsblk -rno NAME,TYPE "$num" | awk '$2=="crypt"')" ] || die "$num (a previous run's test partition) is mounted or open — close it first"
+        wipefs -a "$num" >/dev/null 2>&1
+        sgdisk -d "${num##*[!0-9]}" "$t" >/dev/null || die "sgdisk -d ${num##*[!0-9]} $t"
+        partx -d -n "${num##*[!0-9]}:${num##*[!0-9]}" "$t" 2>/dev/null || true
+        ledger test "previous run's test partition $num deleted from $t" "-"
+    done
+    [ -z "$old" ] || { udevadm settle; [ "$(free_region "$t")" != "$fs $fe" ] && die "after removing the previous run's partitions the free region is not the planned one — run plan again"; }
+    start=$fs
+    while IFS=: read -r num role mib type mnt; do
+        [ "$role" = esp ] && continue
+        [ -b "$(part "$t" "$num")" ] && die "$(part "$t" "$num") exists — the plan's partition numbers are no longer free; run plan again"
+        if [ "$mib" = 0 ]; then end=$fe; else end=$(( start + mib * 1048576 / ss - 1 )); fi
+        [ "$end" -le "$fe" ] || die "partition $num would end past the free region"
+        sgdisk -n "$num:$start:$end" -t "$num:$type" -c "$num:tb-$role" "$t" >/dev/null || die "sgdisk -n $num:$start:$end on $t failed"
+        [ -n "$first" ] || first=$num; last=$num
+        start=$(( $(sgdisk -i "$num" "$t" | awk '/^Last sector/{print $3}') + 1 ))
+    done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
+    partx -a -n "$first:$last" "$t" 2>/dev/null || partx -u "$t" 2>/dev/null || true
+    udevadm settle; sleep 1
+    while IFS=: read -r num role mib type mnt; do
+        [ "$role" = esp ] && continue
+        [ -b "$(part "$t" "$num")" ] || die "the kernel does not show $(part "$t" "$num") (partx -a $t)"
+        wipefs -a "$(part "$t" "$num")" >/dev/null 2>&1
+    done < <(sed -n 's/^PART=//p' "$TB_STATE/plan")
+    ledger test "partitions $first–$last added to $t (THIS machine's disk) in its free region after the spare ESP $ep; the ESP is kept" "revert with TB_DELETE_TARGET=1 deletes them (never the ESP)"
+}
 partdev() { # partdev ROLE — the test drive's partition for a plan role
     local t; t=$(target_disk)
     part "$t" "$(sed -n 's/^PART=//p' "$TB_STATE/plan" | awk -F: -v r="$1" '$2==r{print $1}')"
@@ -532,7 +722,13 @@ open_target() {
 cmd_format() {
     [ -f "$TB_STATE/plan" ] || die "no plan — run prepare first"
     local p root_blk sv mnt name lv mib role
-    has_role esp  && { mkfs.vfat -F 32 -n TB-ESP "$(partdev esp)" >/dev/null || die "mkfs ESP"; }
+    if has_role esp && same_disk; then
+        # the spare ESP keeps its filesystem and the stub's files (m1n1, firmware);
+        # only a loader directory from an earlier boot goes, the restore brings this host's
+        mkdir -p /run/tb-esp; mount "$(partdev esp)" /run/tb-esp || die "mount the spare ESP"
+        rm -rf /run/tb-esp/EFI; umount /run/tb-esp
+        ledger test "spare ESP $(partdev esp): EFI/ removed, everything else kept" "-"
+    elif has_role esp; then mkfs.vfat -F 32 -n TB-ESP "$(partdev esp)" >/dev/null || die "mkfs ESP"; fi
     if has_role boot; then
         p=$(partdev boot)
         [ "$(layout BOOT_CRYPT)" = 1 ] && { luks_format BOOT "$p" tb-boot; p=/dev/mapper/tb-boot; }
@@ -686,6 +882,11 @@ cmd_finish() {
     ln -sf /etc/systemd/system/testbed-boot-logger.service "$TB_MNT/etc/systemd/system/multi-user.target.wants/testbed-boot-logger.service"
     {
         echo "TEST_SERIAL=$TB_TARGET_SERIAL"
+        if same_disk; then
+            # the same disk, the same serial: the logger goes by partition
+            echo "TEST_PARTUUIDS=\"$(for p in $(test_parts); do lsblk -dno PARTUUID "$p"; done | tr '\n' ' ')\""
+            echo "HOST_PARTUUIDS=\"$(for d in $(host_disks); do lsblk -rno PARTUUID "$d"; done | grep . | grep -vxF -f <(test_parts | while read -r p; do lsblk -dno PARTUUID "$p"; done) | tr '\n' ' ')\""
+        fi
         echo "HOST=$TB_HOST"
         echo "HOST_DISK_SERIALS=\"$(for d in $(host_disks); do lsblk -dno SERIAL "$d"; done | tr '\n' ' ')\""
         echo "REPORT_PARTUUID=$(layout REPORT_PARTUUID)"
@@ -707,6 +908,8 @@ cmd_finish() {
     park_shim_fallback
     mark_test_drive_picker
     isolate_other_disks
+    same_disk && { park_uboot_vars; check_same_disk_refs; }
+    check_removable_chain
     # The restored boot configuration must name the volume group by its real name:
     # the temporary one exists only while this test bed runs.
     if [ -n "$(layout ROOT_VG)" ] && grep -rlsF "/dev/mapper/$(tb_vg | sed 's/-/--/g')-" "$TB_MNT/boot/grub" "$TB_MNT/boot/grub2" "$TB_MNT/etc/fstab" "$TB_MNT/etc/default/grub" "$TB_MNT/etc/initramfs-tools/conf.d" 2>/dev/null | grep -q .; then
@@ -745,6 +948,30 @@ cmd_finish() {
             *) die "the test drive did not boot in the VM — do not boot it for real yet; evidence: $TB_STATE/vm (TB_VMBOOT=0 skips this check)" ;;
         esac
     fi
+    if same_disk; then
+        cat <<MSG
+
+[testbed] Ready to boot the test partitions.
+  1. Reboot; at power-on pick the install whose ESP is $TB_TARGET_ESP —
+     on a Mac: hold the power button, choose the volume the Asahi installer named
+     (name it TEST when installing). This machine's own install boots as before.
+     $( [ "$(st_get auto-unlock)" = grub ] && echo "It unlocks itself (built-in passphrase: test)" || echo "The passphrase is: test" )
+  2. Wait ~2 minutes after the login screen appears (the logger writes its report to
+     this machine's $(layout REPORT_MOUNT) — PARTUUID $(layout REPORT_PARTUUID)).
+  3. Boot back into this machine and run:  sudo $0 collect
+MSG
+        return 0
+    fi
+    if [ -n "$TB_TARGET_IMAGE" ]; then
+        cat <<MSG
+
+[testbed] The test drive is a disk image ($TB_TARGET_IMAGE): this machine's firmware cannot
+  boot a file. Its boot was the VM boot above ($(st_get vmboot)). The verdict, VM-only, comes from:
+      sudo $0 collect --vm
+  A green Bare-metal restore row still needs a real boot of a restored drive.
+MSG
+        return 0
+    fi
     local pick='on a UEFI host the entry that starts with
      "UEFI:" (the plain one is the legacy BIOS entry and does not boot a UEFI test drive)'
     grep -qi apple /sys/class/dmi/id/sys_vendor 2>/dev/null && pick='hold Option (⌥) at power-on and pick the drive labelled TEST'
@@ -763,6 +990,49 @@ cmd_finish() {
   4. Boot back into this machine and run:  sudo $0 collect
 MSG
 }
+# park_uboot_vars — same-disk mode, U-Boot hosts (Apple Silicon): the restore put
+# this machine's ubootefi.var — U-Boot's EFI variable store, BootOrder included —
+# on the spare ESP. U-Boot reads the store from the ESP the stub names
+# (/chosen/asahi,efi-system-partition — arch/arm/mach-apple/board.c,
+# asahi_esp_devpart), so booted from the spare stub it would read this file, and
+# its first entry starts THIS machine's own loader: the test boot would come up
+# in this machine's system. Without the file U-Boot has no entries, and its boot
+# manager tries the default loader on the stub's own ESP before any other
+# partition (lib/efi_loader/efi_bootmgr.c, "try EFI system partition"): the
+# spare one. Kept in /root/restore-test; a real restore keeps the file, which is
+# right on the disk it came from.
+park_uboot_vars() {
+    local esp f
+    esp="$TB_MNT$(layout ESP_MOUNT)"; f="$esp/ubootefi.var"
+    [ -f "$f" ] || return 0
+    mkdir -p "$TB_MNT/root/restore-test"
+    mv -f "$f" "$TB_MNT/root/restore-test/ubootefi.var.parked" || { warn "could not park ${f#"$TB_MNT"}"; return 0; }
+    ledger test "test partitions: U-Boot variable store ${f#"$TB_MNT"} parked in /root/restore-test — its BootOrder starts this machine's own loader" "test partitions only"
+    say "parked ${f#"$TB_MNT"} (U-Boot boots the spare ESP's own loader, not this machine's boot entries)"
+    return 0
+}
+# check_same_disk_refs — same-disk mode: the restore's own "references only the
+# target disk" check cannot tell this machine's partitions from the test ones —
+# they are the same disk. Every id the restored boot chain names (fstab, crypttab,
+# the GRUB configs) must resolve to a test partition or to nothing on this disk.
+check_same_disk_refs() {
+    local g f id dev bad=0
+    for g in etc/fstab etc/crypttab boot/grub2/grub.cfg boot/grub/grub.cfg "boot/efi/EFI/*/grub.cfg" "efi/EFI/*/grub.cfg" "boot/loader/entries/*.conf" etc/kernel/cmdline; do
+        # shellcheck disable=SC2086
+        for f in $TB_MNT/$g; do
+            [ -f "$f" ] || continue
+            while read -r id; do
+                dev=$(blkid -t "$id" -o device 2>/dev/null | head -1); [ -n "$dev" ] || continue
+                [ "$(bx_disk_of "$dev" 2>/dev/null)" = "$(target_disk)" ] || continue
+                on_target "$dev" && continue
+                warn "${f#"$TB_MNT"} names $id — $dev, one of THIS machine's own partitions, not a test partition"; bad=1
+            done < <(grep -vh '^[[:space:]]*#' "$f" | grep -oE '(UUID|PARTUUID|LABEL|PARTLABEL)=[^ ,"]+|rd\.luks\.uuid=(luks-)?[0-9a-fA-F-]+' | sed 's/^rd\.luks\.uuid=\(luks-\)\{0,1\}/UUID=/' | sort -u)
+        done
+    done
+    [ "$bad" = 0 ] && { say "the restored boot chain names test partitions only (fstab, crypttab, GRUB configs, loader entries)"; return 0; }
+    [ "${TB_FORCE:-}" = 1 ] || die "the restored boot chain would use this machine's own partitions — do not boot it (TB_FORCE=1 finishes anyway)"
+    return 0
+}
 # auto_unlock_grub — TEST DRIVES ONLY: the test drive boots unattended. GRUB
 # asks for a passphrase for every container it opens: the encrypted /boot, and
 # the root too where grub.cfg names it (grub-mkconfig adds `cryptomount -u` for
@@ -780,7 +1050,7 @@ auto_unlock_grub() {
     [ -f "$loader" ] && [ -d "$TB_MNT/boot/grub" ] || { warn "auto-unlock: no GRUB fallback loader at ${loader#"$TB_MNT"} — the test boot asks for the passphrase (test)"; return 0; }
     u=$(cryptsetup luksUUID "$(partdev boot)" 2>/dev/null) || return 0
     local p all=""
-    for p in $(lsblk -rnpo NAME,FSTYPE "$(target_disk)" | awk '$2=="crypto_LUKS"{print $1}'); do all="$all $(cryptsetup luksUUID "$p")"; done
+    for p in $(target_luks_parts); do all="$all $(cryptsetup luksUUID "$p")"; done
     # The modules and the grub-mkimage of ONE install: /usr/local's modules
     # packed by the distro's grub2-mkimage (or the reverse) is a mismatched image.
     local mkimage=""
@@ -845,7 +1115,7 @@ preflight_grub_unlock() {
         for p in grub-fstest grub2-fstest; do [ -x "$d/$p" ] && { fstest="$d/$p"; break 2; }; done
     done
     [ -n "$fstest" ] || { warn "preflight: no grub-fstest on this machine — GRUB's unlock of the test drive is not checked before the boot"; return 0; }
-    for p in $(lsblk -rnpo NAME,FSTYPE "$(target_disk)" | awk '$2=="crypto_LUKS"{print $1}'); do
+    for p in $(target_luks_parts); do
         u=$(cryptsetup luksUUID "$p" 2>/dev/null) || continue
         out=$(printf '%s\n' "$TB_PASSPHRASE" | timeout 600 "$fstest" -C "$p" ls "(cryptouuid/${u//-/})/" 2>&1)
         if grep -q 'opened' <<<"$out"; then
@@ -935,6 +1205,24 @@ EOF
     say "test drive: fallback path starts shim, as this machine's firmware entry $fl does (MOK keys for nvidia/zfs)"
     return 0
 }
+# check_removable_chain — the test boot starts from EFI/BOOT/BOOT<arch>.EFI (no
+# firmware entry is written). When that is shim, shim loads grub<arch>.efi from
+# its own directory and nothing else once its fallback is parked: with no GRUB
+# there the boot stops at "Failed to open \EFI\BOOT\grubaa64.efi" — which is
+# how the Fedora Asahi Remix vendor-directory fault was found. A restore fault,
+# named here before anyone reboots.
+check_removable_chain() {
+    local a esp fb
+    [ "$(layout FIRMWARE)" = uefi ] || return 0
+    case "$(uname -m)" in x86_64) a=x64 ;; aarch64) a=aa64 ;; *) return 0 ;; esac
+    esp="$TB_MNT$(layout ESP_MOUNT)"; fb="$esp/EFI/BOOT/BOOT${a^^}.EFI"
+    [ -f "$fb" ] || { warn "no removable-path loader EFI/BOOT/BOOT${a^^}.EFI on the test drive — the firmware menu cannot start it"; return 0; }
+    if grep -aq MokListRT "$fb" && [ ! -f "$esp/EFI/BOOT/grub$a.efi" ]; then
+        warn "EFI/BOOT/BOOT${a^^}.EFI is shim and there is no EFI/BOOT/grub$a.efi beside it — shim finds no loader; the test boot WILL fail (the restore's boot rebuild should have copied this ESP's GRUB there)"
+        st_set removable-chain FAIL; return 0
+    fi
+    st_set removable-chain ok; return 0
+}
 # park_shim_fallback — TEST DRIVES ONLY: shim started as EFI/BOOT/BOOT<arch>.EFI
 # runs fb<arch>.efi first when it sits beside it, and fallback CREATES a firmware
 # boot entry (from EFI/<id>/BOOT<arch>.CSV) before booting — a write to THIS
@@ -975,12 +1263,14 @@ isolate_other_disks() {
             if [ "${#a[@]}" -lt 2 ] || [ "${a[0]#\#}" != "${a[0]}" ]; then printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue; fi
             if [ "$f" = crypttab ]; then name=${a[0]}; dev=${a[1]}; else name=""; dev=${a[0]}; fi
             opts=${a[3]:-}
-            disk=""
+            disk=""; local rdev=""
             case "$dev" in
-                UUID=*|PARTUUID=*|LABEL=*|PARTLABEL=*) disk=$(bx_disk_of "$(blkid -t "$dev" -o device 2>/dev/null | head -1)" 2>/dev/null) ;;
+                UUID=*|PARTUUID=*|LABEL=*|PARTLABEL=*) rdev=$(blkid -t "$dev" -o device 2>/dev/null | head -1); disk=$(bx_disk_of "$rdev" 2>/dev/null) ;;
                 /dev/mapper/*) case "$names" in *" ${dev#/dev/mapper/} "*) disk="a container of another disk" ;; esac ;;
-                /dev/*) [ -b "$dev" ] && disk=$(bx_disk_of "$dev" 2>/dev/null) ;;
+                /dev/*) [ -b "$dev" ] && { rdev=$dev; disk=$(bx_disk_of "$dev" 2>/dev/null); } ;;
             esac
+            # same-disk mode: this machine's own partitions share the target disk
+            if [ -n "$rdev" ] && [ "$disk" = "$t" ] && ! on_target "$rdev"; then disk="$t (this machine's own partition $(tb_part_of "$rdev"))"; fi
             if [ -z "$disk" ] || [ "$disk" = "$t" ] || [[ ",$opts," == *,noauto,* ]]; then
                 printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue
             fi
@@ -1051,6 +1341,47 @@ vm_firmware() { # "code" or "code<TAB>vars"; nothing when none is installed
     return 1
 }
 vm_skip() { st_set vmboot SKIPPED; st_set vmboot-why "$1"; say "VM boot skipped: $1"; return 0; }
+# vm_disk_build DIR — same-disk mode: a read-only device-mapper disk made of the test
+# partitions alone (the spare ESP first), under a GPT written for them with their
+# real PARTUUIDs and the disk's sector size, in a small file; this machine's own
+# partitions are not on it. Prints the device.
+vm_disk_build() {
+    local vm="$1" t ss p n sz off=2048 table="" gpt lo lh lt total num role hdr=2048 tail=2048 sect=()
+    t=$(target_disk); ss=$(blockdev --getss "$t"); gpt="$vm/gpt.img"
+    # sectors of each partition (512-byte units, as device-mapper counts)
+    while IFS=: read -r num role _ _ _; do
+        p=$(part "$t" "$num"); sz=$(blockdev --getsz "$p") || return 1
+        sect+=("$num:$role:$p:$sz")
+    done < <(sed -n 's/^PART=//p' "$TB_STATE/plan" | sort -t: -k1,1n)
+    total=$hdr; for n in "${sect[@]}"; do total=$(( total + ${n##*:} )); done; total=$(( total + tail ))
+    rm -f "$gpt"; truncate -s $(( total * 512 )) "$gpt" || return 1
+    lo=$(losetup --find --show -b "$ss" "$gpt") || return 1
+    local args=(--clear) i=0
+    for n in "${sect[@]}"; do
+        IFS=: read -r num role p sz <<<"$n"; i=$((i + 1))
+        args+=(-n "$i:$(( off * 512 / ss )):$(( (off + sz) * 512 / ss - 1 ))" -t "$i:$(sgdisk -i "$num" "$t" | awk '/^Partition GUID code/{print $4}')" -c "$i:tb-$role" -u "$i:$(lsblk -dno PARTUUID "$p")")
+        off=$(( off + sz ))
+    done
+    sgdisk "${args[@]}" "$lo" >/dev/null 2>&1 || { losetup -d "$lo"; return 1; }
+    losetup -d "$lo"
+    lh=$(losetup --find --show -r -b "$ss" --sizelimit $(( hdr * 512 )) "$gpt") || return 1
+    lt=$(losetup --find --show -r -b "$ss" -o $(( (total - tail) * 512 )) --sizelimit $(( tail * 512 )) "$gpt") || { losetup -d "$lh"; return 1; }
+    table="0 $hdr linear $lh 0"; off=$hdr
+    for n in "${sect[@]}"; do IFS=: read -r num role p sz <<<"$n"; table="$table
+$off $sz linear $p 0"; off=$(( off + sz )); done
+    table="$table
+$off $tail linear $lt 0"
+    printf '%s\n' "$lh" "$lt" > "$vm/vmdisk.loops"
+    printf '%s\n' "$table" | dmsetup create tb-vmdisk --readonly || { vm_disk_teardown "$vm"; return 1; }
+    echo /dev/mapper/tb-vmdisk
+}
+vm_disk_teardown() {
+    local vm="$1" l
+    [ -e /dev/mapper/tb-vmdisk ] && dmsetup remove tb-vmdisk 2>/dev/null
+    [ -f "$vm/vmdisk.loops" ] && while read -r l; do [ -n "$l" ] && losetup -d "$l" 2>/dev/null; done < "$vm/vmdisk.loops"
+    rm -f "$vm/vmdisk.loops" "$vm/gpt.img"
+    return 0
+}
 vm_report_read() { # vm_report_read IMG DEST — copy the report directory out of the report disk, read-only
     # mtools reads the image file itself: a loop device every poll made the
     # desktop's device notifier (Plasma's Disks & Devices) pop up every 30 s.
@@ -1076,8 +1407,11 @@ cmd_vmboot() {
     local t arch qemu fw code vars img loop vm="$TB_STATE/vm" secs mem accel=() firmware=() n=0 sock
     [ -f "$TB_STATE/plan" ] && [ -s "$TB_STATE/manifest.tsv.gz" ] || die "vmboot runs after finish (no plan or manifest in $TB_STATE)"
     t=$(target_disk)
-    lsblk -rno MOUNTPOINTS "$t" | grep -q . && die "the test drive has mounted partitions — vmboot needs it closed (finish closes it)"
-    lsblk -rno TYPE "$t" | grep -qE 'crypt|lvm' && die "the test drive has open containers or volumes — close them first"
+    local _p
+    for _p in $(test_parts); do
+        lsblk -rno MOUNTPOINTS "$_p" | grep -q . && die "$_p of the test target is mounted — vmboot needs it closed (finish closes it)"
+        lsblk -rno TYPE "$_p" | grep -qE 'crypt|lvm' && die "$_p of the test target has an open container or volume — close it first"
+    done
     arch=$(uname -m); qemu=$(command -v "qemu-system-$arch" 2>/dev/null)
     [ -n "$qemu" ] || { vm_skip "no qemu-system-$arch (Fedora: dnf install qemu-system-x86-core edk2-ovmf; Debian/Ubuntu: apt install qemu-system-x86 ovmf; Arch: pacman -S qemu-base edk2-ovmf)"; return 0; }
     if [ "$(layout FIRMWARE)" = uefi ]; then
@@ -1098,6 +1432,17 @@ cmd_vmboot() {
     # initramfs-tools reads no credential: the passphrase is typed, at its prompt only
     [ ${#cred[@]} -gt 0 ] && [ "$(layout ROOT_UNLOCK)" = initramfs-tools ] && askpass=1
     rm -rf "$vm"; mkdir -p "$vm"
+    # A 4096-byte-sector target (Apple NVMe): the guest must see the same, or
+    # its GPT is read at the wrong offsets.
+    local ss blk="" vmdisk
+    ss=$(blockdev --getss "$t" 2>/dev/null || echo 512); [ "$ss" = 512 ] || blk=",logical_block_size=$ss,physical_block_size=$ss"
+    # A disk image goes in as its loop device, never as the file: QEMU maps the
+    # holes of a sparse file with SEEK_HOLE/SEEK_DATA, and on btrfs, with the
+    # restore's writes still being allocated, it aborted one minute into the
+    # boot ("raw_co_block_status: Assertion `hole == file_length' failed").
+    # The block device has no holes to map.
+    vmdisk="$t"
+    if same_disk; then vmdisk=$(vm_disk_build "$vm") || die "could not build the VM's disk from the test partitions"; fi
     if [ -n "${code:-}" ]; then
         if [ -n "${vars:-}" ]; then cp "$vars" "$vm/vars.fd"; firmware=(-drive "if=pflash,format=raw,readonly=on,file=$code" -drive "if=pflash,format=raw,file=$vm/vars.fd")
         else firmware=(-bios "$code"); fi
@@ -1112,11 +1457,13 @@ cmd_vmboot() {
     mkfs.vfat -n TB-VMREPORT --offset "$first" "$img" $(( (last - first + 1) / 2 )) >/dev/null 2>&1 || die "mkfs report disk"
     sock="$vm/monitor.sock"
     say "VM boot of the test drive ($t, snapshot — nothing is written to it; no network; report disk PARTUUID $(layout REPORT_PARTUUID); up to $((secs / 60)) min) ..."
-    local machine=(); [ "$arch" = x86_64 ] && machine=(-machine q35); [ "$arch" = aarch64 ] && machine=(-machine virt)
+    local machine=() display=(-vga std); [ "$arch" = x86_64 ] && machine=(-machine q35)
+    # -vga is not an option of the virt machine ("No VGA device has been created"): a PCI GPU is
+    [ "$arch" = aarch64 ] && { machine=(-machine virt); display=(-device virtio-gpu-pci); }
     "$qemu" "${accel[@]}" "${machine[@]}" -m "$mem" -smp 2 "${firmware[@]}" "${cred[@]}" \
-        -drive "file=$t,format=raw,if=none,id=tb,snapshot=on,cache=none" -device "virtio-blk-pci,drive=tb,serial=$TB_TARGET_SERIAL,bootindex=1" \
+        -drive "file=$vmdisk,format=raw,if=none,id=tb,snapshot=on,cache=none" -device "virtio-blk-pci,drive=tb,serial=$TB_TARGET_SERIAL,bootindex=1$blk" \
         -drive "file=$img,format=raw,if=virtio" \
-        -nic none -display none -vga std -serial "file:$vm/serial.log" -monitor "unix:$sock,server,nowait" \
+        -nic none -display none "${display[@]}" -serial "file:$vm/serial.log" -monitor "unix:$sock,server,nowait" \
         > "$vm/qemu.log" 2>&1 &
     local qpid=$!
     ledger test "VM boot of the test drive (snapshot=on: its writes discarded), evidence in $vm" "nothing to revert — the drive is not written"
@@ -1163,6 +1510,7 @@ sys.exit(1 if re.sub(r"\x1b\[[0-9;=?]*[A-Za-z]", "", tail).strip() else 0)' "$vm
     vm_monitor system_powerdown
     for _ in $(seq 1 12); do kill -0 "$qpid" 2>/dev/null || break; sleep 5; done
     kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
+    same_disk && vm_disk_teardown "$vm"
     vm_report_read "$img" "$vm/boot-report" || true
     command -v magick >/dev/null 2>&1 && for f in "$vm"/screen-*.ppm; do [ -f "$f" ] && magick "$f" "${f%.ppm}.png" && rm -f "$f"; done
     # the verdict
@@ -1185,7 +1533,16 @@ sys.exit(1 if re.sub(r"\x1b\[[0-9;=?]*[A-Za-z]", "", tail).strip() else 0)' "$vm
 
 # --- collect: after the test boot ------------------------------------------------------------------------------
 cmd_collect() {
-    local rp dev mnt tmp p verdict=PASS
+    local rp dev mnt tmp p verdict=PASS vmonly=0
+    [ "${1:-}" = --vm ] && vmonly=1
+    if [ "$vmonly" = 1 ]; then
+        # The VM boot's own report, from the run's state: a disk image is never
+        # booted by this machine. The verdict says so.
+        [ "$(st_get vmboot)" = PASS ] || die "the VM boot did not pass ($(st_get vmboot || echo never ran):$(st_get vmboot-why)) — nothing to collect"
+        compgen -G "$TB_STATE/vm/boot-report/boot-report-*.md" >/dev/null || die "no VM boot report in $TB_STATE/vm/boot-report"
+        mkdir -p "$TB_STATE/boot-report"; cp -a "$TB_STATE/vm/boot-report"/. "$TB_STATE/boot-report/"
+        say "the VM boot's report copied to $TB_STATE/boot-report/"
+    else
     rp=$(layout REPORT_PARTUUID); dev=$(blkid -t "PARTUUID=$rp" -o device 2>/dev/null | head -1)
     [ -n "$dev" ] || die "report partition PARTUUID $rp not found on this machine"
     mnt=$(findmnt -no TARGET "$dev" | head -1)
@@ -1195,6 +1552,7 @@ cmd_collect() {
     cp -a "$rdir"/. "$TB_STATE/boot-report/" 2>/dev/null || { mkdir -p "$TB_STATE/boot-report"; cp -a "$rdir"/. "$TB_STATE/boot-report/"; }
     say "boot report copied to $TB_STATE/boot-report/"
     [ "$mnt" = /run/tb-report ] && umount "$mnt"
+    fi
     grep -h '\*\*' "$TB_STATE"/boot-report/boot-report-*.md | sed 's/^/    /'
     grep -qh 'FAIL' "$TB_STATE"/boot-report/boot-report-*.md && verdict=FAIL
     grep -qh '_report complete_' "$TB_STATE"/boot-report/boot-report-*.md \
@@ -1245,8 +1603,12 @@ cmd_collect() {
     python3 "$TB_DIR/compare-manifest.py" "$TB_STATE/manifest.tsv.gz" "$tmp" > "$TB_STATE/byte-comparison.md"
     unmount_target
     sed -n '1,9p' "$TB_STATE/byte-comparison.md" | sed 's/^/    /'
+    [ "$vmonly" = 1 ] && [ "$verdict" = PASS ] && verdict=PASS-VM
     st_set verdict "$verdict"; touch "$TB_STATE/finished-collect"
-    say "VERDICT: $verdict — state and evidence: $TB_STATE"
+    case "$verdict" in
+        PASS-VM) say "VERDICT: PASS-VM — restored, byte-compared and booted in a VM only; this machine never booted it (a Bare-metal restore row needs a real boot). Evidence: $TB_STATE" ;;
+        *) say "VERDICT: $verdict — state and evidence: $TB_STATE" ;;
+    esac
     say "then: sudo $0 revert   (removes the report from this machine and the test repository)"
 }
 
@@ -1255,6 +1617,27 @@ cmd_revert() {
     local keep=0 f kn rp dev mnt
     [ "${1:-}" = --keep-repo ] && keep=1
     unmount_target; say "test drive unmounted and closed"
+    if [ -n "$TB_TARGET_IMAGE" ]; then
+        local l; l=$(losetup -j "$TB_TARGET_IMAGE" 2>/dev/null | head -1 | cut -d: -f1)
+        [ -n "$l" ] && losetup -d "$l" && say "$l detached; the disk image $TB_TARGET_IMAGE is kept (delete it to free its space)"
+    fi
+    if same_disk && [ -f "$TB_STATE/plan" ]; then
+        local t ep p nums=""
+        t=$(target_disk); ep=$(esp_part)
+        for p in $(test_parts); do [ "$p" = "$ep" ] && continue; [ -b "$p" ] && nums="$nums ${p##*[!0-9]}"; done
+        if [ -n "$nums" ] && [ "${TB_DELETE_TARGET:-}" = 1 ]; then
+            for p in $(test_parts); do [ "$p" = "$ep" ] && continue; [ -b "$p" ] || continue
+                [ -z "$(findmnt -no TARGET "$p" 2>/dev/null)" ] || die "$p is mounted — not deleting"
+                wipefs -a "$p" >/dev/null 2>&1; sgdisk -d "${p##*[!0-9]}" "$t" >/dev/null || die "sgdisk -d ${p##*[!0-9]} $t"
+                partx -d -n "${p##*[!0-9]}:${p##*[!0-9]}" "$t" 2>/dev/null || true
+            done
+            udevadm settle
+            ledger test "test partitions$nums deleted from $t; the spare ESP $ep is kept" "-"
+            say "test partitions$nums deleted from $t — the spare ESP $ep (and its stub) are kept"
+        elif [ -n "$nums" ]; then
+            say "the test partitions$nums on $t are kept (the restored system is still bootable from its stub); TB_DELETE_TARGET=1 revert deletes them"
+        fi
+    fi
     for f in "$TB_STATE"/sectors.*; do
         [ -f "$f" ] || continue; kn=${f##*.}
         [ -w "/sys/block/$kn/queue/max_sectors_kb" ] && cat "$f" > "/sys/block/$kn/queue/max_sectors_kb" && say "$kn max_sectors_kb → $(cat "$f")"
@@ -1282,7 +1665,9 @@ cmd_revert() {
 cmd_status() {
     say "suite $BX_VERSION  host $TB_HOST  config $TB_CONF"
     say "backup drive: ${TB_BACKUP_SERIAL:-?} → $(disk_by_serial "$TB_BACKUP_SERIAL" || true)   mounted at $BACKUP_MOUNT: $(mountpoint -q "$BACKUP_MOUNT" && echo yes || echo no)"
-    say "test drive:   ${TB_TARGET_SERIAL:-?} → $(disk_by_serial "$TB_TARGET_SERIAL" || echo 'not connected')"
+    if same_disk; then say "test target:  this machine's disk $(bx_disk_of "$(esp_part)" 2>/dev/null || echo '?') — spare ESP PARTUUID $TB_TARGET_ESP ($(readlink -f "/dev/disk/by-partuuid/$TB_TARGET_ESP" 2>/dev/null || echo 'not found')) + its free space"
+    elif [ -n "$TB_TARGET_IMAGE" ]; then say "test drive:   disk image $TB_TARGET_IMAGE ($( [ -e "$TB_TARGET_IMAGE" ] && du -h --apparent-size "$TB_TARGET_IMAGE" | cut -f1 || echo 'not created yet'); $(disk_by_serial "$TB_TARGET_SERIAL" || echo 'not attached'))"
+    else say "test drive:   ${TB_TARGET_SERIAL:-?} → $(disk_by_serial "$TB_TARGET_SERIAL" || echo 'not connected')"; fi
     say "this machine's disks: $(host_disks | while read -r d; do printf '%s(%s) ' "$d" "$(lsblk -dno SERIAL "$d")"; done)"
     say "state: $TB_STATE $( [ -d "$TB_STATE" ] || echo '(new)')"
     [ -f "$LEDGER" ] && sed 's/^/    /' "$LEDGER"
@@ -1301,7 +1686,7 @@ case "$cmd" in
     restore)     cmd_restore ;;
     finish)      cmd_finish ;;
     vmboot)      cmd_vmboot ;;
-    collect)     cmd_collect ;;
+    collect)     cmd_collect "$@" ;;
     revert)      cmd_revert "$@" ;;
     all)         cmd_fingerprint before && cmd_prepare && cmd_format && cmd_mount && cmd_backup "${1:-functional}" && cmd_restore && cmd_finish ;;
     *)           echo "unknown command: $cmd (see --help)" >&2; exit 2 ;;

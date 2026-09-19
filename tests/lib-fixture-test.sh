@@ -233,12 +233,11 @@ expect "parttype: MBR 0xef -> esp"               esp      "$(bx_parttype_kind 0x
 expect "parttype: XBOOTLDR -> xbootldr"          xbootldr "$(bx_parttype_kind bc13c2ff-59e6-4262-a352-b275fd6f7172)"
 expect "parttype: Linux filesystem -> other"     other    "$(bx_parttype_kind 0fc63daf-8483-4772-8e79-3d69d8477de4)"
 expect "parttype: empty -> other"                other    "$(bx_parttype_kind '')"
-for f in borg-restore.sh backintime-restore.sh restore-rebuild-boot.sh; do
+for f in lib-restore.sh restore-rebuild-boot.sh; do
     grep -q 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' "$HERE/../$f" && grep -q 'bc13c2ff-59e6-4262-a352-b275fd6f7172' "$HERE/../$f" \
         && ok "$f checks the ESP and XBOOTLDR partition types" || bad "$f lacks the ESP/XBOOTLDR partition-type check"
 done
-grep -q 'EFI_MNT=/boot' "$HERE/../borg-restore.sh" && grep -q 'EFI_MNT=/boot' "$HERE/../backintime-restore.sh" \
-    && ok "restore scripts recognise /boot as the ESP" || bad "a restore script does not recognise /boot as the ESP"
+grep -q 'EFI_MNT=/boot' "$HERE/../lib-restore.sh" && ok "the restore pipeline recognises /boot as the ESP" || bad "the restore pipeline does not recognise /boot as the ESP"
 grep -q 'ESP=/boot' "$HERE/../restore-rebuild-boot.sh" && ok "boot rebuild recognises /boot as the ESP" || bad "boot rebuild does not recognise /boot as the ESP"
 expect "esp path list carries /boot/firmware" 0 "$(grep -qx '/boot/firmware' <<<"$(tr '|' '\n' <<<"$BX_ESP_PATHS")"; echo $?)"
 

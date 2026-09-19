@@ -156,7 +156,7 @@ detect_distro() {
     if [ -z "$DISTRO_FAMILY" ]; then
         err "Unknown distro: ID=${ID:-unknown} ID_LIKE=${ID_LIKE:-none}"
         err "Supported families: debian/ubuntu/mint, fedora/asahi, arch/manjaro, opensuse"
-        err "To add yours, see README.md 'Hand-rolling a fix for your setup', then run"
+        err "To add yours, see docs/TROUBLESHOOTING.md 'Hand-rolling a fix for your setup', then run"
         err "  sudo ./backup-diag.sh -o backup-diag.md"
         err "and attach that file to the issue — it is the report the fix is built from."
         exit 1
@@ -1480,7 +1480,7 @@ if (( DRY )); then
     echo -e "${CYAN}[DRY RUN]${NC} planned actions (nothing will change):"
     log "  packages: see the [deps] lines above — installed and verified before anything else"
     log "  scripts -> /usr/local/sbin: borg-backup.sh backintime-backup.sh backup-verify.sh"
-    log "             luks-header-backup.sh timeshift-backup.sh backup-diag.sh backup-common.sh lib-cmdline.sh"
+    log "             luks-header-backup.sh timeshift-backup.sh backup-diag.sh backup-common.sh lib-cmdline.sh lib-restore.sh"
     log "             borg-backup-drive-attach.sh borg-backup-drive-detach.sh + restore scripts"
     log "  config  -> /etc/backup-system.conf (mount=$BACKUP_MOUNT, schedule=$SCHEDULE_MODE)$([ -f /etc/backup-system.conf ] && echo ' [exists, kept]')"
     [ "$HAS_BTRFS" = false ] && log "  timeshift -> /etc/timeshift/timeshift.json: built-in schedule OFF (fleet retention is never time-based), rsync mode, pinned to $BACKUP_MOUNT; cron.d/timeshift-* removed"
@@ -1528,6 +1528,7 @@ fi
 # Universal library + verifier + header backup + drive-attach + snapper patch
 install -m 644 "$SCRIPT_DIR/backup-common.sh" /usr/local/sbin/backup-common.sh
 [ -f "$SCRIPT_DIR/lib-cmdline.sh" ] && install -m 644 "$SCRIPT_DIR/lib-cmdline.sh" /usr/local/sbin/lib-cmdline.sh
+[ -f "$SCRIPT_DIR/lib-restore.sh" ] && install -m 644 "$SCRIPT_DIR/lib-restore.sh" /usr/local/sbin/lib-restore.sh
 for s in backup-verify.sh luks-header-backup.sh; do
     [ -f "$SCRIPT_DIR/$s" ] && install -m 700 "$SCRIPT_DIR/$s" "/usr/local/sbin/$s"
 done
@@ -1631,9 +1632,10 @@ fi
 if bx_mount_is_live "$BACKUP_MOUNT"; then
     log "Deploying recovery scripts to backup drive..."
     mkdir -p "$BACKUP_MOUNT/recovery-scripts"
-    for f in borg-backup.sh borg-restore.sh backintime-backup.sh backintime-restore.sh restore.sh restore-rebuild-boot.sh backup-common.sh lib-cmdline.sh backup-verify.sh luks-header-backup.sh timeshift-backup.sh backup-diag.sh README.md; do
+    for f in borg-backup.sh borg-restore.sh backintime-backup.sh backintime-restore.sh restore.sh restore-rebuild-boot.sh backup-common.sh lib-cmdline.sh lib-restore.sh backup-verify.sh luks-header-backup.sh timeshift-backup.sh backup-diag.sh README.md; do
         cp "$SCRIPT_DIR/$f" "$BACKUP_MOUNT/recovery-scripts/"
     done
+    for f in RESTORE.md TROUBLESHOOTING.md; do [ -f "$SCRIPT_DIR/docs/$f" ] && cp "$SCRIPT_DIR/docs/$f" "$BACKUP_MOUNT/recovery-scripts/"; done
     chmod +x "$BACKUP_MOUNT/recovery-scripts/"*.sh
     log "  Recovery scripts at $BACKUP_MOUNT/recovery-scripts/"
 else

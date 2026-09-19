@@ -66,9 +66,24 @@ out ""; out "generated $(date -Is), kernel $(uname -r)"
 
 sec "Verdict"
 root_src=$(findmnt -no SOURCE / | sed 's/\[.*//'); root_disk=$(disk_of "$root_src"); serial=$(lsblk -dno SERIAL "$root_disk" | tr -d ' ')
+# part_of DEV — the partition under a device (a container, a volume), or the device
+part_of() { local kn sl; kn=$(basename "$(readlink -f "$1")"); while [ "$(lsblk -dno TYPE "/dev/$kn" 2>/dev/null)" != part ]; do sl=$(ls "/sys/block/$kn/slaves" 2>/dev/null | head -1); [ -n "$sl" ] || break; kn=$sl; done; echo "/dev/$kn"; }
+host_open=""; host_mounted=""
+if [ -n "${TEST_PARTUUIDS:-}" ]; then
+    # The test target shares the source machine's disk (same-disk mode): identity
+    # is the partition under the root, and "the source machine's" means its
+    # partitions, not its disk.
+    root_part=$(part_of "$root_src"); root_pu=$(lsblk -dno PARTUUID "$root_part" 2>/dev/null)
+    out "- root: \`$root_src\` on partition \`$root_part\` PARTUUID \`$root_pu\` (disk \`$root_disk\`, serial \`$serial\`)"
+    case " $TEST_PARTUUIDS " in *" $root_pu "*) out "- **PASS: running from the restored test partitions**" ;; *) out "- **FAIL: not running from a test partition (root PARTUUID $root_pu; test partitions: $TEST_PARTUUIDS)**" ;; esac
+    for pu in ${HOST_PARTUUIDS:-}; do
+        d=$(blkid -t "PARTUUID=$pu" -o device 2>/dev/null | head -1); [ -n "$d" ] || continue
+        host_open="$host_open$(lsblk -rnpo NAME,TYPE "$d" | awk '$2=="crypt"{printf "%s ", $1}')"
+        host_mounted="$host_mounted$(findmnt -rno TARGET,SOURCE | awk -v d="$d" 'index($2, d)==1{printf "%s ", $1}')"
+    done
+else
 out "- root: \`$root_src\` on \`$root_disk\` serial \`$serial\` ($(lsblk -dno TRAN "$root_disk"))"
 if [ "$serial" = "$TEST_SERIAL" ] || udevadm info -q property -n "$root_disk" 2>/dev/null | grep -qxF "ID_SERIAL_SHORT=$TEST_SERIAL"; then out "- **PASS: running from the restored test drive**"; else out "- **FAIL: not running from the test drive (serial $TEST_SERIAL)**"; fi
-host_open=""; host_mounted=""
 for s in $HOST_DISK_SERIALS; do
     d=$(lsblk -dnpo NAME,SERIAL | awk -v s="$s" '$2==s{print $1}')
     [ -n "$d" ] || d=$(for x in $(lsblk -dnpo NAME); do udevadm info -q property -n "$x" 2>/dev/null | grep -qxF "ID_SERIAL_SHORT=$s" && echo "$x"; done)
@@ -76,6 +91,7 @@ for s in $HOST_DISK_SERIALS; do
     host_open="$host_open$(lsblk -rnpo NAME,TYPE "$d" | awk '$2=="crypt"{printf "%s ", $1}')"
     host_mounted="$host_mounted$(findmnt -rno TARGET,SOURCE | awk -v d="$d" 'index($2, d)==1{printf "%s ", $1}')"
 done
+fi
 [ -z "$host_open" ] && out "- **PASS: no container on the source machine's disks is open**" || out "- **FAIL: source-machine containers open: $host_open**"
 [ -z "$host_mounted" ] && out "- **PASS: nothing from the source machine's disks is mounted**" || out "- **FAIL: source-machine mounts: $host_mounted**"
 # Secure Boot refusing a module the source machine loads (nvidia, zfs signed

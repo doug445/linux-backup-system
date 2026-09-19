@@ -40,7 +40,7 @@
 # shellcheck disable=SC2034  # read by every script that sources this file
 # Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
 [ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
-BX_VERSION="4.0.5"
+BX_VERSION="4.1.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -692,7 +692,7 @@ bx_drive_gone_hint() {
     fi
     if [ "$(id -u)" -eq 0 ] && command -v journalctl >/dev/null 2>&1; then
         resets=$(journalctl -k -b --since "-6h" --no-pager -o cat 2>/dev/null | grep -cE 'uas_zap_pending|USB disconnect.*|reset (Super|high)Speed USB device' || true)
-        [ "${resets:-0}" -gt 0 ] && echo "kernel log: $resets USB disconnect/reset line(s) in the last 6 h — if the bridge resets under sustained writes, see README 'The drive dropped in the middle of a backup'"
+        [ "${resets:-0}" -gt 0 ] && echo "kernel log: $resets USB disconnect/reset line(s) in the last 6 h — if the bridge resets under sustained writes, see docs/TROUBLESHOOTING.md 'The drive dropped in the middle of a backup'"
     fi
     return 0
 }

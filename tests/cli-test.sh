@@ -95,7 +95,7 @@ BACKUP_KEYFILE="/etc/luks-keys/test.key"
 CONF
 BX_CONFIG="$T/conf" bash "$ROOT/backup-diag.sh" -o "$T/r.md" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && ok "exit 0" || bad "exit $rc"
-for h in '# linux-backup-system troubleshooting report' '## Host' '## Tool inventory' '## Storage layout' '## Boot layout' \
+for h in '# linux-backup-system troubleshooting report' '## Host' '## Setup fingerprint' '## Tool inventory' '## Storage layout' '## Boot layout' \
          '## Suite configuration' "## What the suite's own detection reports" '## Units, timers and udev' '## Logs' '## Restore readiness'; do
     grep -qF "$h" "$T/r.md" && ok "section: $h" || bad "missing section: $h"
 done
@@ -104,6 +104,12 @@ grep -q 'deadbeef-1111-2222' "$T/r.md" && bad "full UUID leaked" || ok "full UUI
 grep -qE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$T/r.md" && bad "some full UUID leaked" || ok "no full UUID anywhere"
 grep -q 'contents never included\|cannot check without root\|does NOT exist' "$T/r.md" && ok "keyfile reported by path only" || bad "keyfile line missing"
 grep -q 'distro family:' "$T/r.md" && ok "library detection block present" || bad "library detection block missing"
+# The fingerprint: the facts a new setup is added from, gathered without assuming any of them.
+for k in 'os-release:' 'package managers:' 'root:' 'real filesystems:' 'kernel supports:' 'sector sizes:' 'loader configs:' 'initramfs tools:' 'snapshot means:'; do
+    grep -qF "$k" "$T/r.md" && ok "fingerprint carries $k" || bad "fingerprint lacks $k"
+done
+grep -q 'filesystem tooling' "$T/r.md" && ok "per-filesystem tooling listed" || bad "filesystem tooling section missing"
+grep -q 'findmnt -rno TARGET,SOURCE,FSTYPE,OPTIONS --real' "$ROOT/backup-diag.sh" && ok "every real filesystem is listed, not a fixed type list" || bad "findmnt still filters by a type list — an unknown root fs would be left out of its own report"
 grep -q 'restore-rebuild-boot.sh --dry-run' "$T/r.md" && ok "boot-chain dry run embedded" || bad "boot-chain dry run missing"
 BX_CONFIG="$T/conf" bash "$ROOT/backup-diag.sh" --no-redact -o "$T/n.md" >/dev/null 2>&1
 grep -q 'deadbeef-1111-2222-3333-444455556666' "$T/n.md" && ok "--no-redact keeps the UUID whole" || bad "--no-redact still redacted"
@@ -288,14 +294,39 @@ grep -q '^SAY .*no longer there.*a.efi' <<<"$r" && ! grep -q '^WARN' <<<"$r" && 
 r=$(DRY=""; say() { echo "SAY $*"; }; warn() { echo "WARN $*"; }; sbctl() { printf 'failed signing /boot/EFI/Linux/a.efi: /boot/EFI/Linux/a.efi does not exist\nfailed signing /efi/x.efi: permission denied\n'; return 1; }; eval "$sb")
 grep -q '^WARN sbctl sign-all reported errors' <<<"$r" && ok "sbctl: a real signing failure still warns" || bad "sbctl real failure: $r"
 
-for r in '/_entry_for_mount() {/,/^    }/p' '/^_crypt_under() {/,/^}/p' '/^release_crypttab() {/,/^fi$/p'; do
-    a=$(sed -n "$r" "$ROOT/borg-restore.sh"); b=$(sed -n "$r" "$ROOT/backintime-restore.sh")
-    [ -n "$a" ] && [ "$a" = "$b" ] && ok "restore scripts share the crypttab pairing code: ${r%%/,*}/" || bad "borg and Back In Time restores differ in ${r%%/,*}/"
-done
+# One restore pipeline: both method scripts source lib-restore.sh and run its
+# stages in order — the two copies of it once drifted apart.
 for f in borg-restore.sh backintime-restore.sh; do
-    grep -q 'mount -o remount,bind,ro "$TARGET/sys/firmware/efi/efivars"' "$ROOT/$f" && grep -q 'env RESTORE_NO_NVRAM="$RESTORE_NO_NVRAM"' "$ROOT/$f" \
-        && ok "$f: efivars read-only in the chroot and the mode passed in when run from an installed system" || bad "$f: NVRAM guard missing"
+    grep -q '\. "$_l"' "$ROOT/$f" && grep -q 'lib-restore.sh' "$ROOT/$f" && ok "$f sources lib-restore.sh" || bad "$f does not source lib-restore.sh"
+    for fn in rx_check_target rx_check_ecryptfs rx_detect_ids rx_fix_fstab rx_fix_crypttab rx_rewrite_cmdlines rx_swapfiles_selinux rx_chroot_rebuild rx_verify rx_finish; do
+        grep -qE "^$fn( |\$)" "$ROOT/$f" || bad "$f never runs $fn"
+    done
+    a=$(grep -oE '^rx_[a-z_]+' "$ROOT/$f" | tr '\n' ' ')
+    expect "$f runs the stages in the library's order" "rx_check_target rx_log_state rx_check_ecryptfs rx_detect_ids rx_fix_fstab rx_fix_crypttab rx_rewrite_cmdlines rx_swapfiles_selinux rx_chroot_rebuild rx_verify rx_finish " "$a"
 done
+for fn in rx_check_target rx_log_state rx_check_ecryptfs rx_detect_ids rx_fix_fstab rx_fix_crypttab rx_rewrite_cmdlines rx_swapfiles_selinux rx_chroot_rebuild rx_verify rx_finish; do
+    grep -q "^$fn() {" "$ROOT/lib-restore.sh" && ok "lib-restore.sh defines $fn" || bad "lib-restore.sh lacks $fn"
+done
+grep -q 'mount -o remount,bind,ro "$TARGET/sys/firmware/efi/efivars"' "$ROOT/lib-restore.sh" && grep -q 'env RESTORE_NO_NVRAM="$RESTORE_NO_NVRAM"' "$ROOT/lib-restore.sh" \
+    && ok "lib-restore.sh: efivars read-only in the chroot and the mode passed in when run from an installed system" || bad "lib-restore.sh: NVRAM guard missing"
+grep -q 'declare -gA LUKS_MAP LUKS_DEV' "$ROOT/lib-restore.sh" && grep -q 'declare -gA OPEN_AS' "$ROOT/lib-restore.sh" && ok "lib-restore.sh: the maps stages share are global (declare -g), not function-local" || bad "lib-restore.sh: an associative array is local to one stage"
+
+echo "== boot rebuild: the ESP vendor directory is what holds the loaders, not os-release's ID"
+vd=$(sed -n '/# --- ESP vendor directory ---/,/# --- end ESP vendor directory ---/p' "$ROOT/restore-rebuild-boot.sh")
+[ -n "$vd" ] || bad "vendor-directory block not found in restore-rebuild-boot.sh"
+E="$T/esp"; mkdir -p "$E/EFI/fedora" "$E/EFI/BOOT"; : > "$E/EFI/fedora/shimaa64.efi"; : > "$E/EFI/fedora/grubaa64.efi"; : > "$E/EFI/BOOT/BOOTAA64.EFI"; : > "$E/EFI/BOOT/grubaa64.efi"
+# shellcheck disable=SC2034
+r=$(say() { echo "SAY $*"; }; ea=aa64; edir="$E"; bid=fedora-asahi-remix; ID_LIKE=fedora; eval "$vd"; echo "BID=$bid")
+expect "Asahi: ID=fedora-asahi-remix resolves to EFI/fedora through ID_LIKE" "BID=fedora" "$(grep '^BID=' <<<"$r")"
+# shellcheck disable=SC2034
+r=$(say() { :; }; ea=aa64; edir="$E"; bid=fedora-asahi-remix; ID_LIKE=""; eval "$vd"; echo "BID=$bid")
+expect "no ID_LIKE: the directory holding a shim wins, never EFI/BOOT" "BID=fedora" "$(grep '^BID=' <<<"$r")"
+# shellcheck disable=SC2034
+r=$(say() { :; }; ea=aa64; edir="$E"; bid=fedora; ID_LIKE=""; eval "$vd"; echo "BID=$bid")
+expect "ID naming a real vendor directory is kept" "BID=fedora" "$(grep '^BID=' <<<"$r")"
+# shellcheck disable=SC2034  # read by the eval'd block
+r=$(say() { :; }; ea=x64; edir="$E"; bid=debian; ID_LIKE=""; eval "$vd"; echo "BID=$bid")
+expect "nothing for this arch on the ESP: ID kept as it was" "BID=debian" "$(grep '^BID=' <<<"$r")"
 
 echo "== any shell: bash shebang via env, re-exec guard, library guard, helpers that parse in bash, zsh and fish"
 bad_sb=$(for f in $(cd "$ROOT" && git ls-files '*.sh' 2>/dev/null || ls ./*.sh tests/*.sh); do head -1 "$ROOT/$f" | grep -qx '#!/usr/bin/env bash' || echo "$f"; done)

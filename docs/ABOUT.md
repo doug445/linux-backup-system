@@ -74,7 +74,7 @@ detection gap to close: one wrong line in the troubleshooting report, one
 function to fix, one fixture to add.
 
 One maintainer cannot own every distro, filesystem and boot layout, which is
-why the README's status tables are honest about what has been confirmed on
+why the status tables in [STATUS.md](STATUS.md) are honest about what has been confirmed on
 metal and why the project asks for setup reports and patches. The gap that
 most needs other hands is the package map: the suite knows `apt`, `dnf`,
 `pacman` and `zypper`, and a Slackware, Gentoo, Turbolinux, Alpine, Void,
@@ -167,7 +167,7 @@ The library and every command line are exercised in CI on x86_64 and aarch64
 for every push, including `deploy.sh --dry-run` as root with proof that it
 installed nothing and the troubleshooting report with proof that it redacted.
 What CI cannot prove is that a real machine of *your* kind backs up and
-verifies — the README's status tables say which ones have.
+verifies — the status tables in [STATUS.md](STATUS.md) say which ones have.
 
 Read [`SECURITY.md`](../SECURITY.md) before filing anything, and especially
 before attaching diagnostics: a backup system's artefacts include the keys to
