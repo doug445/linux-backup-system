@@ -165,6 +165,69 @@ runsh "virtualisation" 'systemd-detect-virt 2>/dev/null || echo "systemd-detect-
 # module breaks btrfs replicas ("lsetxattr ... Invalid argument").
 runsh "SELinux" 'if command -v getenforce >/dev/null 2>&1; then getenforce; sestatus 2>/dev/null | grep -E "policy name|Current mode|Mode from config"; else echo "not installed"; fi'
 
+# ---------------------------------------------------------------------------
+# One screen that says what is NEW about this machine. Every fact the package
+# map, the snapshot-engine choice, the source list and the boot rebuild key on,
+# gathered without assuming any of them — so a distro, filesystem or boot
+# layout the suite has never met is described well enough to be added from
+# this file alone. Read-only, like everything else here.
+section "Setup fingerprint — for a distro, filesystem or boot layout the suite does not know"
+out "The decisions the suite makes, and the raw facts each one is made from. For a"
+out "new setup, this section plus *What the suite's own detection reports* below is"
+out "what a fix is written from; the maintainer needs nothing else from the machine."
+out ""
+runsh "fingerprint" '
+    . /etc/os-release 2>/dev/null
+    echo "os-release:       ID=${ID:-?} ID_LIKE=${ID_LIKE:-} VERSION_ID=${VERSION_ID:-} VARIANT_ID=${VARIANT_ID:-}"
+    echo "arch / kernel:    $(uname -m) $(uname -r)   page size $(getconf PAGESIZE 2>/dev/null || echo ?) bytes"
+    if [ -d /sys/firmware/efi ]; then fw=UEFI; else fw=BIOS; fi
+    [ -r /proc/device-tree/chosen/u-boot,version ] && fw="$fw via U-Boot $(tr -d "\0" < /proc/device-tree/chosen/u-boot,version 2>/dev/null)"
+    [ -r /proc/device-tree/chosen/asahi,efi-system-partition ] && fw="$fw (Asahi: stub names ESP PARTUUID $(tr -d "\0" < /proc/device-tree/chosen/asahi,efi-system-partition | cut -c1-8)…)"
+    echo "firmware:         $fw$( [ -r /sys/class/dmi/id/sys_vendor ] && printf ";  %s %s" "$(cat /sys/class/dmi/id/sys_vendor)" "$(cat /sys/class/dmi/id/product_name 2>/dev/null)"; [ -r /proc/device-tree/model ] && printf ";  %s" "$(tr -d "\0" < /proc/device-tree/model)")"
+    pm=""; for p in apt-get dnf yum zypper pacman apk xbps-install emerge slackpkg sbopkg nix-env eopkg rpm-ostree transactional-update pkg urpmi swupd; do command -v "$p" >/dev/null 2>&1 && pm="$pm $p"; done
+    echo "package managers: ${pm:- none of the known ones found}"
+    rs=$(findmnt -no SOURCE / | sed "s/\[.*//"); echo "root:             $(findmnt -no FSTYPE /) on $rs  options=$(findmnt -no OPTIONS / | cut -c1-80)"
+    echo "root stack:       $(lsblk -sno TYPE "$rs" 2>/dev/null | tr "\n" ">" | sed "s/>$//")   (each layer under the root, top down)"
+    echo "real filesystems: $(findmnt -rno FSTYPE --real | sort | uniq -c | awk "{printf \"%s x%s  \", \$2, \$1}")"
+    echo "kernel supports:  $(grep -vE "nodev" /proc/filesystems | awk "{print \$1}" | tr "\n" " ")"
+    echo "encryption:       $(lsblk -rno TYPE | grep -c "^crypt$") open dm-crypt device(s), $(lsblk -rno FSTYPE | grep -c crypto_LUKS) LUKS container(s)"
+    echo "volume mgmt:      lvm=$(lsblk -rno TYPE | grep -c "^lvm$") md-raid=$(lsblk -rno TYPE | grep -c "^raid") zfs=$(command -v zpool >/dev/null 2>&1 && zpool list -H 2>/dev/null | wc -l || echo 0) bcachefs=$(findmnt -rno FSTYPE --real | grep -c bcachefs)"
+    echo "sector sizes:     $(lsblk -dno NAME,LOG-SEC,PHY-SEC 2>/dev/null | awk "{printf \"%s=%s/%s  \", \$1, \$2, \$3}")   (logical/physical bytes per disk)"
+    for e in /boot/efi /efi /boot; do [ -d "$e/EFI" ] || continue; echo "ESP:              $e  vendor dirs: $(ls "$e/EFI" 2>/dev/null | tr "\n" " ")$( [ -f "$e/ubootefi.var" ] && echo " — ubootefi.var present (U-Boot keeps its EFI variables in this file)")"; break; done
+    ld=""; for f in /boot/grub2/grub.cfg:GRUB /boot/grub/grub.cfg:GRUB /boot/loader/loader.conf:systemd-boot /efi/loader/loader.conf:systemd-boot /boot/efi/loader/loader.conf:systemd-boot /boot/extlinux/extlinux.conf:extlinux /boot/syslinux/syslinux.cfg:syslinux /boot/refind_linux.conf:rEFInd /boot/limine.conf:Limine /boot/efi/limine.conf:Limine /boot/firmware/config.txt:raspberry-pi-firmware /boot/config.txt:raspberry-pi-firmware; do [ -f "${f%%:*}" ] && ld="$ld ${f##*:}(${f%%:*})"; done
+    echo "loader configs:  ${ld:- none of the known ones found}"
+    uk=0; for d in /boot/EFI/Linux /efi/EFI/Linux /boot/efi/EFI/Linux; do [ -d "$d" ] && uk=$((uk + $(ls "$d" 2>/dev/null | grep -ci "\.efi$"))); done
+    ig=""; for t in dracut mkinitcpio update-initramfs booster kernel-install ukify; do command -v "$t" >/dev/null 2>&1 && ig="$ig $t"; done
+    echo "initramfs tools: ${ig:- none found}   unified kernel images: $uk   kernel-install layout: $(grep -hs "^layout=" /etc/kernel/install.conf /usr/lib/kernel/install.conf 2>/dev/null | tail -1 | cut -d= -f2)"
+    sn=""; command -v snapper >/dev/null 2>&1 && sn="$sn snapper($(ls /etc/snapper/configs 2>/dev/null | tr "\n" "," | sed "s/,$//"))"; command -v timeshift >/dev/null 2>&1 && sn="$sn timeshift"; [ "$(findmnt -no FSTYPE /)" = btrfs ] && sn="$sn btrfs-subvolumes($(btrfs subvolume list / 2>/dev/null | wc -l))"; command -v zfs >/dev/null 2>&1 && sn="$sn zfs-datasets($(zfs list -H 2>/dev/null | wc -l))"
+    echo "snapshot means:  ${sn:- none found (no snapper, timeshift, btrfs root or zfs)}"
+    echo "init:             $(ps -o comm= -p 1 2>/dev/null)   SELinux: $(getenforce 2>/dev/null || echo n/a)   AppArmor: $( [ -d /sys/kernel/security/apparmor ] && echo present || echo no)"
+'
+# The tools each filesystem needs for a backup layer and a restore — present
+# or not, with versions. A filesystem with no mkfs/fsck here cannot be laid out
+# by the restore test bed, and a snapshot layer for it has to come from
+# somewhere else.
+runsh "filesystem tooling (present / version)" '
+    for fs in $(findmnt -rno FSTYPE --real | sort -u); do
+        printf "%-10s" "$fs:"
+        for t in "mkfs.$fs" "fsck.$fs"; do command -v "$t" >/dev/null 2>&1 && printf " %s" "$t" || printf " (no %s)" "$t"; done
+        case "$fs" in
+            btrfs) command -v btrfs >/dev/null 2>&1 && printf "  btrfs-progs %s" "$(btrfs --version 2>/dev/null | head -1 | awk "{print \$NF}")" ;;
+            xfs)   command -v xfs_info >/dev/null 2>&1 && printf "  xfsprogs %s" "$(xfs_info -V 2>/dev/null | head -1 | awk "{print \$NF}")" ;;
+            ext[234]) command -v tune2fs >/dev/null 2>&1 && printf "  e2fsprogs %s" "$(tune2fs 2>&1 | head -1 | awk "{print \$2}")" ;;
+            f2fs)  command -v dump.f2fs >/dev/null 2>&1 && printf "  f2fs-tools" ;;
+            zfs)   command -v zfs >/dev/null 2>&1 && printf "  zfs %s" "$(zfs version 2>/dev/null | head -1)" ;;
+            bcachefs) command -v bcachefs >/dev/null 2>&1 && printf "  bcachefs-tools %s" "$(bcachefs version 2>/dev/null | head -1)" ;;
+            nilfs2) command -v nilfs-tune >/dev/null 2>&1 && printf "  nilfs-utils" ;;
+            jfs)   command -v jfs_tune >/dev/null 2>&1 && printf "  jfsutils" ;;
+        esac
+        echo
+    done
+    for t in lvm mdadm dmsetup cryptsetup; do command -v "$t" >/dev/null 2>&1 && printf "%s %s\n" "$t" "$("$t" --version 2>/dev/null | head -1)" || echo "$t: not installed"; done
+    true'
+runsh "block devices with geometry and partition types" 'lsblk -o NAME,TYPE,FSTYPE,FSVER,PARTTYPENAME,SIZE,LOG-SEC,PHY-SEC,ROTA,TRAN,MOUNTPOINTS 2>/dev/null || lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINTS'
+runsh "device-mapper tables (target types only)" 'command -v dmsetup >/dev/null 2>&1 && dmsetup table 2>/dev/null | awk "{print \$1, \$4}" || echo "dmsetup not installed"; true'
+
 section "Tool inventory"
 out '```'
 ver borg --version
@@ -191,7 +254,9 @@ out '```'
 # ---------------------------------------------------------------------------
 section "Storage layout"
 run "lsblk" lsblk -o NAME,TYPE,FSTYPE,SIZE,MOUNTPOINTS,LABEL,UUID,TRAN,HOTPLUG,RM
-run "findmnt (real filesystems)" findmnt -rno TARGET,SOURCE,FSTYPE,OPTIONS -t ext4,ext3,ext2,btrfs,xfs,f2fs,vfat,exfat,ntfs,zfs,bcachefs
+# --real, not a fixed list of types: a filesystem this suite has never seen is
+# exactly the one the report exists for, and a type filter left it out.
+run "findmnt (every real filesystem)" findmnt -rno TARGET,SOURCE,FSTYPE,OPTIONS --real
 # Serial values are not printed; what matters is whether lsblk and udev agree.
 # Behind some USB bridges lsblk reports the bridge's SCSI serial (all zeros)
 # while the drive's own serial is only in udev's ID_SERIAL_SHORT — the restore
@@ -250,7 +315,7 @@ if [ $IS_ROOT = 1 ] && mountpoint -q "${BACKUP_MOUNT:-/mnt/backup}" 2>/dev/null;
     # directory and are pruned by label, so two hosts on one drive collide.
     runsh "other machines' data on the backup drive (names only)" 'm="${BACKUP_MOUNT:-/mnt/backup}"; echo "Back In Time hosts: $(ls "$m/backintime/backintime" 2>/dev/null | tr "\n" " ")"; echo "btrfs replicas per label: $(ls "$m/snapshots" 2>/dev/null | sed -E "s/_[0-9]{8}_[0-9]{6}$//" | sort | uniq -c | awk "{printf \"%s=%s \", \$2, \$1}")"; echo "test bed repositories: $(ls -d "$m"/borg-testbed-* 2>/dev/null | xargs -r -n1 basename | tr "\n" " ")"; echo "this host: $(hostname)"; true'
 fi
-runsh "deployed scripts" 'for f in /usr/local/sbin/{backup-common,lib-cmdline,borg-backup,backintime-backup,timeshift-backup,backup-verify,luks-header-backup,restore-rebuild-boot,borg-backup-drive-attach,borg-backup-drive-detach,backup-diag}.sh /usr/local/bin/backup-tray; do [ -e "$f" ] && printf "%s  %s  %s\n" "$(stat -c "%a %U" "$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-12)" "$f"; done; true'
+runsh "deployed scripts" 'for f in /usr/local/sbin/{backup-common,lib-cmdline,lib-restore,borg-backup,backintime-backup,timeshift-backup,backup-verify,luks-header-backup,restore-rebuild-boot,borg-backup-drive-attach,borg-backup-drive-detach,backup-diag}.sh /usr/local/bin/backup-tray; do [ -e "$f" ] && printf "%s  %s  %s\n" "$(stat -c "%a %U" "$f")" "$(sha256sum "$f" 2>/dev/null | cut -c1-12)" "$f"; done; true'
 
 # ---------------------------------------------------------------------------
 section "What the suite's own detection reports"

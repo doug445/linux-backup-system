@@ -490,6 +490,29 @@ if [ "$USES_GRUB" = true ]; then
     # Reinstall the bootloader
     if [ "$IS_EFI" = true ]; then
         bid="${ID:-linux}"; edir="${ESP:-/boot/efi}"
+        # --- ESP vendor directory ---
+        # os-release's ID names the ESP's vendor directory on most distros — not
+        # on all: Fedora Asahi Remix has ID=fedora-asahi-remix and ships its
+        # loaders in EFI/fedora, so the shim branch below was never taken and
+        # the removable path got no GRUB beside its shim (found by the restore
+        # test bed on an M2 Max). The directory holding this arch's shim or GRUB
+        # wins: ID, then each ID_LIKE token, then whichever has a shim, then one
+        # with a GRUB image; EFI/BOOT is the removable path, never a vendor.
+        if [ -n "$ea" ] && [ ! -f "$edir/EFI/$bid/shim$ea.efi" ] && [ ! -f "$edir/EFI/$bid/grub$ea.efi" ]; then
+            _vd=""
+            for _c in ${ID_LIKE:-}; do
+                if [ -f "$edir/EFI/$_c/shim$ea.efi" ] || [ -f "$edir/EFI/$_c/grub$ea.efi" ]; then _vd=$_c; break; fi
+            done
+            for _want in "shim$ea.efi" "grub$ea.efi"; do
+                [ -n "$_vd" ] && break
+                for _c in "$edir"/EFI/*/; do
+                    case "$(basename "$_c")" in [Bb][Oo][Oo][Tt]) continue ;; esac
+                    [ -f "$_c$_want" ] && { _vd=$(basename "$_c"); break; }
+                done
+            done
+            if [ -n "$_vd" ]; then say "ESP vendor directory: EFI/$_vd — os-release ID '$bid' has no loader directory on this ESP"; bid=$_vd; fi
+        fi
+        # --- end ESP vendor directory ---
         # A core image built ON the source machine (grub-install, grub-mkimage -c)
         # carries its own early config naming that machine's disk: `cryptomount
         # -u <id>`, a `(cryptouuid/<id>)` prefix, `search --fs-uuid <id>`. A

@@ -188,8 +188,9 @@ cl_ref_exists PARTUUID "$NP" && ok "ref_exists: PARTUUID looked up as a partuuid
 cl_ref_exists UUID "$NP" && bad "ref_exists: a partuuid value passed as a UUID" || ok "ref_exists: kind matters"
 cl_ref_exists PATH /swapfile && ok "ref_exists: paths are not checked" || bad "ref_exists: PATH failed"
 unset CL_ID_EXISTS_CMD
-for rs in borg-restore.sh backintime-restore.sh; do
-    # The restore scripts' own fstab step, run against a synthetic fstab with blkid stubbed.
+# shellcheck disable=SC2043  # the one file that holds the pipeline now
+for rs in lib-restore.sh; do
+    # The restore pipeline's own fstab step, run against a synthetic fstab with blkid stubbed.
     fn=$(sed -n '/^fix_fstab_ref() {/,/^}/p' "$HERE/../$rs")
     [ -n "$fn" ] || { bad "$rs: fix_fstab_ref not found"; continue; }
     (
@@ -220,7 +221,8 @@ for rs in borg-restore.sh backintime-restore.sh; do
     expect "$rs: swapfile left alone" "/swapfile none swap defaults 0 0" "$(grep '^/swapfile' "$F/rs.out")"
     grep -q 'WARN .*/dev/sda9' "$F/rs.out" && ok "$rs: kernel device name in fstab is warned about" || bad "$rs: no warning for /dev/sda9"
 done
-for rs in borg-restore.sh backintime-restore.sh; do
+# shellcheck disable=SC2043
+for rs in lib-restore.sh; do
     # The SELinux relabel step, run against synthetic restored systems.
     blk=$(sed -n '/^SELINUX_MODE=\$(/,/^esac/p' "$HERE/../$rs")
     [ -n "$blk" ] || { bad "$rs: SELinux relabel step not found"; continue; }
@@ -242,7 +244,7 @@ ln=$(grep -m1 'rel="\\\\' "$RB")
 # shellcheck disable=SC2034,SC2154  # ESP/loader are read and rel is set by the eval'd line
 out=$(ESP=/boot/efi; loader=/boot/efi/EFI/limine/BOOTX64.EFI; eval "${ln#"${ln%%[![:space:]]*}"}"; printf '%s' "$rel")
 expect "efibootmgr loader path is backslashed and ESP-relative" '\EFI\limine\BOOTX64.EFI' "$out"
-grep -qE "grep -oP 'UUID=\\\\K" "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script still extracts ids with a substring UUID= match" || ok "restore scripts parse fstab/crypttab by field"
+grep -qE "grep -oP 'UUID=\\\\K" "$HERE/../lib-restore.sh" "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script still extracts ids with a substring UUID= match" || ok "restore scripts parse fstab/crypttab by field"
 echo "== same-machine restore: the root container, the swapfile resume, references off the target disk"
 Z="$T/zen"
 OLDC=da69add4-1121-4c19-bf51-1307a674abeb; OLDFS=d5a89928-3d28-48ba-aca9-c32318eda426
@@ -389,7 +391,7 @@ mk "$T/xe/etc/kernel/cmdline" "root=/dev/mapper/root resume=UUID=$NR resume_offs
 expect "without extra ids the root fs is reported undeclared" "uuid $NR" "$(cl_carrier_mismatches "$T/xe" | cut -f3,4 | tr '\t' ' ')"
 expect "CL_EXTRA_EXPECTED declares it (uppercase given)" "" "$(CL_EXTRA_EXPECTED="${NR^^}" cl_carrier_mismatches "$T/xe")"
 
-grep -qE '\(\([A-Z_]+\+\+\)\)' "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script uses ((X++)) under set -e (exits when X is 0)" || ok "no ((X++)) under set -e in the restore scripts"
+grep -qE '\(\([A-Z_]+\+\+\)\)' "$HERE/../lib-restore.sh" "$HERE/../borg-restore.sh" "$HERE/../backintime-restore.sh" && bad "a restore script uses ((X++)) under set -e (exits when X is 0)" || ok "no ((X++)) under set -e in the restore scripts"
 
 echo
 echo "cmdline-fixture-test: $pass passed, $fail failed"

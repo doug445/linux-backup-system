@@ -7,13 +7,15 @@ body:
       value: |
         The suite detects everything from the machine it runs on; a setup it
         has never seen produces a wrong decision somewhere in that detection.
-        The troubleshooting report shows exactly where:
+        The troubleshooting report shows exactly where — its *Setup fingerprint*
+        section is written for exactly this: the facts a new distro, filesystem
+        or boot layout is added from, with nothing else needed from you:
 
         ```
         sudo ./backup-diag.sh -o backup-diag.md
         ```
 
-        Attach it. If you have already hand-rolled a fix (see the README
+        Attach it. If you have already hand-rolled a fix (see docs/TROUBLESHOOTING.md
         section *Hand-rolling a fix for your setup and distro*), attach the
         patch too. **A working patch that passes `tests/run-all.sh` gets your
         name on the copyright line of `LICENSE` next to mine**, credit in the

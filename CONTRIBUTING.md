@@ -1,6 +1,6 @@
 # Contributing to linux-backup-system
 
-**linux-backup-system 4.0.5**
+**linux-backup-system 4.1.0**
 
 This suite runs as root on every machine it is deployed to and is the last
 line between a dead disk and a rebuilt one. Every added code path is a path
@@ -25,11 +25,11 @@ distro, root filesystem and boot layout the suite detects the right things,
 writes a real backup, and that `backup-verify.sh` then agrees a restore would
 boot.
 
-**Unless a setup is ✅ in the README's *Bare-metal restore* column, the suite is
+**Unless a setup is ✅ in the *Bare-metal restore* column of [docs/STATUS.md](docs/STATUS.md#tested--untested), the suite is
 for testing only on it — not production.** The restore test bed
-(`testbed/testbed.sh`, see the README) is how a row turns green.
+(`testbed/testbed.sh`, see [docs/STATUS.md](docs/STATUS.md#the-restore-test-bed)) is how a row turns green.
 
-Every ❌ row in the README's status tables is a setup the code claims to handle
+Every ❌ row in the status tables ([docs/STATUS.md](docs/STATUS.md#tested--untested)) is a setup the code claims to handle
 and that has not been confirmed on metal by me; a ⚠️ row is one undergoing
 testing now. **Each row turns ⚠️ while it is being tested and ✅ once it is
 verified on real hardware.** A report that it worked is
@@ -65,7 +65,7 @@ have.
 These can be restored bare-metal in principle — the boot code lives in files
 — but the suite does not know how yet, and a restore today would leave the
 machine unbootable or broken. Each is a good first patch for someone who runs
-one. The README's *Hand-rolling a fix* section says where each decision lives.
+one. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#hand-rolling-a-fix-for-your-setup-and-distro) says where each decision lives.
 
 | Setup | Why a restore fails today | What a patch needs |
 |---|---|---|
@@ -113,7 +113,10 @@ Open an issue with the **New Linux setup** template, titled
 3. anything you had to fix by hand — **that is the actual finding.**
 4. for a **Bare-metal restore** row: a restore test bed run on a spare drive —
    `sudo TB_WIPE=<serial> testbed/testbed.sh all` (its `finish` boots the test
-   drive in a VM first — install QEMU and OVMF/AAVMF for that), boot the test drive,
+   drive in a VM first — install QEMU and OVMF/AAVMF for that; with no spare
+   drive, `TB_TARGET_IMAGE=<file>` on the backup drive runs the same test onto
+   a disk image, and its `collect --vm` verdict `PASS-VM` is welcome evidence
+   for the restore — but the row stays ⚠️ until a drive has really booted), boot the test drive,
    `sudo testbed/testbed.sh collect` — and from its state directory
    (`/var/lib/linux-backup-testbed/<host>-<stamp>/`) attach `LEDGER.md`,
    `verdict`, `vmboot`, `byte-comparison.md`, `boot-report/boot-report-*.md` and
@@ -167,9 +170,8 @@ The tray has it too: *Troubleshooting → Generate troubleshooting report*.
 
 If the section headed *"What the suite's own detection reports"* disagrees
 with the raw output above it in the same file, **that disagreement is the
-bug**, and it is the single most useful thing you can send. The README section
-*Hand-rolling a fix for your setup and distro* maps every line of that section
-to the function that produced it.
+bug**, and it is the single most useful thing you can send. [*Hand-rolling a fix for your setup and distro*](docs/TROUBLESHOOTING.md#hand-rolling-a-fix-for-your-setup-and-distro)
+maps every line of that section to the function that produced it.
 
 ### What never to attach
 
@@ -194,7 +196,7 @@ layer of this suite is generic; the package map is the only thing standing
 between one of those systems and a working deploy. A family patch touches
 four places — `bx_distro_family`, `bx_pkg_install_cmd` and `bx_pkg_for` in
 `backup-common.sh`, and `detect_distro` plus the tray packages in `deploy.sh`
-— and one fixture leg. The README's *Hand-rolling a fix* section says
+— and one fixture leg. *Hand-rolling a fix* in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#hand-rolling-a-fix-for-your-setup-and-distro) says
 where each decision lives and how to change it. A pull request that adds one
 has to:
 

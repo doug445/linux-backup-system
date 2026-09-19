@@ -6,8 +6,19 @@
 # The drive the test restore is written to — WIPED on every `prepare`.
 TB_TARGET_SERIAL=""
 
+# No spare drive: a sparse disk image of TB_TARGET_GIB on the backup drive
+# instead (created if missing, attached as a loop device, never on one of
+# this machine's own disks). A file gets no boot from the firmware — its
+# verdict is the VM boot's, `testbed.sh collect --vm` → PASS-VM.
+#TB_TARGET_IMAGE="/mnt/backup/testbed/$(hostname)-test.img"
+
 # The backup drive the test archive is written to (never wiped).
 TB_BACKUP_SERIAL=""
+
+# Optional: the test archive goes to this mounted drive instead of the
+# configured backup drive — another machine's production drive plugged in for
+# the test; only the test bed's own borg-testbed-<host> repository is written.
+#TB_BACKUP_MOUNT="/run/media/<user>/<drive>"
 
 # Optional per-host additions to what a test archive leaves out:
 # case "$(hostname)" in
