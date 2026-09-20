@@ -7,7 +7,7 @@
 # linux-backup-system — restore-verified backup for any Linux, built on Apple Silicon first
 
 **Built and proven on Fedora Asahi Remix — Linux on Apple Silicon, the
-hardest place there is to restore a Linux machine, and the one place where
+hardest boot chain there is to support, and the one place where
 "reinstall, then restore over it" is the only way back — and run unchanged
 on x86_64.** One codebase for every distro, root filesystem and boot layout,
 that answers the only question that matters once a disk is gone: *could I
