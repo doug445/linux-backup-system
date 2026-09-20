@@ -10,9 +10,9 @@ permissions:
 jobs:
   shellcheck:
     name: bash -n + shellcheck (warning severity)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: bash syntax check (bash -n)
         run: |
@@ -30,10 +30,10 @@ jobs:
 
   python:
     name: ruff + compile (python tools)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -54,9 +54,9 @@ jobs:
 
   license-headers:
     name: SPDX header in every script
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: every .sh and .py carries SPDX-License-Identifier MIT
         run: |
           rc=0
@@ -74,10 +74,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        # Pinned, not ubuntu-latest: that label becomes Ubuntu 26 on
+        # 2026-10-19, and these two legs must differ only by architecture.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: library fixture test
         run: bash tests/lib-fixture-test.sh
       - name: kernel command-line carrier fixture test
