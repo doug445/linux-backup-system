@@ -329,9 +329,25 @@ r=$(say() { :; }; ea=x64; edir="$E"; bid=debian; ID_LIKE=""; eval "$vd"; echo "B
 expect "nothing for this arch on the ESP: ID kept as it was" "BID=debian" "$(grep '^BID=' <<<"$r")"
 
 echo "== any shell: bash shebang via env, re-exec guard, library guard, helpers that parse in bash, zsh and fish"
-bad_sb=$(for f in $(cd "$ROOT" && git ls-files '*.sh' 2>/dev/null || ls ./*.sh tests/*.sh); do head -1 "$ROOT/$f" | grep -qx '#!/usr/bin/env bash' || echo "$f"; done)
+# Every .sh in the tree, tracked or not. git ls-files exits 0 while silently
+# omitting an untracked file, so a list built from it alone checks whatever
+# happens to be committed: that is how 4.1.0 shipped lib-restore.sh with no
+# guard, because the file was still untracked when this suite ran locally and
+# CI saw it the moment it was committed. find covers a tarball checkout with
+# no .git at all, which is what the old ls fallback was for.
+tracked_sh=$(cd "$ROOT" && git ls-files '*.sh' 2>/dev/null | sort)
+ondisk_sh=$(cd "$ROOT" && find . -path ./.git -prune -o -name '*.sh' -print 2>/dev/null | sed 's|^\./||' | sort)
+all_sh=$(printf '%s\n%s\n' "$tracked_sh" "$ondisk_sh" | grep -v '^$' | sort -u)
+if [ -n "$tracked_sh" ]; then
+    untracked_sh=$(comm -13 <(printf '%s\n' "$tracked_sh") <(printf '%s\n' "$ondisk_sh"))
+    # Not a failure: a script being written is a normal state. It is checked
+    # like any other below, and named here so an unfamiliar name in a failure
+    # further down is not a mystery.
+    [ -z "$untracked_sh" ] || echo "  NOTE  untracked, checked here but invisible to CI: $(echo $untracked_sh)"
+fi
+bad_sb=$(for f in $all_sh; do head -1 "$ROOT/$f" | grep -qx '#!/usr/bin/env bash' || echo "$f"; done)
 [ -z "$bad_sb" ] && ok "every script starts #!/usr/bin/env bash (no /bin/bash: NixOS, Guix)" || bad "shebangs: $bad_sb"
-noguard=$(for f in $(cd "$ROOT" && git ls-files '*.sh' 2>/dev/null); do
+noguard=$(for f in $all_sh; do
     first_set=$(grep -n '^set -' "$ROOT/$f" | head -1 | cut -d: -f1); g=$(grep -n 'BASH_VERSION:-}" \] ||' "$ROOT/$f" | head -1 | cut -d: -f1)
     { [ -n "$g" ] && { [ -z "$first_set" ] || [ "$g" -lt "$first_set" ]; }; } || echo "$f"; done)
 [ -z "$noguard" ] && ok "every script checks for bash before its first set -o (dash dies on pipefail)" || bad "no guard before set: $noguard"
