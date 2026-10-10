@@ -1278,6 +1278,7 @@ detect_schedule_mode() {
 write_system_conf() {
     local fs_uuid="" dev="" luks_uuid="" host_id
     host_id=$(hostname 2>/dev/null || uname -n)
+    local found_repo; found_repo=$(bx_find_borg_repo "$BACKUP_MOUNT")
     # Only a LIVE mount at exactly BACKUP_MOUNT (-M). `findmnt --target` on an
     # existing-but-unmounted /mnt/backup walks UP to the root filesystem, and
     # its UUIDs were written here as the backup drive: the udev rule then
@@ -1313,6 +1314,13 @@ write_system_conf() {
                 printf 'BACKUP_HOST_ID="%s"\n' "$host_id" >> /etc/backup-system.conf
                 log "  /etc/backup-system.conf: added BACKUP_HOST_ID=\"$host_id\" (pins the archive/chain name across hostname changes)"
             fi
+            # A repo already on the drive under another name (a hand-written
+            # setup's borg-repo) is pinned, so timeback and the tray, which
+            # read only this file, list the archives that are actually there.
+            if ! grep -q '^BORG_REPO=' /etc/backup-system.conf && [ "$found_repo" != "$BACKUP_MOUNT/borg-backup" ]; then
+                printf 'BORG_REPO="%s"\n' "$found_repo" >> /etc/backup-system.conf
+                log "  /etc/backup-system.conf: added BORG_REPO=\"$found_repo\" (the repository already on the drive)"
+            fi
             log "  /etc/backup-system.conf exists — left as-is (detected fs_uuid=${fs_uuid:-none} luks_uuid=${luks_uuid:-none})"
             return
         fi
@@ -1332,6 +1340,7 @@ SCHEDULE_MODE="$SCHEDULE_MODE"
 # The name this host's backups are filed under (borg archive prefix, Back In
 # Time chain). Pinned here so a later hostname change does not orphan them.
 BACKUP_HOST_ID="$host_id"
+$([ "$found_repo" != "$BACKUP_MOUNT/borg-backup" ] && printf 'BORG_REPO="%s"' "$found_repo")
 KEEP=10
 MIN_KEEP=3
 MIN_FREE_PCT=10
@@ -1680,9 +1689,10 @@ snapback() {
     case "${1:-}" in
         list)     sudo snapper -c root list; echo; sudo snapper -c home list ;;
         create)   sudo snapper -c root create -d "manual"; sudo snapper -c home create -d "manual"; echo "Snapshots created." ;;
+        replicate) if [ -x /usr/local/sbin/snapper-replicate.sh ]; then sudo /usr/local/sbin/snapper-replicate.sh; else echo "no snapper-replicate.sh on this host"; return 1; fi ;;
         rollback) sudo snapper -c root undochange "${2:?Usage: snapback rollback <snapshot#>}..0" ;;
         diff)     sudo snapper -c root diff "${2:?Usage: snapback diff <snapshot#>}..0" ;;
-        *)        echo "Usage: snapback [list|create|rollback N|diff N]" ;;
+        *)        echo "Usage: snapback [list|create|replicate|rollback N|diff N]" ;;
     esac
 }
 EOF
@@ -1728,12 +1738,18 @@ end
 EOF
         ;;
         snapback) cat <<'EOF'
-function snapback --description 'Snapper: list | create | rollback N | diff N (linux-backup-system)'
+function snapback --description 'Snapper: list | create | replicate | rollback N | diff N (linux-backup-system)'
     switch "$argv[1]"
         case list
             sudo snapper -c root list; echo; sudo snapper -c home list
         case create
             sudo snapper -c root create -d manual; sudo snapper -c home create -d manual; echo "Snapshots created."
+        case replicate
+            if test -x /usr/local/sbin/snapper-replicate.sh
+                sudo /usr/local/sbin/snapper-replicate.sh
+            else
+                echo "no snapper-replicate.sh on this host"; return 1
+            end
         case rollback diff
             if test (count $argv) -lt 2
                 echo "Usage: snapback $argv[1] <snapshot#>"; return 2
@@ -1744,7 +1760,7 @@ function snapback --description 'Snapper: list | create | rollback N | diff N (l
                 sudo snapper -c root diff "$argv[2]..0"
             end
         case '*'
-            echo "Usage: snapback [list|create|rollback N|diff N]"
+            echo "Usage: snapback [list|create|replicate|rollback N|diff N]"
     end
 end
 EOF
@@ -1833,7 +1849,7 @@ echo "  timeback [list|info|log]     — Borg operations"
 echo "  bitback [list|log]           — Back in Time operations"
 echo "  sudo backup-diag.sh -o backup-diag.md — troubleshooting report for a bug/setup report"
 if [ "$HAS_SNAPPER" = true ]; then
-    echo "  snapback [list|create|rollback N|diff N] — Snapper operations"
+    echo "  snapback [list|create|replicate|rollback N|diff N] — Snapper operations"
 fi
 echo ""
 

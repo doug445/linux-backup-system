@@ -158,6 +158,18 @@ out=$(BX_CONFIG="$T/verify.conf" BACKUP_MOUNT="$T/envmount" bash "$ROOT/backup-v
 grep -q "$T/envmount" <<<"$out" && ok "environment still overrides the config" || bad "environment did not override the config"
 grep -q 'KEEP=${_env_keep:-6}' "$ROOT/luks-header-backup.sh" && ok "luks-header-backup keeps its own KEEP default" || bad "luks-header-backup KEEP default lost"
 
+echo "== backup-verify: a desktop-unlocked foreign USB drive is not this machine's disk"
+eval "$(sed -n '/^luks_foreign_hotplug() {/,/^}/p' "$ROOT/backup-verify.sh")"
+lsblk() { case "$*" in *sdb1*|*sdc1*) echo "    1" ;; *) echo "    0" ;; esac; }
+printf 'luks-root UUID=1111 none\nusbdata UUID=2222 /k nofail\n# old UUID=3333 none\n' > "$T/crypttab"
+# shellcheck disable=SC2034  # read by the eval-loaded function
+backup_dev=/dev/sdc1
+BX_CRYPTTAB="$T/crypttab" luks_foreign_hotplug /dev/sdb1 3333 && ok "hot-plugged, not in crypttab (a commented line does not count): foreign" || bad "foreign USB drive still checked"
+BX_CRYPTTAB="$T/crypttab" luks_foreign_hotplug /dev/sdb1 2222 && bad "a crypttab-named USB drive was skipped" || ok "hot-plugged but in crypttab: checked"
+BX_CRYPTTAB="$T/crypttab" luks_foreign_hotplug /dev/sdc1 4444 && bad "the backup volume was skipped" || ok "the backup volume: checked"
+BX_CRYPTTAB="$T/crypttab" luks_foreign_hotplug /dev/nvme0n1p3 5555 && bad "an internal disk was skipped" || ok "internal disk: checked"
+unset -f lsblk; unset backup_dev
+
 echo "== tray: a backup counts as running only when one runs (not when a command line names it)"
 # The tray's detection helpers, loaded with GTK stubbed out and pgrep fed
 # synthetic process lists. Each case prints PASS/FAIL itself.
@@ -478,6 +490,18 @@ nob=$(grep -nE '(^|[;&|(]|then|do)[[:space:]]*(echo y \| )?(vgchange|vgcreate|pv
       | grep -v 'TB_LVM' | grep -v 'root_src\|-S "vg_name=\$vg"' || true)
 [ -z "$nob" ] && ok "test bed: every LVM command on the test drive writes no metadata backup to this host" || bad "LVM commands that write this host's /etc/lvm: $nob"
 grep -q "sys_vendor" <<<"$(awk '/^mirror_firmware_entry\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")" && ok "Acer firmware: no grubx64.efi on the test drive's fallback path (Linpus lite entry)" || bad "mirror_firmware_entry ignores Acer's Linpus lite entries"
+# USBGuard: the restored policy blocked the USB test drive under its own root at multi-user.
+grep -A1 '^    isolate_other_disks$' "$ROOT/testbed/testbed.sh" | grep -q '^    allow_test_drive_usb$' && ok "finish allows the test drive's own USB bridge in a restored USBGuard" || bad "finish never calls allow_test_drive_usb"
+eval "$(awk '/^usb_of\(\) \{/,/^}$/' "$ROOT/testbed/testbed.sh")"
+mkdir -p "$T/sysfs/usb2/2-1/host6/target6/6:0:0:0"; printf '152d\n' > "$T/sysfs/usb2/2-1/idVendor"; printf '0583\n' > "$T/sysfs/usb2/2-1/idProduct"; printf '00A2018C0008\n' > "$T/sysfs/usb2/2-1/serial"
+readlink() { [ "$2" = /sys/block/sdz/device ] && { echo "$T/sysfs/usb2/2-1/host6/target6/6:0:0:0"; return 0; }; command readlink "$@"; }
+expect "usb_of: the bridge above a USB disk, by id and serial" "152d:0583	00A2018C0008" "$(usb_of /dev/sdz)"
+unset -f readlink
+expect "usb_of: nothing for a disk not on USB" "" "$(usb_of /dev/nonexistent-disk)"
+grep -q 'ImplicitPolicyTarget' "$ROOT/lib-restore.sh" && ok "restore verification warns when the restored USBGuard would block a USB target disk" || bad "no USBGuard check in the restore verification"
+grep -q '(u in td)' "$ROOT/testbed/testbed.sh" && ok "fingerprint: a firmware entry for the test drive's own ESP (AMI \"UEFI OS\", short-form HD path) is not a change to this machine" || bad "fingerprint counts the firmware's entry for the test drive as a host change"
+grep -q 'kmsg-early' "$ROOT/testbed/boot-logger.sh" && ok "boot logger: the kernel log reaches the report partition before the boot settles" || bad "boot logger publishes nothing until the boot settles"
+grep -q 'network-online' <(grep -v '^#' "$ROOT/testbed/testbed-boot-logger.service") && bad "boot logger waits for network-online (its early capture starts too late)" || ok "boot logger starts without waiting for the network"
 
 echo "== version stamp"
 v=$(sed -n 's/^BX_VERSION="\(.*\)"/\1/p' "$ROOT/backup-common.sh")

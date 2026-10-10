@@ -153,11 +153,15 @@ fi
 # Emits "label:mountpoint" for each btrfs source; "/" -> root, "/home" -> home,
 # "/srv/data" -> srv_data. Labels drive the on-disk replica naming and pruning.
 btrfs_sources() {
-    local m
+    local m cfg
     for m in "${SOURCES[@]}"; do
         [ "$(findmnt -no FSTYPE "$m" 2>/dev/null)" = btrfs ] || continue
         if bx_source_fully_excluded "$m"; then
             log "no replica for $m — its whole tree is on the exclude list" >&2
+            continue
+        fi
+        if cfg=$(bx_snapper_replicated "$m" "$SNAP_DIR"); then
+            log "no replica for $m — snapper-replicate already sends it ($SNAP_DIR/$cfg)" >&2
             continue
         fi
         if [ "$m" = / ]; then echo "root:/"; else echo "$(echo "${m#/}" | tr / _):$m"; fi
@@ -179,8 +183,8 @@ elif bx_is_btrfs && [ "$(findmnt -no FSTYPE --target "$BACKUP_MOUNT" 2>/dev/null
     btrfs_ok=false
 elif bx_is_btrfs; then
     mapfile -t BTRFS_SRC < <(btrfs_sources)
-    mapfile -t LABELS    < <(printf '%s\n' "${BTRFS_SRC[@]}" | cut -d: -f1)
-    log "btrfs replicas for: ${BTRFS_SRC[*]}"
+    LABELS=(); (( ${#BTRFS_SRC[@]} )) && mapfile -t LABELS < <(printf '%s\n' "${BTRFS_SRC[@]}" | cut -d: -f1)
+    if (( ${#BTRFS_SRC[@]} )); then log "btrfs replicas for: ${BTRFS_SRC[*]}"; else log "btrfs replicas: none to send by this script (see above)"; fi
     (( DRY )) || mkdir -p "$SNAP_DIR" "$LOCAL_SNAP_DIR"
 
     # NOTE: btrfs mirror pruning deliberately does NOT happen at the START of a
@@ -240,7 +244,7 @@ elif bx_is_btrfs; then
     done
 
     if [ "$btrfs_ok" = "true" ]; then
-        log "All btrfs snapshots sent successfully"
+        (( ${#BTRFS_SRC[@]} )) && log "All btrfs snapshots sent successfully"
     else
         log "WARNING: Some btrfs snapshots failed — continuing with borg backup"
     fi

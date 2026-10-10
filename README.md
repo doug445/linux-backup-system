@@ -3,6 +3,7 @@
 [![Platform: aarch64 | x86_64](https://img.shields.io/badge/platform-aarch64%20%7C%20x86__64-lightgrey.svg)](docs/STATUS.md#tested--untested)
 [![Layers: Borg | Back In Time | btrfs/Timeshift](https://img.shields.io/badge/layers-Borg%20%7C%20Back%20In%20Time%20%7C%20btrfs%2FTimeshift-blue.svg)](docs/LAYERS.md)
 [![Boot: GRUB | systemd-boot | UKI](https://img.shields.io/badge/boot-GRUB%20%7C%20systemd--boot%20%7C%20UKI-informational.svg)](docs/RESTORE.md)
+[![Secure Boot: restore verified](https://img.shields.io/badge/Secure%20Boot-restore%20verified%20%E2%9C%93-brightgreen.svg)](docs/STATUS.md#tested--untested)
 
 # linux-backup-system — restore-verified backup for any Linux, built on Apple Silicon first
 
@@ -84,7 +85,7 @@ x86-64 it is the hard one**: bare metal means recreating the boot chain from
 files alone, with nothing to reinstall from — GRUB or systemd-boot, UKIs and
 their embedded command lines, Secure Boot with shim or your own keys,
 LVM-on-LUKS, an encrypted `/boot` — and that is what the rest of this suite
-exists for, seven such restores deep.
+exists for, eight such restores deep.
 
 ### Why aarch64 is still the test bed that counts
 
@@ -125,7 +126,7 @@ which is why it is developed here first:
   GRUB ≥ 2.14 built from source; the verify pass and the rebuild name the
   floor for whatever KDF the container uses.
 
-A restore that survives that chain leaves the x86 UEFI cases — seven
+A restore that survives that chain leaves the x86 UEFI cases — eight
 bare-metal restores in the table: GRUB, systemd-boot, UKIs, Secure Boot with
 shim and with sbctl keys, encrypted argon2id `/boot`, LVM-on-LUKS — as the
 easy ones.
@@ -146,7 +147,7 @@ are [docs/STATUS.md](docs/STATUS.md); the machines are
 |---|---|---|
 | **Distros** | Fedora, **Fedora Asahi Remix (aarch64)**, Debian / Ubuntu / Linux Mint, Arch / Manjaro / EndeavourOS | openSUSE; Slackware, Gentoo, Alpine, Void, NixOS, Solus (package managers the map does not know) |
 | **Root filesystems** | btrfs (subvolumes, swapfile), ext4, root on LUKS2 (sd-encrypt), LVM-on-LUKS | xfs, f2fs |
-| **Boot layouts** | GRUB (EFI), systemd-boot (Type #1 and UKI), UKIs from dracut / kernel-install / mkinitcpio, Secure Boot with sbctl keys, encrypted argon2id `/boot`, plain `/boot`, ESP at `/efi` + XBOOTLDR, SELinux relabel (enforcing and permissive), Apple Silicon over a fresh Asahi install | GRUB legacy BIOS, encrypted pbkdf2 `/boot`, Raspberry Pi firmware boot, Limine, rEFInd; ⚠️ Secure Boot through shim, restore from a live USB |
+| **Boot layouts** | GRUB (EFI), systemd-boot (Type #1 and UKI), UKIs from dracut / kernel-install / mkinitcpio, Secure Boot with sbctl keys (booted with Secure Boot on, systemd-boot signed and started by the firmware directly), encrypted argon2id `/boot`, plain `/boot`, ESP at `/efi` + XBOOTLDR, SELinux relabel (enforcing and permissive), Apple Silicon over a fresh Asahi install | GRUB legacy BIOS, encrypted pbkdf2 `/boot`, Raspberry Pi firmware boot, Limine, rEFInd; ⚠️ Secure Boot through shim, restore from a live USB |
 
 A ❌ row turns ⚠️ when it is under test on real hardware and ✅ when
 `testbed.sh collect` has returned `VERDICT: PASS` for it — a `PASS-VM` (a
@@ -222,7 +223,7 @@ them.
 
 MIT — see [LICENSE](LICENSE).
 
-- **Version:** 4.1.1
+- **Version:** 4.2.0
 - **Author:** William MacKinnon ([doug445](https://github.com/doug445))
 - **Email:** spilled-bowline0j@icloud.com
 - **Repository:** https://github.com/doug445/linux-backup-system

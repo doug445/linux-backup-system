@@ -908,6 +908,9 @@ while IFS=$'\t' read -r kind val; do
     [ "$kind" = PATH ] && continue
     if cl_ref_exists "$kind" "$val"; then
         log "  OK: $kind=$val found"
+    elif cl_fstab_optional "$FSTAB" "$kind" "$val"; then
+        warn "  $kind=$val not connected — optional (noauto/nofail), the boot does not need it"
+        WARNINGS=$((WARNINGS + 1))
     else
         error "  FAIL: $kind=$val NOT FOUND on any device!"
         ERRORS=$((ERRORS + 1))
@@ -966,6 +969,25 @@ if [ -n "$offt" ]; then
     done <<<"$offt"
 else
     log "  OK: root, /boot, ESP, /home, crypttab.initramfs and every command line resolve onto the target disk(s)"
+fi
+# A restored USBGuard that blocks unknown devices blocks a USB target disk too:
+# the daemon deauthorizes the bridge under the root filesystem once the boot
+# reaches multi-user (the SELinux relabel boot runs no USBGuard and passes).
+# Found by the test bed on a Fedora 44 host whose drives are allowed only after
+# a login. Internal disks are not USB devices and never reach the policy.
+_ugc="$TARGET/etc/usbguard/usbguard-daemon.conf"
+if [ -f "$_ugc" ] && grep -qsE '^[[:space:]]*ImplicitPolicyTarget[[:space:]]*=[[:space:]]*(block|reject)' "$_ugc"; then
+    for _d in $(printf '%s\n' $TARGET_DISKS | sort -u); do
+        _u=$(udevadm info -q property -n "$_d" 2>/dev/null | sed -n 's/^ID_BUS=//p')
+        [ "$_u" = usb ] || continue
+        _vp="$(udevadm info -q property -n "$_d" | sed -n 's/^ID_VENDOR_ID=//p'):$(udevadm info -q property -n "$_d" | sed -n 's/^ID_MODEL_ID=//p')"
+        if grep -rqsE "^[[:space:]]*allow[[:space:]].*id[[:space:]]+$_vp" "$TARGET/etc/usbguard/rules.conf" "$TARGET/etc/usbguard/rules.d/"; then
+            log "  OK: USBGuard on the restored system allows the USB target disk $_d ($_vp)"
+        else
+            warn "  $_d is a USB disk ($_vp) and the restored USBGuard blocks unknown devices — booted from it, the system loses its own root at multi-user. Add a rule: echo 'allow id $_vp' > $TARGET/etc/usbguard/rules.d/99-root-disk.conf"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+    done
 fi
 # Unified kernel images carry their command line inside a signed binary; no
 # file rewrite reaches it. The generator's images were rebuilt above; one it

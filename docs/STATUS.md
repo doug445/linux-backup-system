@@ -50,7 +50,7 @@ column, use the suite for testing only — not in production.**
 | systemd-boot (Type #1 entries, no UKI) | ✅ | ✅ |
 | systemd-boot + UKI (unified kernel image), rebuilt by mkinitcpio presets | ✅ | ✅ |
 | UKI rebuilt by dracut or kernel-install | ✅ | ✅ |
-| **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed | ✅ | ✅ |
+| **Secure Boot with your own keys** (sbctl) — the rebuilt loader and UKIs re-signed; booted with Secure Boot **on** from the restored drive on Manjaro (mkinitcpio UKIs) and on Fedora 44 on a System76 Oryx Pro (kernel-install UKIs signed by ukify with the db key, systemd-boot started by the firmware directly, no shim) | ✅ | ✅ |
 | Secure Boot through shim (Fedora, Ubuntu) | ✅ | ⚠️ |
 | GRUB (EFI) | ✅ | ✅ |
 | GRUB (legacy BIOS) | ❌ — **contributions wanted** | ❌ not under test |

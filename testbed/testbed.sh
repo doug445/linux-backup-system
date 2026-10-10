@@ -428,8 +428,17 @@ cmd_fingerprint() {
             # machine's disk (and the spare ESP's line, which does not change) are
             # the expected difference; everything else on that table is compared
             same_disk && [ -f "$TB_STATE/plan" ] && tbparts=$(test_parts | tr '\n' ' ')
+            # Firmware entries for the TEST drive's own partitions: the System76 (AMI)
+            # firmware adds a "UEFI OS" entry, a short-form HD(…) path with no /USB(,
+            # for a disk booted once from its boot menu. Firmware-made (the restore
+            # writes no NVRAM); they name the test drive, never this machine's disks.
+            local tdparts="" _td
+            if ! same_disk && [ -z "$TB_TARGET_IMAGE" ] && _td=$(disk_by_serial "$TB_TARGET_SERIAL" 2>/dev/null) && [ -n "$_td" ]; then
+                tdparts=$(lsblk -rno PARTUUID "$_td" 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep . | tr '\n' ' ')
+            fi
             fp_norm() { # the fingerprint without the expected noise and without disks absent from the other side
-                awk -v both="$both" -v bycode="$bycode" -v parts="$parts" -v tbparts="$tbparts" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1
+                awk -v both="$both" -v bycode="$bycode" -v parts="$parts" -v tbparts="$tbparts" -v tdparts="$tdparts" 'BEGIN{n=split(both, a, "\n"); for (i=1;i<=n;i++) keep[a[i]]=1
+                        n=split(tdparts, d, " "); for (i=1;i<=n;i++) if (d[i] != "") td[d[i]]=1
                         n=split(parts, b, " "); for (i=1;i<=n;i++) exists[b[i]]=1
                         n=split(tbparts, c, " "); for (i=1;i<=n;i++) if (c[i] != "") tb[c[i]]=1}
                     /^## LUKS header / && ($4 in tb) {next}
@@ -447,7 +456,7 @@ cmd_fingerprint() {
                     /^Boot[0-9A-Fa-f]{4}/ && /BBS\(|\/USB\(/ {next}
                     /^Boot[0-9A-Fa-f]{4}/ && match($0, /HD\([0-9]+,GPT,[0-9A-Fa-f-]+,/) {
                         u = tolower(substr($0, RSTART, RLENGTH)); sub(/^hd\([0-9]+,gpt,/, "", u); sub(/,$/, "", u)
-                        if (!(u in exists)) next
+                        if (!(u in exists) || (u in td)) next
                     }
                     {print}' "$1"
             }
@@ -465,6 +474,10 @@ cmd_fingerprint() {
                 stale=$(grep -hE '^Boot[0-9A-Fa-f]{4}' "$TB_STATE/fingerprint-before.txt" "$TB_STATE/fingerprint-after.txt" | sort | uniq -u \
                     | while read -r l; do u=$(grep -oiE 'HD\([0-9]+,GPT,[0-9a-f-]+,' <<<"$l" | cut -d, -f3 | tr '[:upper:]' '[:lower:]'); [ -n "$u" ] && [[ " $parts " != *" $u "* ]] && printf '%s; ' "${l%%$'\t'*}"; done)
                 [ -n "$stale" ] && say "  note: firmware entries for partitions no disk here has (stale — the firmware adds and drops those): $stale"
+                local tdent
+                tdent=$(grep -hE '^Boot[0-9A-Fa-f]{4}' "$TB_STATE/fingerprint-before.txt" "$TB_STATE/fingerprint-after.txt" | sort | uniq -u \
+                    | while read -r l; do u=$(grep -oiE 'HD\([0-9]+,GPT,[0-9a-f-]+,' <<<"$l" | cut -d, -f3 | tr '[:upper:]' '[:lower:]'); [ -n "$u" ] && [[ " $tdparts " == *" $u "* ]] && printf '%s; ' "${l%%$'\t'*}"; done)
+                [ -n "$tdent" ] && say "  note: firmware entries for the test drive's own partitions (made by the firmware's boot menu; remove with efibootmgr -b XXXX -B if unwanted): $tdent"
                 if [ "$bycode" = 1 ]; then
                     local resigned
                     resigned=$(diff <(awk '/^## files /{f=1; next} /^## /{f=0} f && tolower($0) ~ /\.efi$/' "$TB_STATE/fingerprint-before.txt") \
@@ -908,6 +921,8 @@ cmd_finish() {
     park_shim_fallback
     mark_test_drive_picker
     isolate_other_disks
+    allow_test_drive_usb
+    mask_backup_units
     same_disk && { park_uboot_vars; check_same_disk_refs; }
     check_removable_chain
     # The restored boot configuration must name the volume group by its real name:
@@ -956,7 +971,7 @@ cmd_finish() {
      on a Mac: hold the power button, choose the volume the Asahi installer named
      (name it TEST when installing). This machine's own install boots as before.
      $( [ "$(st_get auto-unlock)" = grub ] && echo "It unlocks itself (built-in passphrase: test)" || echo "The passphrase is: test" )
-  2. Wait ~2 minutes after the login screen appears (the logger writes its report to
+  2. Wait ~5 minutes after the login screen appears (the logger writes its report to
      this machine's $(layout REPORT_MOUNT) — PARTUUID $(layout REPORT_PARTUUID)).
   3. Boot back into this machine and run:  sudo $0 collect
 MSG
@@ -985,7 +1000,7 @@ MSG
 [testbed] Ready to boot the test drive.
   1. Leave only the test drive connected (serial $TB_TARGET_SERIAL).
   2. Reboot, pick it from the firmware boot menu — $pick; $( [ "$(st_get auto-unlock)" = grub ] && echo "it unlocks itself (built-in passphrase: test) and its GRUB first prints \"TEST DRIVE\"" || echo "the passphrase is: test")
-  3. Wait ~2 minutes after the login screen appears (the logger writes its report to
+  3. Wait ~5 minutes after the login screen appears (the logger writes its report to
      this machine's $(layout REPORT_MOUNT) — PARTUUID $(layout REPORT_PARTUUID)).
   4. Boot back into this machine and run:  sudo $0 collect
 MSG
@@ -1223,6 +1238,70 @@ check_removable_chain() {
     fi
     st_set removable-chain ok; return 0
 }
+# usb_of DISK — "VID:PID<TAB>SERIAL" of the USB device a disk sits behind (its
+# bridge), nothing for a disk that is not on USB. Reads sysfs only.
+usb_of() {
+    local p
+    p=$(readlink -f "/sys/block/$(basename "$1")/device" 2>/dev/null) || return 0
+    while [ -n "$p" ] && [ "$p" != / ]; do
+        if [ -f "$p/idVendor" ] && [ -f "$p/idProduct" ]; then
+            printf '%s:%s\t%s\n' "$(cat "$p/idVendor")" "$(cat "$p/idProduct")" "$(cat "$p/serial" 2>/dev/null)"
+            return 0
+        fi
+        p=$(dirname "$p")
+    done
+    return 0
+}
+# allow_test_drive_usb — TEST DRIVES ONLY: a restored USBGuard that blocks by
+# default blocks the test drive itself — its root disk is a USB device no rule
+# names (this machine allows its own drives only after a login). The relabel boot
+# runs no USBGuard and came through; the next boot reached multi-user, the
+# daemon deauthorized the bridge under the root filesystem, and btrfs went
+# read-only (errno=-5 IO failure) before anything — the journal included — could
+# be written (Fedora 44 on the Oryx Pro, JMS583 USB-NVMe bridge). One allow
+# rule for the bridge, by id and serial, in the test drive's rules.d.
+allow_test_drive_usb() {
+    local t u id serial f
+    [ -d "$TB_MNT/etc/usbguard" ] || return 0
+    same_disk && return 0; [ -n "$TB_TARGET_IMAGE" ] && return 0
+    t=$(target_disk); u=$(usb_of "$t"); [ -n "$u" ] || return 0
+    id=${u%%$'\t'*}; serial=${u#*$'\t'}
+    f="$TB_MNT/etc/usbguard/rules.d/99-testbed-test-drive.conf"
+    mkdir -p "$(dirname "$f")"
+    if [ -n "$serial" ]; then printf 'allow id %s serial "%s"\n' "$id" "$serial" > "$f"
+    else printf 'allow id %s\n' "$id" > "$f"; fi
+    chmod 600 "$f"; chown root:root "$f"
+    ledger test "test drive: USBGuard allow rule for its own USB bridge ($id${serial:+ serial $serial}) in ${f#"$TB_MNT"} — the restored policy blocks unknown USB devices, the test drive's root disk among them" "test drive only"
+    say "USBGuard on the test drive: its own USB bridge $id${serial:+ ($serial)} allowed (${f#"$TB_MNT"})"
+}
+
+# mask_backup_units — TEST DRIVES ONLY: the restored backup timers fire on the
+# test boot (Persistent=, hourly) and their units need the backup mount: the
+# restored snapper-replicate.timer unlocked and mounted this machine's backup
+# drive read-write with the restored keyfile, and its job — waiting in its idle
+# gate — kept the boot "starting" until the logger gave up (Oryx Pro). Every
+# unit in the test drive's /etc/systemd/system that names the backup mount, the
+# suite's own timers and the drive-attach unit and udev rule are moved to
+# /root/restore-test/masked and masked. A real restore keeps them.
+mask_backup_units() {
+    local d="$TB_MNT/etc/systemd/system" keep="$TB_MNT/root/restore-test/masked" u n=0 m
+    m=$(. "$TB_MNT/etc/backup-system.conf" 2>/dev/null; echo "${BACKUP_MOUNT:-/mnt/backup}")
+    mkdir -p "$keep"
+    for u in "$d"/*.timer "$d"/*.service "$d"/*.path; do
+        [ -f "$u" ] && [ ! -L "$u" ] || continue
+        case "$(basename "$u")" in
+            borg-backup*|backintime-backup*|snapper-replicate*|backup-verify*|luks-header-backup*|timeshift-backup*) ;;
+            *) grep -qsF -e "$m" -e "$BACKUP_MOUNT" "$u" || continue ;;
+        esac
+        mv -f "$u" "$keep/" && ln -sf /dev/null "$u" && n=$((n+1))
+    done
+    u="$TB_MNT/etc/udev/rules.d/99-borg-backup.rules"
+    [ -f "$u" ] && mv -f "$u" "$keep/" && n=$((n+1))
+    [ "$n" -gt 0 ] || return 0
+    ledger test "test drive: $n backup units/rules masked (kept in /root/restore-test/masked) — a test boot runs no backup and opens no backup drive of this machine's" "test drive only"
+    say "test drive: $n backup units masked ($(ls "$keep" | tr '\n' ' '))"
+}
+
 # park_shim_fallback — TEST DRIVES ONLY: shim started as EFI/BOOT/BOOT<arch>.EFI
 # runs fb<arch>.efi first when it sits beside it, and fallback CREATES a firmware
 # boot entry (from EFI/<id>/BOOT<arch>.CSV) before booting — a write to THIS
@@ -1247,12 +1326,16 @@ park_shim_fallback() {
 # brought their keyfiles along, so the booted test drive unlocked them
 # (EndeavourOS: a nofail crypttab entry opened the host's SD card, and the boot
 # report FAILed "source-machine containers open"). Every entry whose device
-# resolves, here, to a disk other than the test drive gets noauto on the test
-# drive; so does an fstab entry on one of those containers. A real restore keeps
-# them: the restore itself is right to leave them alone. The restored files are
-# kept in /root/restore-test.
+# resolves, here, to a disk other than the test drive is COMMENTED OUT on the
+# test drive; so is an fstab entry on one of those containers. noauto was not
+# enough: it keeps an entry out of the boot, but any unit that needs the mount
+# still pulls it in — the restored snapper-replicate.timer (RequiresMountsFor=
+# /mnt/backup) unlocked and mounted this machine's backup drive read-write from
+# the test boot (Oryx Pro, Fedora 44). A real restore keeps them: the restore
+# itself is right to leave them alone. The restored files are kept in
+# /root/restore-test.
 isolate_other_disks() {
-    local t f line dev name opts disk names=" " n=0 a=()
+    local t f line dev name disk names=" " n=0 a=()
     t=$(target_disk)
     for f in crypttab fstab; do
         [ -f "$TB_MNT/etc/$f" ] || continue
@@ -1260,9 +1343,10 @@ isolate_other_disks() {
         : > "$TB_MNT/etc/$f.tb"
         while IFS= read -r line || [ -n "$line" ]; do
             read -ra a <<<"$line"
+            # an earlier finish's commented entry: still a container of another disk
+            if [ "$f" = crypttab ] && [[ "$line" == "# testbed: "* ]]; then read -ra a <<<"${line#\# testbed: }"; names="$names${a[0]} "; printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue; fi
             if [ "${#a[@]}" -lt 2 ] || [ "${a[0]#\#}" != "${a[0]}" ]; then printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue; fi
             if [ "$f" = crypttab ]; then name=${a[0]}; dev=${a[1]}; else name=""; dev=${a[0]}; fi
-            opts=${a[3]:-}
             disk=""; local rdev=""
             case "$dev" in
                 UUID=*|PARTUUID=*|LABEL=*|PARTLABEL=*) rdev=$(blkid -t "$dev" -o device 2>/dev/null | head -1); disk=$(bx_disk_of "$rdev" 2>/dev/null) ;;
@@ -1271,7 +1355,7 @@ isolate_other_disks() {
             esac
             # same-disk mode: this machine's own partitions share the target disk
             if [ -n "$rdev" ] && [ "$disk" = "$t" ] && ! on_target "$rdev"; then disk="$t (this machine's own partition $(tb_part_of "$rdev"))"; fi
-            if [ -z "$disk" ] || [ "$disk" = "$t" ] || [[ ",$opts," == *,noauto,* ]]; then
+            if [ -z "$disk" ] || [ "$disk" = "$t" ]; then
                 printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue
             fi
             # The boot chain naming another disk is a restore failure, never isolated away.
@@ -1281,14 +1365,12 @@ isolate_other_disks() {
                 printf '%s\n' "$line" >> "$TB_MNT/etc/$f.tb"; continue
             fi
             [ -n "$name" ] && names="$names$name "
-            if [ "$f" = crypttab ]; then [ -n "${a[2]:-}" ] || a[2]=none; else [ -n "${a[2]:-}" ] || a[2]=auto; fi
-            a[3]="${opts:+$opts,}noauto"
-            printf '%s\n' "${a[*]}" >> "$TB_MNT/etc/$f.tb"; n=$((n+1))
-            say "test drive: /etc/$f entry for $dev (on $disk, not the test drive) → noauto"
+            printf '# testbed: %s\n' "$line" >> "$TB_MNT/etc/$f.tb"; n=$((n+1))
+            say "test drive: /etc/$f entry for $dev (on $disk, not the test drive) → commented out"
         done < "$TB_MNT/etc/$f"
         cat "$TB_MNT/etc/$f.tb" > "$TB_MNT/etc/$f"; rm -f "$TB_MNT/etc/$f.tb"
     done
-    [ "$n" -gt 0 ] && ledger test "test drive: $n crypttab/fstab entries for disks other than the test drive set noauto — the booted test drive unlocks and mounts nothing of this machine's (originals: /root/restore-test/*.restored)" "test drive only"
+    [ "$n" -gt 0 ] && ledger test "test drive: $n crypttab/fstab entries for disks other than the test drive commented out — the booted test drive unlocks and mounts nothing of this machine's (originals: /root/restore-test/*.restored)" "test drive only"
     return 0
 }
 unmount_mounts() {

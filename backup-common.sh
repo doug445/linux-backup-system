@@ -40,7 +40,7 @@
 # shellcheck disable=SC2034  # read by every script that sources this file
 # Sourced from zsh, dash or ksh: this library is bash (arrays, [[ ]], mapfile).
 [ -n "${BASH_VERSION:-}" ] || { echo "$(basename -- "${0:-lib}"): needs bash" >&2; return 1 2>/dev/null || exit 1; }
-BX_VERSION="4.1.1"
+BX_VERSION="4.2.0"
 
 # ---------------------------------------------------------------------------
 # Config: load /etc/backup-system.conf, then fill any gap with a safe default.
@@ -50,6 +50,19 @@ BX_CONFIG="${BX_CONFIG:-/etc/backup-system.conf}"
 # Precedence: environment > /etc/backup-system.conf > built-in default, so a
 # one-off override works from the shell (KEEP=2 timeshift-backup.sh --prune-only)
 # and from a unit's Environment= line, without editing the host config.
+# The borg repository under a backup mount: borg-backup (the suite's name),
+# else borg-repo (older docs, hand-written setups); borg-backup when neither
+# holds one yet. Never any other directory: the test bed's borg-testbed-<host>
+# lives on the same drive and must not become the production repository.
+bx_is_borg_repo() { [ -f "$1/config" ] && [ -d "$1/data" ] && grep -qs '^\[repository\]' "$1/config"; }
+bx_find_borg_repo() { # bx_find_borg_repo MOUNT
+    local d
+    for d in "$1/borg-backup" "$1/borg-repo"; do
+        bx_is_borg_repo "$d" && { printf '%s\n' "$d"; return 0; }
+    done
+    printf '%s\n' "$1/borg-backup"
+}
+
 BX_CONFIG_VARS="BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID BACKUP_LUKS_UUID BACKUP_KEYFILE BACKUP_MOUNT_OPTS SCHEDULE_MODE BACKUP_EXTRA_SOURCES BACKUP_EXTRA_EXCLUDES BACKUP_EXTRA_INCLUDES BACKUP_HOST_ID KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB CAPACITY_HEADROOM_PCT CAPACITY_RECOMMEND_X CAPACITY_CHECK BX_LOCK_WAIT"
 
 bx_load_config() {
@@ -60,7 +73,12 @@ bx_load_config() {
     for _v in "${_env[@]}"; do declare -g "$_v"; done
 
     BACKUP_MOUNT="${BACKUP_MOUNT:-/mnt/backup}"
-    BORG_REPO="${BORG_REPO:-$BACKUP_MOUNT/borg-backup}"
+    # No BORG_REPO in the config: the repo already on the drive, if there is
+    # one. A pre-suite setup kept by deploy writes to borg-repo; the default
+    # filled in here used to win over it, so backup-verify reported "no borg
+    # repo" beside a repo with a fresh archive, and the suite's borg-backup.sh
+    # would have started a second, full repository next to it.
+    [ -n "${BORG_REPO:-}" ] || BORG_REPO=$(bx_find_borg_repo "$BACKUP_MOUNT")
     BACKUP_FS_UUID="${BACKUP_FS_UUID:-}"       # empty = skip the wrong-drive guard
     BACKUP_LUKS_UUID="${BACKUP_LUKS_UUID:-}"   # for unlock-on-attach only
     BACKUP_KEYFILE="${BACKUP_KEYFILE:-}"       # for unlock-on-attach only
@@ -390,6 +408,13 @@ bx_borg_patterns() {
         done
     done < <(bx_includes)
     while IFS= read -r i; do [ -n "$i" ] && printf -- '--pattern=+%s\n' "$i"; done < <(bx_includes)
+    # Automount points (x-systemd.automount, autofs): a "-" exclude still
+    # recurses, so borg opened /mnt/exfat — which mounts it, or fails with
+    # ENODEV when the drive is absent and ends every run rc=1 with warnings.
+    # "!" is matched before the directory is ever opened.
+    local a
+    while IFS= read -r a; do [ -n "$a" ] && printf -- '--pattern=!%s\n' "$(printf '%b' "$a")"; done \
+        < <(findmnt -rn -t autofs -o TARGET 2>/dev/null)
     while IFS= read -r e; do [ -n "$e" ] && printf -- '--pattern=-%s\n' "$e"; done < <(bx_excludes)
     return 0
 }
@@ -417,6 +442,30 @@ bx_source_fully_excluded() { # bx_source_fully_excluded MOUNT
 # bx_replica_parent LABEL LOCAL_DIR DEST_DIR — the snapshot name (basename)
 # usable as the parent, or nothing. The newest local snapshot of the label
 # whose replica exists on the drive, read-only and received.
+# A snapper-replicate layer already sending this btrfs source to the drive:
+# prints the snapper config's name when one names MOUNT as its SUBVOLUME, the
+# replicate timer is enabled, and SNAP_DIR/<config>/<num>/snapshot holds a
+# complete received replica. borg-backup.sh then leaves that source to it — on
+# a host with snapper-replicate its first run full-sent / and /home (half a
+# terabyte) beside the incremental replicas already there.
+bx_snapper_replicated() { # bx_snapper_replicated MOUNT SNAP_DIR
+    local c name sub r
+    systemctl is-enabled snapper-replicate.timer >/dev/null 2>&1 || return 1
+    for c in "${BX_SNAPPER_CONFIGS:-/etc/snapper/configs}"/*; do
+        [ -f "$c" ] || continue
+        name=$(basename "$c"); case "$name" in *.*) continue ;; esac   # root.bak, home.rpmsave
+        sub=$(sed -n 's/^SUBVOLUME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$c" | head -1)
+        [ "$sub" = "$1" ] || continue
+        for r in "$2/$name"/*/snapshot; do
+            [ -d "$r" ] || continue
+            [ "$(btrfs property get "$r" ro 2>/dev/null | sed -n 's/^ro=//p')" = true ] || continue
+            btrfs subvolume show "$r" 2>/dev/null | grep -qE 'Received UUID:[[:space:]]+[0-9a-f]{8}-' || continue
+            printf '%s\n' "$name"; return 0
+        done
+    done
+    return 1
+}
+
 bx_replica_parent() {
     local label="$1" ldir="$2" ddir="$3" p n
     while IFS= read -r p; do

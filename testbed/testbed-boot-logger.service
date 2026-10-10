@@ -1,7 +1,9 @@
 [Unit]
 Description=Restore test bed: boot report onto the source machine's boot partition (test drives only)
-After=network-online.target NetworkManager.service bluetooth.service
-Wants=network-online.target
+# Not After=network-online.target: the logger waits for the whole boot itself
+# (is-system-running --wait) and for the network (nm-online), and its early
+# kernel-log capture has to be running before a boot that is going to die does.
+After=local-fs.target
 
 [Service]
 # simple, not oneshot: the logger waits for the boot to finish (is-system-running

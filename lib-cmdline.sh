@@ -552,6 +552,23 @@ cl_crypttab_optional() {
     awk -v n="$2" '$1 !~ /^#/ && $1 == n { o = "," $4 ","; if (o ~ /,(noauto|nofail),/) opt = 1; found = 1; exit } END { exit !(found && opt) }' "$1"
 }
 
+# cl_fstab_optional FSTAB KIND VALUE — true when every fstab entry whose
+# device is KIND=VALUE is one the boot does not wait for (noauto or nofail) and
+# none mounts a boot-chain path. An exFAT drive behind x-systemd.automount
+# (nofail,noauto) unplugged at restore time failed the restore's verification
+# — "the restored disk is NOT ready to boot" — while the same drive's crypttab
+# twin was rightly only a warning.
+cl_fstab_optional() {
+    [ -r "$1" ] || return 1
+    awk -v k="$2" -v v="$3" "$_CL_REF_AWK"'
+        $1 !~ /^#/ && NF >= 2 && ref($1) == k "\t" v {
+            found = 1; o = "," $4 ","
+            if (o !~ /,(noauto|nofail),/) req = 1
+            if ($2 ~ /^\/(boot(\/efi)?|efi|usr|var|home)?$/) req = 1
+        }
+        END { exit !(found && !req) }' "$1"
+}
+
 # ---------------------------------------------------------------------------
 # cl_uki_cmdline FILE — the .cmdline section a Unified Kernel Image carries,
 # NUL-stripped, on one line; nothing when the file is not a PE image or has no
