@@ -60,7 +60,28 @@ publish() {
     sync; umount "$m"
 }
 
-timeout 600 systemctl is-system-running --wait >/dev/null 2>&1 || true   # never block on a boot that does not settle
+# early — the kernel log, onto the report partition every 20 s until the first
+# full publish. A boot that loses its root disk (USBGuard deauthorizing the USB
+# test drive: btrfs errno=-5 at multi-user) wrote nothing — no report, and no
+# journal either, which lives on that disk. The report partition is this
+# machine's, never the test drive, so the cause survives.
+early() {
+    local dev m d
+    dev=$(blkid -t "PARTUUID=$REPORT_PARTUUID" -o device 2>/dev/null | head -1) || return 1
+    [ -n "$dev" ] || return 1
+    m=/run/testbed-report-early; mkdir -p "$m"
+    mount -o rw,nosuid,nodev,noexec "$dev" "$m" 2>/dev/null || return 1
+    d="$m/restore-test-$STAMP"; mkdir -p "$d"
+    dmesg -T > "$d/kmsg-early-$TS.txt" 2>&1
+    sync; umount "$m"
+}
+( while :; do early || true; sleep 20; done ) &
+EARLY_PID=$!
+
+# never block on a boot that does not settle: a job waiting on something (a
+# restored timer's idle gate) kept the state "starting" for good, and a tester who
+# powered off after the five minutes asked for got no report at all
+timeout 180 systemctl is-system-running --wait >/dev/null 2>&1 || true
 out "# Restore test bed — boot report ($HOST, $STAMP)"
 out ""; out "generated $(date -Is), kernel $(uname -r)"
 
@@ -130,6 +151,7 @@ while IFS=: read -r u _ uid _ _ hd _; do
     else out "- PASS: no root-owned directories in $u's home"; fi
 done < /etc/passwd
 
+kill "$EARLY_PID" 2>/dev/null; wait "$EARLY_PID" 2>/dev/null
 publish || true
 
 sec "Network, Wi-Fi, Bluetooth"

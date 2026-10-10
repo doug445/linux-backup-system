@@ -120,7 +120,9 @@ echo "== config loading"
 unset BACKUP_MOUNT BORG_REPO BACKUP_FS_UUID SCHEDULE_MODE KEEP MIN_KEEP MIN_FREE_PCT MIN_FREE_GIB BACKUP_EXTRA_SOURCES
 BX_CONFIG="$T/none.conf"; bx_load_config
 expect "default mount"     /mnt/backup             "$BACKUP_MOUNT"
-expect "default repo"      /mnt/backup/borg-backup "$BORG_REPO"
+# On a host whose real /mnt/backup holds a borg-repo, that one is the default.
+_want=/mnt/backup/borg-backup; bx_is_borg_repo /mnt/backup/borg-backup || { bx_is_borg_repo /mnt/backup/borg-repo && _want=/mnt/backup/borg-repo; }
+expect "default repo"      "$_want" "$BORG_REPO"
 expect "default schedule"  adhoc                   "$SCHEDULE_MODE"
 expect "default KEEP"      10 "$KEEP"; expect "default MIN_KEEP" 3 "$MIN_KEEP"
 expect "default MIN_FREE_PCT" 10 "$MIN_FREE_PCT"; expect "default MIN_FREE_GIB" 0 "$MIN_FREE_GIB"
@@ -136,6 +138,36 @@ expect "mount from config"     /media/x             "$BACKUP_MOUNT"
 expect "repo derived from mount" /media/x/borg-backup "$BORG_REPO"
 expect "schedule from config"  scheduled            "$SCHEDULE_MODE"
 expect "KEEP from config"      4 "$KEEP"; expect "MIN_KEEP still default" 3 "$MIN_KEEP"
+
+echo "== the repo already on the drive is the default"
+mkrepo() { mkdir -p "$1/data" && printf '[repository]\nversion = 1\n' > "$1/config"; }
+mkdir -p "$T/d1" "$T/d2" "$T/d3"
+expect "empty drive: borg-backup" "$T/d1/borg-backup" "$(bx_find_borg_repo "$T/d1")"
+mkrepo "$T/d2/borg-repo"
+expect "hand-written setup's borg-repo is found" "$T/d2/borg-repo" "$(bx_find_borg_repo "$T/d2")"
+mkrepo "$T/d2/borg-backup"
+expect "borg-backup wins when both exist" "$T/d2/borg-backup" "$(bx_find_borg_repo "$T/d2")"
+mkrepo "$T/d3/borg-testbed-host"
+expect "a test bed repository is never the production one" "$T/d3/borg-backup" "$(bx_find_borg_repo "$T/d3")"
+unset BORG_REPO BACKUP_MOUNT; printf 'BACKUP_MOUNT="%s"\n' "$T/d2" > "$T/r.conf"; rm -rf "$T/d2/borg-backup"
+BX_CONFIG="$T/r.conf" bx_load_config
+expect "bx_load_config with no BORG_REPO uses borg-repo" "$T/d2/borg-repo" "$BORG_REPO"
+printf 'BORG_REPO="/elsewhere"\n' >> "$T/r.conf"; unset BORG_REPO
+BX_CONFIG="$T/r.conf" bx_load_config
+expect "a configured BORG_REPO always wins" /elsewhere "$BORG_REPO"
+unset BORG_REPO BACKUP_MOUNT
+
+echo "== a source snapper-replicate already sends gets no second replica"
+mkdir -p "$T/sc" "$T/sd/root/135/snapshot" "$T/sd/home/7"
+printf 'SUBVOLUME="/"\n' > "$T/sc/root"; printf 'SUBVOLUME="/"\n' > "$T/sc/root.bak"; printf 'SUBVOLUME="/home"\n' > "$T/sc/home"
+systemctl() { return 0; }
+btrfs() { case "$1 $2" in "property get") echo ro=true ;; "subvolume show") echo "	Received UUID:		12345678-aaaa-bbbb-cccc-1234567890ab" ;; esac; }
+expect "/ is covered by snapper config root" root "$(BX_SNAPPER_CONFIGS="$T/sc" bx_snapper_replicated / "$T/sd")"
+BX_SNAPPER_CONFIGS="$T/sc" bx_snapper_replicated /home "$T/sd" && bad "/home has no complete replica yet, still skipped" || ok "/home with no replica on the drive: the suite replicates it"
+BX_SNAPPER_CONFIGS="$T/sc" bx_snapper_replicated /srv "$T/sd" && bad "/srv has no snapper config, still skipped" || ok "a source no snapper config names: the suite replicates it"
+systemctl() { return 1; }
+BX_SNAPPER_CONFIGS="$T/sc" bx_snapper_replicated / "$T/sd" && bad "replicate timer off, still skipped" || ok "snapper-replicate timer not enabled: the suite replicates it"
+unset -f systemctl btrfs
 
 echo "== wrong-drive guard"
 BACKUP_MOUNT="$T/not-a-mount"; BACKUP_FS_UUID=""
@@ -335,9 +367,11 @@ echo "== extra includes: literal, one per line, trailing slash dropped"
 expect "includes printed as given" "/home/*/.config /home/*/.ssh " "$(cd / && BACKUP_EXTRA_INCLUDES="/home/*/.config /home/*/.ssh/" bx_includes | tr '\n' ' ')"
 expect "no includes: nothing" "" "$(BACKUP_EXTRA_INCLUDES="" bx_includes)"
 
-echo "== borg pattern order: extra source, includes, excludes"
+echo "== borg pattern order: extra source, includes, automount points, excludes"
+findmnt() { case "$*" in *autofs*) printf '/mnt/nas\\x20share\n' ;; *) command findmnt "$@" ;; esac; }
 pat=$(BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_INCLUDES="/home/*/.config" BACKUP_EXTRA_EXCLUDES="/home/*/*" bx_borg_patterns / /home /mnt/data | tr '\n' ' ')
-case "$pat" in "--pattern=+/mnt/data --pattern=+re:^home/[^/]*\$ --pattern=+re:^home\$ --pattern=+/home/*/.config --pattern=-/dev/*"*) ok "source re-include, the include's parent directories, then includes, then the first exclude" ;; *) bad "pattern order: $pat" ;; esac
+case "$pat" in "--pattern=+/mnt/data --pattern=+re:^home/[^/]*\$ --pattern=+re:^home\$ --pattern=+/home/*/.config --pattern=!/mnt/nas share --pattern=-/dev/*"*) ok "source re-include, the include's parent directories, includes, automount points never opened (findmnt's \\x20 decoded), then the first exclude" ;; *) bad "pattern order: $pat" ;; esac
+unset -f findmnt
 pat=$(BACKUP_MOUNT=/mnt/backup BACKUP_EXTRA_INCLUDES="/home/*/.local/share/keyrings /srv/a+b/x" BACKUP_EXTRA_EXCLUDES="/home/*/*" bx_borg_patterns / | tr '\n' ' ')
 grep -qF -- '--pattern=+re:^home/[^/]*/\.local/share$ --pattern=+re:^home/[^/]*/\.local$' <<<"$pat" \
     && ok "every directory above an include is archived as an exact match (restored with its owner, not root 700)" || bad "parent directories of an include: $pat"

@@ -98,18 +98,24 @@ slots_of() {
 # The borg repo: $BORG_REPO if set, else the first directory directly under the
 # backup mount that looks like one (a borg "config" file next to "data/").
 # The fleet's borg-backup.sh names it borg-backup; older docs said borg-repo.
+# bx_load_config always fills BORG_REPO (the named repos, else the default), so
+# "set" alone says nothing: a BORG_REPO that holds no repo falls through to the
+# scan, which an unconfigured run used to skip entirely.
 find_borg_repo() {
     local d
-    if [[ -n "${BORG_REPO:-}" ]]; then printf '%s\n' "$BORG_REPO"; return 0; fi
+    if [[ -n "${BORG_REPO:-}" ]] && { [[ -n "$_env_repo" ]] || [[ -f "$BORG_REPO/config" && -d "$BORG_REPO/data" ]]; }; then
+        printf '%s\n' "$BORG_REPO"; return 0
+    fi
     for d in "$BACKUP_MOUNT/borg-backup" "$BACKUP_MOUNT/borg-repo"; do
         [[ -f "$d/config" && -d "$d/data" ]] && { printf '%s\n' "$d"; return 0; }
     done
     for d in "$BACKUP_MOUNT"/*/; do
         d=${d%/}
+        case "${d##*/}" in borg-testbed-*) continue ;; esac   # the test bed's archives, not this host's
         [[ -f "$d/config" && -d "$d/data" ]] || continue
         grep -qs '^\[repository\]' "$d/config" && { printf '%s\n' "$d"; return 0; }
     done
-    printf '%s\n' "$BACKUP_MOUNT/borg-backup"
+    printf '%s\n' "${BORG_REPO:-$BACKUP_MOUNT/borg-backup}"
 }
 
 # Paths this machine needs to boot, as archive-relative paths. Layout differs:
@@ -287,14 +293,29 @@ hdr "2. LUKS header backups current and stored off-device"
 # not this machine's disk and must not FAIL the restore check. A mapping whose
 # backing device carries no LUKS signature (detached header) is reported, not
 # silently skipped.
+# An open mapping is not proof either: the desktop unlocks any LUKS drive that
+# is plugged in (udisks, /run/media/<user>/…) — another machine's backup drive
+# open beside this one's failed the check with "RESTORE WOULD FAIL". A
+# hot-plugged container is checked only when it is the backup volume or this
+# machine's crypttab names it (a USB root, a data drive it opens at boot).
+luks_foreign_hotplug() { # luks_foreign_hotplug DEV UUID
+    local hp ct="${BX_CRYPTTAB:-/etc/crypttab}"
+    [[ "$1" == "${backup_dev:-}" ]] && return 1
+    hp=$(lsblk -dno HOTPLUG "$1" 2>/dev/null | tr -d ' ')
+    [[ "$hp" == 1 ]] || return 1
+    [[ -n "$2" && "$2" != - ]] && grep -qsiE "^[^#]*(UUID=)?$2([[:space:]]|$)" "$ct" && return 1
+    grep -qsE "^[^#]*[[:space:]]$1([[:space:]]|$)" "$ct" && return 1
+    return 0
+}
 luks_devs_to_check() {
     local m d u
     { lsblk -rno PATH,TYPE 2>/dev/null | awk '$2=="crypt"{print $1}' \
         | while read -r m; do luks_dev_of_mapper "${m#/dev/mapper/}"; done
       [[ -n "$backup_dev" ]] && printf '%s\n' "$backup_dev"
     } | grep -E '^/' | sort -u | while read -r d; do
-        if u=$(cryptsetup luksUUID "$d" 2>/dev/null) && [[ -n "$u" ]]; then printf '%s %s\n' "$d" "$u"
-        else printf '%s -\n' "$d"; fi
+        if u=$(cryptsetup luksUUID "$d" 2>/dev/null) && [[ -n "$u" ]]; then :; else u=-; fi
+        if luks_foreign_hotplug "$d" "$u"; then printf '%s foreign\n' "$d"; continue; fi
+        printf '%s %s\n' "$d" "$u"
     done
 }
 # Match on the keyslot set encoded in the filename. Sorting filenames and taking
@@ -303,6 +324,10 @@ luks_devs_to_check() {
 luks_seen=0
 while read -r dev uuid; do
     [[ -n "$dev" ]] || continue
+    if [[ "$uuid" == foreign ]]; then
+        echo "  INFO  $(basename "$dev"): hot-plugged LUKS drive open, not in crypttab and not the backup volume — not this machine's disk; not checked"
+        continue
+    fi
     luks_seen=1
     if [[ "$uuid" == - ]]; then
         note "$(basename "$dev"): open dm-crypt mapping whose device carries no LUKS header (detached header?) — back that header file up by hand; not checked"

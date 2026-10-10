@@ -363,6 +363,11 @@ mk "$T/ct/etc/crypttab" "data1 UUID=$OL none discard,nofail,noauto\ndata2 UUID=$
 cl_crypttab_optional "$T/ct/etc/crypttab" data1 && ok "noauto,nofail entry is optional" || bad "data1 not optional"
 cl_crypttab_optional "$T/ct/etc/crypttab" data2 && ok "nofail alone is optional" || bad "data2 not optional"
 cl_crypttab_optional "$T/ct/etc/crypttab" root && bad "a plain entry was called optional" || ok "a plain entry is required"
+printf 'UUID=aaaa / btrfs subvol=root 0 0\nUUID=FFF7-B475 /mnt/exfat exfat defaults,nofail,noauto,x-systemd.automount 0 0\nUUID=bbbb /boot vfat nofail 0 2\nLABEL=data /srv/data ext4 defaults 0 2\n' > "$T/ct/etc/fstab"
+cl_fstab_optional "$T/ct/etc/fstab" UUID FFF7-B475 && ok "fstab: an automount data drive (nofail,noauto) is optional" || bad "fstab: exfat automount not optional"
+cl_fstab_optional "$T/ct/etc/fstab" UUID bbbb && bad "fstab: a nofail /boot was called optional" || ok "fstab: /boot is required even with nofail"
+cl_fstab_optional "$T/ct/etc/fstab" LABEL data && bad "fstab: a plain entry was called optional" || ok "fstab: a plain data mount is required"
+cl_fstab_optional "$T/ct/etc/fstab" UUID cccc && bad "fstab: an id no entry names was called optional" || ok "fstab: an id no entry names is not optional"
 cl_crypttab_optional "$T/ct/etc/crypttab" old && bad "a commented-out entry matched" || ok "commented-out entries never match"
 cl_crypttab_optional "$T/ct/etc/crypttab" absent && bad "an absent name matched" || ok "an absent name is not optional"
 
