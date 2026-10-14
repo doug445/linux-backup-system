@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Restore a Borg Backup to a New Disk and Make It Boot</title>
+<meta name="description" content="A Borg archive restores files, not a bootable disk: new UUIDs, initramfs, bootloader and signatures break the boot. Bare-metal restore steps, and how to test.">
+<link rel="canonical" href="https://doug445.github.io/linux-backup-system/bootable-bare-metal-restore-borg/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="linux-backup-system">
+<meta property="og:title" content="Restore a Borg Backup to a New Disk and Make It Boot">
+<meta property="og:description" content="A Borg archive restores files, not a bootable disk: new UUIDs, initramfs, bootloader and signatures break the boot. Bare-metal restore steps, and how to test.">
+<meta property="og:url" content="https://doug445.github.io/linux-backup-system/bootable-bare-metal-restore-borg/">
+<meta property="og:image" content="https://doug445.github.io/linux-backup-system/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "How to restore a Borg backup to a new disk and make it boot",
+      "description": "A Borg archive restores files, not a bootable disk: new UUIDs, initramfs, bootloader and signatures break the boot. Bare-metal restore steps, and how to test.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/linux-backup-system/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/linux-backup-system/bootable-bare-metal-restore-borg/",
+      "about": { "@type": "SoftwareApplication", "name": "linux-backup-system", "url": "https://doug445.github.io/linux-backup-system/", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux (aarch64, x86_64)" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "linux-backup-system", "item": "https://doug445.github.io/linux-backup-system/" },
+        { "@type": "ListItem", "position": 2, "name": "Bootable Borg restore", "item": "https://doug445.github.io/linux-backup-system/bootable-bare-metal-restore-borg/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Can I restore a Borg backup onto a smaller or larger disk?", "acceptedAnswer": { "@type": "Answer", "text": "Yes, as long as what the archive holds fits. A file-level restore does not care how big the old partitions were: you create the new ones, and the ids in fstab, crypttab and the command lines are rewritten to match them either way." } },
+        { "@type": "Question", "name": "Why does my restored system stop in the initramfs?", "acceptedAnswer": { "@type": "Answer", "text": "A common cause is a stale id. A kernel command line with the old rd.luks.uuid=, root= or cryptdevice=, or an initramfs that was built before crypttab was fixed, asks for a container or filesystem that is not on the new disk, so the boot stops in the initramfs with every file present. Fix every carrier, then regenerate the initramfs." } },
+        { "@type": "Question", "name": "Do I have to re-sign anything for Secure Boot after a restore?", "acceptedAnswer": { "@type": "Answer", "text": "With your own keys, yes: every loader, initramfs and UKI the rebuild regenerates is unsigned, and the firmware refuses them until they are signed again, for example with sbctl sign-all and a check with sbctl verify. With a distro's shim, keep the distro's signed loaders instead of reinstalling them." } },
+        { "@type": "Question", "name": "Why use --numeric-ids when extracting?", "acceptedAnswer": { "@type": "Answer", "text": "Without it, borg maps owners by name through the rescue system's own user database. Two distros number their system accounts differently, so restoring one distro from another's live USB can give every system file the wrong owner. --numeric-ids keeps the numbers the archive recorded." } },
+        { "@type": "Question", "name": "Does the restored disk need a new firmware boot entry?", "acceptedAnswer": { "@type": "Answer", "text": "Firmware boot entries are in no backup. From a live USB the bootloader install can write one. From an installed system, write none, so the running machine's boot order is left alone: install the loader to the removable-media fallback path and pick the restored disk from the firmware boot menu." } },
+        { "@type": "Question", "name": "Can I get back a few files without a full restore?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. borg mount mounts a repository or archive as a FUSE filesystem you can browse and copy from, and borg extract can take paths inside the archive to extract only those, into the current directory." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">linux-backup-system</a>
+    <a href="../restore-asahi-linux-from-backup/">Restore Asahi Linux</a>
+    <a href="../bootable-bare-metal-restore-borg/">Bootable Borg restore</a>
+    <a href="https://github.com/doug445/linux-backup-system">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">linux-backup-system</a> › Bootable Borg restore</p>
+<h1>How to restore a Borg backup to a new disk and make it boot</h1>
+<p class="lede">You have a Borg archive of your Linux system and a new, blank disk. <code>borg extract</code> will put every file back — and the machine will still not boot, or will boot by unlocking the old disk. This page explains what a file-level archive cannot carry onto a new disk, the manual steps that make it boot, and why you should test that before the day you need it.</p>
+
+<h2 id="why-it-does-not-boot">Why a file-level archive is not a bootable restore</h2>
+<p>The archive holds files. Booting a disk depends on things that are tied to <em>that</em> disk — its ids, images built for it, the firmware's own memory — and every one of them is wrong, or missing, after a restore onto new partitions:</p>
+<div class="table-scroll"><table>
+  <thead><tr><th>What</th><th>Why it breaks on a new disk</th></tr></thead>
+  <tbody>
+    <tr><td><code>/etc/fstab</code></td><td>Names the old filesystems by <code>UUID=</code>, <code>PARTUUID=</code> or <code>LABEL=</code>. New partitions have new ids.</td></tr>
+    <tr><td><code>/etc/crypttab</code>, <code>crypttab.initramfs</code></td><td>Name the old LUKS containers. mkinitcpio's sd-encrypt bakes <code>crypttab.initramfs</code> into the initramfs; left stale, the restored disk asks for the old container at every boot.</td></tr>
+    <tr><td>Kernel command lines</td><td><code>root=</code>, <code>resume=</code>, <code>rd.luks.uuid=</code>, <code>rd.luks.name=</code>, <code>cryptdevice=</code> live in BLS and systemd-boot entries, <code>/etc/kernel/cmdline</code> and <code>cmdline.d</code>, <code>GRUB_CMDLINE_LINUX</code> and its drop-ins, <code>extlinux.conf</code>, <code>syslinux.cfg</code>, a Pi's <code>cmdline.txt</code>, <code>refind_linux.conf</code>, <code>limine.conf</code>. A stale <code>rd.luks.uuid=</code> stops the boot in the initramfs with every file present.</td></tr>
+    <tr><td>Initramfs</td><td>Built for the old disk. It has to be regenerated after <code>crypttab</code> and the command lines are fixed.</td></tr>
+    <tr><td>Unified kernel images (UKIs)</td><td>The kernel, initramfs and command line in one file. The embedded command line names the old disk, so the image has to be rebuilt — and <code>kernel-install</code> takes the command line from <code>/etc/kernel/cmdline</code>, so without one it can embed the rescue system's own.</td></tr>
+    <tr><td>Bootloader</td><td>Firmware boot entries (NVRAM) are in no backup. A GRUB core image built on the source machine carries an early config naming that machine's disk (<code>cryptomount -u</code>, <code>search --fs-uuid</code>). Legacy BIOS GRUB lives in raw sectors no file-level backup holds.</td></tr>
+    <tr><td>Secure Boot signatures</td><td>Everything regenerated above is unsigned. A machine enrolled with its own keys refuses it until it is re-signed.</td></tr>
+    <tr><td>SELinux labels</td><td>A rescue system without SELinux may not write labels back, and a copy made without extended attributes has none. An enforcing system with unlabeled files refuses logins.</td></tr>
+    <tr><td>Swapfile</td><td>An active swapfile is in no file-level backup, and its <code>resume_offset=</code> changes when it is re-created.</td></tr>
+    <tr><td>Partition types</td><td>The firmware boots only a partition typed <em>EFI System</em>; systemd-boot reads entries only from the ESP or a partition typed <em>XBOOTLDR</em>. Wrong types restore every file and still do not boot.</td></tr>
+  </tbody>
+</table></div>
+<div class="note"><p><strong>The quiet failure:</strong> if you restore from an installed system with the old disk still connected, the old ids still exist. A check that only asks “does this id exist?” passes, and the restored disk boots by unlocking — and running from — the old disk. The right check is that every boot-chain reference resolves to the <em>new</em> disk.</p></div>
+
+<h2 id="manual-outline">The manual outline</h2>
+<p>These are the steps in order, with the commands that perform them. Device names (<code>/dev/sdX</code>), the archive name and the repository path are yours to fill in.</p>
+
+<h3>1. Boot something that is not the target</h3>
+<p>Run the restore from a live USB, or from an installed system with the new disk attached as a second disk. Never restore over the root filesystem you are running from. From an installed system, also keep its firmware boot order untouched: install loaders with <code>bootctl --no-variables install</code> or <code>grub-install --no-nvram --removable</code>, write no <code>efibootmgr</code> entries, and pick the restored disk from the firmware boot menu.</p>
+
+<h3>2. Partition, encrypt and format the new disk like the old one</h3>
+<p>Recreate the layout the backed-up <code>fstab</code> describes: the ESP, a separate <code>/boot</code> if you had one, root, swap, <code>/home</code>, the LUKS containers and LVM volumes, the btrfs subvolumes. Then set the partition types the firmware and systemd-boot look for:</p>
+<div class="codeblock"><pre><code>sgdisk -t N:ef00 /dev/sdX   # the ESP: EFI System
+sgdisk -t N:ea00 /dev/sdX   # a vfat /boot beside it: XBOOTLDR</code></pre></div>
+<p>If GRUB opens an encrypted <code>/boot</code>, give that container a KDF your GRUB can open: argon2id needs GRUB 2.14 or later (2.12 has no argon2); pbkdf2 needs GRUB 2.02 or later for LUKS1 and 2.06 or later for LUKS2.</p>
+
+<h3>3. Mount the target tree the way fstab mounted it</h3>
+<div class="codeblock"><pre><code>cryptsetup open /dev/sdX3 &lt;crypt_name&gt;              # each LUKS container
+vgchange -ay                                         # if root is on LVM
+mount -o subvol=root /dev/mapper/&lt;crypt_name&gt; /mnt/target   # btrfs; ext4/LVM: mount /dev/mapper/&lt;vg&gt;-root /mnt/target
+mkdir -p /mnt/target/home
+mount -o subvol=home /dev/mapper/&lt;crypt_name&gt; /mnt/target/home
+mkdir -p /mnt/target/boot
+mount /dev/sdX2 /mnt/target/boot
+mkdir -p /mnt/target/boot/efi
+mount /dev/sdX1 /mnt/target/boot/efi                 # or /mnt/target/efi, where the source had it</code></pre></div>
+
+<h3>4. Extract the archive into it</h3>
+<p><code>borg extract</code> always writes into the current directory. Preview first; <code>--dry-run</code> does every step except writing:</p>
+<div class="codeblock"><pre><code>cd /mnt/target
+borg list /mnt/backup/borg-backup
+borg extract --dry-run --list /mnt/backup/borg-backup::ARCHIVE
+borg extract --list --numeric-ids /mnt/backup/borg-backup::ARCHIVE</code></pre></div>
+<p><code>--numeric-ids</code> keeps owners as the numbers the archive recorded. Without it, owners are mapped by name through the rescue system's user database: restoring Fedora from a Manjaro stick remapped every system account the two distros number differently. An exit code of 1 is a warning (for example, extended attributes the target filesystem cannot take) — read the list, do not stop there.</p>
+
+<h3>5. Rewrite every id to the new disk</h3>
+<p>Read the new ids with <code>lsblk -f</code> (or <code>blkid</code>). Then, under <code>/mnt/target</code>, rewrite <code>fstab</code>, <code>crypttab</code>, <code>crypttab.initramfs</code> and every command-line carrier from the table above — field by field, in the form each entry already uses (<code>UUID=</code>, <code>PARTUUID=</code>, <code>LABEL=</code>), leaving device-mapper <em>names</em> alone. Include any full GRUB configuration a generator will not rewrite, and the small ESP <code>grub.cfg</code> that finds <code>/boot</code> by <code>search --fs-uuid</code>.</p>
+
+<h3>6. Chroot in and rebuild the boot chain</h3>
+<div class="codeblock"><pre><code>mount --bind /dev /mnt/target/dev
+mount --bind /dev/pts /mnt/target/dev/pts
+mount -t proc proc /mnt/target/proc
+mount -t sysfs sys /mnt/target/sys
+mount --bind /run /mnt/target/run
+chroot /mnt/target /bin/bash</code></pre></div>
+<p>On a UEFI system, also bind <code>/sys/firmware/efi/efivars</code> if the bootloader install should write a firmware entry. Then rebuild what the restored system actually uses:</p>
+<div class="codeblock"><pre><code># initramfs — one of:
+dracut --regenerate-all --force           # Fedora family
+update-initramfs -c -k &lt;kernel-version&gt;    # Debian family, per installed kernel
+mkinitcpio -P                             # Arch family
+
+# GRUB (EFI): reinstall, then regenerate its config
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=&lt;id&gt; --recheck
+grub-mkconfig -o /boot/grub/grub.cfg       # Fedora: grub2-mkconfig -o /boot/grub2/grub.cfg
+
+# systemd-boot
+bootctl install
+
+# a UKI or Type #1 entry through kernel-install (after /etc/kernel/cmdline names the new disk)
+kernel-install add &lt;kernel-version&gt; /lib/modules/&lt;kernel-version&gt;/vmlinuz
+
+# Secure Boot with your own keys (sbctl)
+sbctl sign-all
+sbctl verify</code></pre></div>
+<p>Three exceptions catch people. On Fedora with shim on the ESP, keep the signed GRUB image and do not run <code>grub2-install</code> — it would replace it with an unsigned one. Where UKIs come from mkinitcpio presets, rebuild them with <code>mkinitcpio -P</code>, not <code>kernel-install</code>, which would add a second set of entries. And <code>bootctl install</code> writes a fresh, unsigned <code>systemd-boot</code> that <code>sbctl sign-all</code> does not know about; under your own Secure Boot keys, sign that file with <code>sbctl sign -s</code> before rebooting. (On aarch64, GRUB's target is <code>arm64-efi</code>.)</p>
+
+<h3>7. Swapfile and SELinux</h3>
+<p>Re-create any swapfile <code>fstab</code> names, and if you hibernate into it, point <code>resume_offset=</code> at its new blocks (on btrfs, <code>btrfs inspect-internal map-swapfile -r</code> prints it). On an SELinux system, still inside the chroot:</p>
+<div class="codeblock"><pre><code>touch /.autorelabel</code></pre></div>
+<p>The first boot relabels every file and reboots once.</p>
+
+<h3>8. Check before you reboot</h3>
+<p>Search the restored <code>/etc</code>, <code>/boot</code> and ESP for every old id you replaced. A reference that names a missing id will stop the boot; one that names an id on <em>another</em> connected disk will boot, unlock or mount that disk. Neither should be left.</p>
+
+<h2 id="test-the-restore">Test the restore before you need it</h2>
+<p>A backup you have never restored is a hope, not a backup. The only proof that the steps above work for <em>your</em> layout is to do them: restore onto a spare drive, boot it from the firmware menu, log in, check the network, compare the restored files against the archive, and confirm your own disks were not written. Then do it again after any change to the boot layout.</p>
+<p>The test is what finds the faults no check does. On real machines, test restores have found:</p>
+<ul>
+  <li>a restore that would <strong>not</strong> have booted with every check passing — a GRUB core built from source on the original machine, kept as if it were the distro's signed image, still unlocked the original disk's <code>/boot</code>, and the checks accepted the original disk's ids because that disk was still installed;</li>
+  <li>a leftover <code>grub.cfg</code> on a systemd-boot machine taken for the bootloader, while no UKI was rebuilt — every image still carried an initramfs that unlocked the original disk;</li>
+  <li>restored systems that unlocked and mounted the host's <em>other</em> disks at boot — an SD card, the backup drive itself — with the <code>crypttab</code> entries and keyfiles that came back in the restore.</li>
+</ul>
+<p>No spare drive? A disk image on the backup drive, booted in a VM, proves the restore — but not that your machine's firmware will boot it. Count it as that and no more.</p>
+
+<div class="tool"><p><strong>Automated:</strong> <a href="https://github.com/doug445/linux-backup-system">linux-backup-system</a> runs this whole outline as one restore, from a live USB or an installed system: it checks the new disk's partition types, extracts with <code>--numeric-ids</code>, rewrites <code>fstab</code>, <code>crypttab</code> and every command-line carrier to the new disk's ids, re-creates swapfiles and creates <code>/.autorelabel</code>, then chroots in and rebuilds the initramfs or UKI, GRUB or systemd-boot — detected, not configured — and re-signs with sbctl where it finds its keys. It refuses to call the restore complete while anything resolves to a disk other than the target. A daily check asserts from the backup drive that a restore would boot, and a restore test bed turns the test above into a verdict: <code>PASS</code> for a drive the machine booted, <code>PASS-VM</code> for a disk image booted only in a VM. Every script takes <code>--dry-run</code>.</p></div>
+
+<h2 id="status">What is verified, and what is not</h2>
+<p>A ✅ below is a real backup, a passing verify, and a restore onto a blank disk that booted, logged in and came up on the network, byte-compared against the archive. The tables rest on 10 verified systems, plus an eleventh — an M2 Max running Fedora Asahi Remix — restored onto a disk image and booted in a VM (<code>PASS-VM</code>). A <code>PASS-VM</code> is evidence for the restore, never for the machine's firmware booting it, and it never turns a row ✅ on its own.</p>
+<div class="table-scroll"><table>
+  <thead><tr><th></th><th>✅ verified</th><th>⚠️ under test</th><th>❌ wanted</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Distros</strong></td><td>Fedora; Fedora Asahi Remix (aarch64, over a fresh Asahi install, never bare metal); Debian / Ubuntu / Linux Mint; Arch / Manjaro / EndeavourOS</td><td>—</td><td>openSUSE; Slackware, Gentoo, Alpine, Void, NixOS, Solus</td></tr>
+    <tr><td><strong>Root filesystems</strong></td><td>btrfs (subvolumes, swapfile), ext4, root on LUKS2 (sd-encrypt), LVM-on-LUKS</td><td>—</td><td>xfs, f2fs</td></tr>
+    <tr><td><strong>Boot layouts</strong></td><td>GRUB (EFI); systemd-boot (Type #1 and UKI); UKIs from dracut, kernel-install and mkinitcpio; Secure Boot with sbctl keys; encrypted argon2id <code>/boot</code>; plain <code>/boot</code>; ESP at <code>/efi</code> + XBOOTLDR; SELinux relabel (enforcing and permissive)</td><td>Secure Boot through shim; restore from a live USB</td><td>GRUB legacy BIOS; encrypted pbkdf2 <code>/boot</code>; Raspberry Pi firmware boot; Limine; rEFInd</td></tr>
+  </tbody>
+</table></div>
+<p>Not handled by the restore yet: image-based distros (ostree, transactional), NixOS, ZFS and bcachefs roots, and mdadm RAID.</p>
+<div class="note"><p><strong>Testing only unless your setup is all green.</strong> Unless your distro, root filesystem and boot layout are all ✅ in the <em>Bare-metal restore</em> column of the <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/STATUS.md">status table</a>, use this for testing, not production.</p></div>
+
+<h2 id="faq">Frequently asked questions</h2>
+<details><summary>Can I restore a Borg backup onto a smaller or larger disk?</summary><p>Yes, as long as what the archive holds fits. A file-level restore does not care how big the old partitions were: you create the new ones, and the ids in fstab, crypttab and the command lines are rewritten to match them either way.</p></details>
+<details><summary>Why does my restored system stop in the initramfs?</summary><p>A common cause is a stale id. A kernel command line with the old rd.luks.uuid=, root= or cryptdevice=, or an initramfs that was built before crypttab was fixed, asks for a container or filesystem that is not on the new disk, so the boot stops in the initramfs with every file present. Fix every carrier, then regenerate the initramfs.</p></details>
+<details><summary>Do I have to re-sign anything for Secure Boot after a restore?</summary><p>With your own keys, yes: every loader, initramfs and UKI the rebuild regenerates is unsigned, and the firmware refuses them until they are signed again, for example with sbctl sign-all and a check with sbctl verify. With a distro's shim, keep the distro's signed loaders instead of reinstalling them.</p></details>
+<details><summary>Why use --numeric-ids when extracting?</summary><p>Without it, borg maps owners by name through the rescue system's own user database. Two distros number their system accounts differently, so restoring one distro from another's live USB can give every system file the wrong owner. --numeric-ids keeps the numbers the archive recorded.</p></details>
+<details><summary>Does the restored disk need a new firmware boot entry?</summary><p>Firmware boot entries are in no backup. From a live USB the bootloader install can write one. From an installed system, write none, so the running machine's boot order is left alone: install the loader to the removable-media fallback path and pick the restored disk from the firmware boot menu.</p></details>
+<details><summary>Can I get back a few files without a full restore?</summary><p>Yes. borg mount mounts a repository or archive as a FUSE filesystem you can browse and copy from, and borg extract can take paths inside the archive to extract only those, into the current directory.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+  <li><a href="https://borgbackup.readthedocs.io/en/stable/usage/extract.html">borg extract — Borg documentation</a> (writes into the current directory, <code>--numeric-ids</code>, <code>--dry-run</code>, extracting single paths)</li>
+  <li><a href="https://borgbackup.readthedocs.io/en/stable/usage/list.html">borg list — Borg documentation</a></li>
+  <li><a href="https://borgbackup.readthedocs.io/en/stable/usage/mount.html">borg mount — Borg documentation</a></li>
+  <li>Manual pages: <code>lsblk(8)</code>, <code>blkid(8)</code>, <code>sgdisk(8)</code> (type codes <code>ef00</code> EFI system partition, <code>ea00</code> XBOOTLDR partition), <code>dracut(8)</code>, <code>bootctl(1)</code>, <code>kernel-install(8)</code></li>
+  <li>Project docs on GitHub: <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/RESTORE.md">RESTORE.md</a>, <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/STATUS.md">STATUS.md</a>, <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/TESTED-SYSTEMS.md">TESTED-SYSTEMS.md</a>, <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/FAQ.md">FAQ.md</a></li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>linux-backup-system</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/linux-backup-system">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/linux-backup-system/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with Borg, Back In Time, Timeshift, Asahi Linux or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>

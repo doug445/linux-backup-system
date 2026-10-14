@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>linux-backup-system: restore-verified Linux backup</title>
+<meta name="description" content="Linux backup you can prove restores: Borg, Back In Time and btrfs/Timeshift layers, LUKS header backups, a daily restore check, and bare-metal restore that rebuilds the boot chain.">
+<link rel="canonical" href="https://doug445.github.io/linux-backup-system/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="style.css">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="linux-backup-system">
+<meta property="og:title" content="linux-backup-system: restore-verified backup for any Linux, built on Apple Silicon first">
+<meta property="og:description" content="Could you actually restore this machine? Borg, Back In Time and btrfs/Timeshift layers, a daily restore-readiness check, and bare-metal restores that rebuild GRUB, systemd-boot, UKIs and Secure Boot.">
+<meta property="og:url" content="https://doug445.github.io/linux-backup-system/">
+<meta property="og:image" content="https://doug445.github.io/linux-backup-system/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "linux-backup-system",
+      "description": "Restore-verified backup for Linux: Borg archives, Back In Time-format rsync snapshots, a btrfs send/receive or Timeshift snapshot layer, keyslot-tagged LUKS header backups, a daily restore-readiness check, and bare-metal restore that rebuilds GRUB, systemd-boot, Unified Kernel Images and an encrypted /boot.",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "Linux (aarch64, x86_64)",
+      "softwareVersion": "4.2.0",
+      "license": "https://opensource.org/licenses/MIT",
+      "url": "https://doug445.github.io/linux-backup-system/",
+      "downloadUrl": "https://github.com/doug445/linux-backup-system",
+      "codeRepository": "https://github.com/doug445/linux-backup-system",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Can a Mac running Asahi Linux be restored from a backup?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Run the Asahi installer from macOS to get a fresh Fedora Asahi Remix stub booting, then restore over it. The suite rewrites fstab, crypttab and every kernel command line to the new partitions, rebuilds the initramfs and GRUB inside the restored system, and verifies before calling it done. This was verified on a MacBook Pro (M1 Pro) in September 2026." } },
+        { "@type": "Question", "name": "Should I use it in production?", "acceptedAnswer": { "@type": "Answer", "text": "Only if your distro, root filesystem and boot layout are all marked verified for bare-metal restore in the project's status table. Otherwise use it for testing. A backup you have never restored is a hope, not a backup." } },
+        { "@type": "Question", "name": "Does a backup start when I plug the drive in?", "acceptedAnswer": { "@type": "Answer", "text": "No. Plugging the drive in unlocks and mounts it; a backup runs only when you start one or a timer fires. Every script takes --dry-run, and retention never deletes by age." } },
+        { "@type": "Question", "name": "Which systems are verified?", "acceptedAnswer": { "@type": "Answer", "text": "Ten systems are verified with a real bare-metal restore that booted, and an eleventh, an M2 Max, restored onto a disk image and booted in a VM. Verified layouts include GRUB, systemd-boot, UKIs, Secure Boot with sbctl keys, encrypted argon2id /boot and LVM-on-LUKS, on Fedora, Fedora Asahi Remix, Debian, Ubuntu, Mint, Arch, Manjaro and EndeavourOS." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="./">linux-backup-system</a>
+    <a href="restore-asahi-linux-from-backup/">Restore Asahi Linux</a>
+    <a href="bootable-bare-metal-restore-borg/">Bootable Borg restore</a>
+    <a href="https://github.com/doug445/linux-backup-system">GitHub</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Any Linux · aarch64 and x86_64 · MIT</p>
+    <h1>Backup you can prove restores, built on Apple Silicon first</h1>
+    <p class="lede">
+      Once a disk is gone, only one question matters: <em>could I actually restore this
+      machine?</em> linux-backup-system layers <strong>Borg</strong> archives,
+      <strong>Back In Time</strong>-format snapshots and a <strong>btrfs</strong> or
+      <strong>Timeshift</strong> snapshot layer, backs up LUKS headers, and checks daily, from what
+      is on the backup drive, that a restore would boot. On restore it rebuilds the boot chain for
+      whatever it finds: GRUB, systemd-boot, Unified Kernel Images, an encrypted <code>/boot</code>.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/doug445/linux-backup-system">Get it on GitHub</a>
+      <a class="btn" href="#quick-start">Quick start</a>
+      <a class="btn" href="#status">What's verified</a>
+    </div>
+    <ul class="facts" aria-label="At a glance">
+      <li>v4.2.0</li><li>Free and open source</li><li>Borg · Back In Time · btrfs · Timeshift</li>
+      <li>GRUB · systemd-boot · UKI</li><li>Secure Boot restore verified</li><li>Every script has --dry-run</li>
+    </ul>
+  </div>
+</header>
+
+<main class="wrap">
+
+<div class="note"><p><strong>Testing only, unless your setup is all green.</strong> Unless your
+  distro, root filesystem and boot layout are all ✅ in the bare-metal restore column of the
+  <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/STATUS.md#tested--untested">status table</a>,
+  use this for testing, not production. A backup you have never restored is a hope, not a
+  backup.</p></div>
+
+<h2 id="problems">Guides</h2>
+<div class="cards">
+  <a class="card" href="restore-asahi-linux-from-backup/"><strong>Restore Asahi Linux from a backup</strong><span>Why a Mac running Linux can't be restored like a PC, and the path that works: a fresh Asahi install, then restore over it.</span></a>
+  <a class="card" href="bootable-bare-metal-restore-borg/"><strong>A bootable bare-metal restore from Borg</strong><span>Why a file-level archive isn't a bootable machine, and everything that has to be rewritten and rebuilt.</span></a>
+</div>
+
+<h2 id="apple-silicon">A Mac running Linux can be rebuilt from this backup</h2>
+<p>
+  A dead disk, a wiped machine, an upgrade that won't boot. Run the Asahi installer from macOS to
+  get a fresh Fedora Asahi Remix stub booting; that is the only part of the machine that is
+  Apple's to make. Then point this suite's restore at it. Every file comes back.
+  <code>fstab</code>, <code>crypttab</code> and every kernel command line are rewritten to the new
+  partitions' ids. The initramfs and GRUB config are rebuilt inside the restored system, and a
+  final check refuses to call it done while anything would boot, unlock or mount the wrong disk.
+  <strong>Verified on a MacBook Pro (M1 Pro) in September 2026.</strong>
+</p>
+<p>
+  On x86-64 it's the harder case: bare metal means recreating the boot chain from files alone.
+  That covers GRUB or systemd-boot, UKIs and their embedded command lines, Secure Boot with shim
+  or your own keys, LVM-on-LUKS and an encrypted <code>/boot</code>. That is what the rest of the
+  suite exists for, eight such restores deep.
+</p>
+
+<h2 id="quick-start">Quick start</h2>
+<div class="codeblock"><pre><code>git clone https://github.com/doug445/linux-backup-system.git
+cd linux-backup-system
+sudo ./deploy.sh --dry-run     # detect distro, fs, boot layout, drive; print the plan; change nothing
+sudo ./deploy.sh               # install, and set the drive up if none is mounted
+sudo borg-backup.sh --dry-run  # see exactly what the first backup would do
+sudo borg-backup.sh            # the first backup
+sudo backup-verify.sh          # would a bare-metal restore boot? exit 0 = yes</code></pre></div>
+<p><strong>A backup never starts because a drive appeared.</strong> Plugging the drive in unlocks
+  and mounts it; a backup runs when you start one or a timer fires. Retention never deletes by
+  age.</p>
+
+<h2 id="status">What's verified</h2>
+<p>
+  Ten systems are verified with a real backup, a passing <code>backup-verify.sh</code> and a
+  bare-metal restore onto a blank disk that booted, logged in, came up on the network and
+  byte-compared against the archive. An eleventh, an M2 Max, was restored onto a disk image and
+  booted in a VM; the real boot behind a second Asahi stub is still to come.
+</p>
+<div class="table-scroll"><table>
+  <thead><tr><th></th><th>✅ Verified</th><th>❌ Wanted</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Distros</strong></td><td>Fedora, Fedora Asahi Remix (aarch64), Debian / Ubuntu / Linux Mint, Arch / Manjaro / EndeavourOS</td><td>openSUSE; Slackware, Gentoo, Alpine, Void, NixOS, Solus</td></tr>
+    <tr><td><strong>Root filesystems</strong></td><td>btrfs (subvolumes, swapfile), ext4, root on LUKS2, LVM-on-LUKS</td><td>xfs, f2fs</td></tr>
+    <tr><td><strong>Boot layouts</strong></td><td>GRUB (EFI), systemd-boot (Type #1 and UKI), UKIs from dracut / kernel-install / mkinitcpio, Secure Boot with sbctl keys, encrypted argon2id <code>/boot</code>, ESP at <code>/efi</code> + XBOOTLDR, SELinux relabel, Apple Silicon over a fresh Asahi install</td><td>GRUB legacy BIOS, encrypted pbkdf2 <code>/boot</code>, Raspberry Pi, Limine, rEFInd; ⚠️ Secure Boot through shim, restore from a live USB</td></tr>
+  </tbody>
+</table></div>
+<p>Full tables: <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/STATUS.md">STATUS.md</a>.
+  The machines: <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/TESTED-SYSTEMS.md">TESTED-SYSTEMS.md</a>.</p>
+
+<h2 id="contribute">Help make it universal</h2>
+<p>
+  One person can't own every distro, filesystem and boot layout. A working patch for a ❌ row
+  puts <strong>your name on the copyright line of the licence</strong>, in the release notes and
+  in the contributors table. Most wanted are the distro families the package map doesn't know yet
+  (Slackware, Gentoo, Alpine, Void, NixOS, Solus) and a Raspberry Pi. See
+  <a href="https://github.com/doug445/linux-backup-system/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>.
+</p>
+
+<h2 id="faq">FAQ</h2>
+<details>
+  <summary>Can a Mac running Asahi Linux be restored from a backup?</summary>
+  <p>Yes. Run the Asahi installer from macOS to get a fresh Fedora Asahi Remix stub booting, then
+    restore over it. The suite rewrites fstab, crypttab and every kernel command line to the new
+    partitions, rebuilds the initramfs and GRUB inside the restored system, and verifies before
+    calling it done. This was verified on a MacBook Pro (M1 Pro) in September 2026.</p>
+</details>
+<details>
+  <summary>Should I use it in production?</summary>
+  <p>Only if your distro, root filesystem and boot layout are all marked verified for bare-metal
+    restore in the project's status table. Otherwise use it for testing. A backup you have never
+    restored is a hope, not a backup.</p>
+</details>
+<details>
+  <summary>Does a backup start when I plug the drive in?</summary>
+  <p>No. Plugging the drive in unlocks and mounts it; a backup runs only when you start one or a
+    timer fires. Every script takes --dry-run, and retention never deletes by age.</p>
+</details>
+<details>
+  <summary>Which systems are verified?</summary>
+  <p>Ten systems are verified with a real bare-metal restore that booted, and an eleventh, an M2
+    Max, restored onto a disk image and booted in a VM. Verified layouts include GRUB,
+    systemd-boot, UKIs, Secure Boot with sbctl keys, encrypted argon2id /boot and LVM-on-LUKS, on
+    Fedora, Fedora Asahi Remix, Debian, Ubuntu, Mint, Arch, Manjaro and EndeavourOS.</p>
+</details>
+
+<p>Encrypting the machine as well? See <a href="https://doug445.github.io/AsahiLocker/">AsahiLocker</a>
+  (Apple Silicon) and <a href="https://doug445.github.io/LinuxLocker/">LinuxLocker</a>.</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>linux-backup-system</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/linux-backup-system">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/linux-backup-system/releases">Releases</a></p>
+    <p>Independent project. Not affiliated with Borg, Back In Time, Timeshift, Asahi Linux or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>
