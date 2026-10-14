@@ -49,14 +49,14 @@ have.
 | Plain (unencrypted) `/boot` | ✅ | a restored machine booting is the bare-metal row below |
 | **Encrypted pbkdf2 `/boot`** (LUKS1, or LUKS2 with pbkdf2 — stock GRUB) | ❌ not under test | verify section 6 names the KDF and GRUB floor; `restore-rebuild-boot.sh --dry-run` prints `encrypted /boot: LUKS…/pbkdf2 — needs GRUB >= 2.02/2.06`; a restored machine unlocks `/boot` |
 | **Raspberry Pi firmware boot** (Raspberry Pi OS, `/boot/firmware`) | ❌ — written against synthetic listings only | `bx_esp_mount` finds `/boot/firmware`; borg lists it as a source; verify section 3 PASSes on a real archive; `restore-rebuild-boot.sh --dry-run` shows the `cmdline.txt` rewrite; a restored card boots |
-| **Limine** (CachyOS's default) | ⚠️ under test | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
-| **rEFInd** | ⚠️ under test | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
+| **Limine** (CachyOS's default) | ❌ written and fixture-tested, never run on metal — **contributions wanted** | verify section 3 counts `limine.conf`; `restore-rebuild-boot.sh --dry-run` shows `limine=true` and the `limine-install` (CachyOS) or binary copy + `efibootmgr` plan; a restored machine boots |
+| **rEFInd** | ❌ written and fixture-tested, never run on metal — **contributions wanted** | verify section 3 counts `refind.conf`; the dry run shows `refind=true` and `refind-install --yes`; a restored machine boots |
 | **SELinux restore relabel** — ✅ on Linux Mint (permissive) and Fedora (enforcing); RHEL not yet | ✅ | a report from RHEL or another SELinux distro: the restore log says it created `/.autorelabel`; the first boot relabels, reboots once, and logins and services work |
 | Bare-metal restore — Manjaro, btrfs on LUKS2 (sd-encrypt), systemd-boot + mkinitcpio UKIs, Secure Boot with sbctl keys | ✅ total system restore, booted fully working | a report on another distro or boot layout |
 | Bare-metal restore — Fedora 44, btrfs on LUKS2 (dracut), systemd-boot + kernel-install UKIs, SELinux enforcing | ✅ total system restore, booted fully working | a report on RHEL or another dracut distro |
 | Bare-metal restore — EndeavourOS, ext4 on LUKS2 (dracut), systemd-boot Type #1 entries, KDE Plasma | ✅ total system restore, booted fully working | a report on another Type #1 setup (Arch with mkinitcpio, a separate `/home`) |
 | Bare-metal restore — Fedora 44 on a 2014 MacBook Pro, btrfs on LUKS2 (dracut, keyfile), encrypted argon2id `/boot` opened by GRUB 2.14 built from source behind shim, SELinux enforcing | ✅ total system restore, booted working (VM boot and real boot) | a report from another machine running a from-source GRUB, or an Intel Mac on another distro |
-| Bare-metal restore — shim Secure Boot, Limine, rEFInd; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
+| Bare-metal restore — shim Secure Boot; restore from a live USB | ⚠️ under test | `sudo testbed/testbed.sh all`, boot the test drive, `testbed.sh collect` → `VERDICT: PASS`; attach the state directory's `LEDGER.md`, boot report and byte comparison |
 | **Bare-metal restore — Raspberry Pi, GRUB legacy BIOS, encrypted pbkdf2 `/boot`, openSUSE, and the distros the package map does not know** | ❌ not under test — **most wanted** | the same test bed run on that hardware |
 | Apple Silicon restore over a fresh Asahi install — never bare metal: Asahi installer from macOS first, then this backup restored over it | ✅ | a report from an M2 or later, or with the current release, is still welcome |
 
@@ -75,7 +75,6 @@ one. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#hand-rolling-a-fix-for-yo
 | **mdadm RAID, multi-device btrfs** | array UUIDs in `mdadm.conf` and the initramfs are not rewritten; the arrays must exist before the files go back | the `mdadm.conf` rewrite, an initramfs regeneration that picks it up |
 | **syslinux / extlinux, LILO / elilo** (Slackware) | command lines are rewritten, but the loader itself is never reinstalled | an `extlinux --install` / `lilo` step in `restore-rebuild-boot.sh` |
 | **LUKS unlocked by TPM2, FIDO2 or Clevis** | the new container carries no token enrollment; the restored system asks for the passphrase (not a failure, but not documented) | a post-restore note or a re-enrollment step (`systemd-cryptenroll`, `clevis luks bind`) |
-| **Secure Boot with your own keys** (sbctl) | files the rebuild regenerates are unsigned until re-signed | an `sbctl sign-all` step when sbctl is in use |
 | **Non-systemd distros** — Void (runit), Alpine / Gentoo (OpenRC), Slackware | `kernel-install` and `bootctl` are absent; only the GRUB path applies, and the backup side's units need a cron or service equivalent | the family (see below), and a scheduler for ad-hoc/scheduled mode without systemd |
 
 ### Not possible — please do not spend time on these

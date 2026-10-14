@@ -154,8 +154,11 @@ on mdadm RAID, a volume group over several physical volumes.
   detected `boot_on_luks=true`, `grub=true`, `uki=false`, resolved the locally
   built GRUB 2.14 (not the stock 2.12 in `/usr/sbin`) and planned
   `update-initramfs -k all -c` + `grub-install` + `update-grub` — but that plan
-  has not yet been *executed* by a real bare-metal restore. Run the real restore
-  path on hardware before trusting it, using `--dry-run` first.
+  had not been *executed* by a real bare-metal restore when this was written.
+  **Since done:** the 4.0.0 restore of the Linux Mint triple-boot machine —
+  encrypted LUKS2 argon2id `/boot` opened by GRUB 2.14, initramfs-tools — ran
+  this path and booted (see [TESTED-SYSTEMS.md](TESTED-SYSTEMS.md)). On any
+  layout not marked ✅, still run `--dry-run` first.
 - **Timeshift free-space prune has fired only in the sandbox.** On the ext4
   host the count prune, the `MIN_KEEP` floor and the aborted-snapshot cleanup
   ran for real; the free-space branch deleted real directories only on the
