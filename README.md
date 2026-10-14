@@ -36,6 +36,9 @@ port to write — [Contributing](#contributing) says how.
 > unlocks and mounts it; a backup runs when you start one or a timer fires.
 > Every script takes `--dry-run`. Retention never deletes by age.
 
+**Guides:** [Restore Asahi Linux from a backup](https://doug445.github.io/linux-backup-system/restore-asahi-linux-from-backup/) ·
+[A bootable bare-metal restore from Borg](https://doug445.github.io/linux-backup-system/bootable-bare-metal-restore-borg/)
+
 ## Quick start
 
 ```bash
@@ -206,8 +209,8 @@ is still unconfirmed.
 
 ## Audit
 
-Reviewed in full on 2026-09-12 by **Claude Fable 5.1** (Anthropic) ahead of
-the 3.0.0 release: every script, the units, the tray and the documentation,
+Code-audited in full, for coding excellence, on 2026-09-12 by **Claude Fable
+5.1** (Anthropic), ahead of the 3.0.0 release: every script, the units, the tray and the documentation,
 with each finding reproduced before it was fixed. Found and fixed in 3.0.0:
 the `timeback` shell function was defined but never installed; the drive-attach
 unit pointed at `/usr/local/bin` while the installer put the script in
