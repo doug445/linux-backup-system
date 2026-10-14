@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Restore Asahi Linux From a Backup on an Apple Silicon Mac</title>
+<meta name="description" content="A Mac running Asahi Linux cannot be restored bare metal: macOS makes its boot chain. Reinstall from macOS, restore over it, fix the disk ids, rebuild the boot.">
+<link rel="canonical" href="https://doug445.github.io/linux-backup-system/restore-asahi-linux-from-backup/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="linux-backup-system">
+<meta property="og:title" content="Restore Asahi Linux From a Backup on an Apple Silicon Mac">
+<meta property="og:description" content="A Mac running Asahi Linux cannot be restored bare metal: macOS makes its boot chain. Reinstall from macOS, restore over it, fix the disk ids, rebuild the boot.">
+<meta property="og:url" content="https://doug445.github.io/linux-backup-system/restore-asahi-linux-from-backup/">
+<meta property="og:image" content="https://doug445.github.io/linux-backup-system/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "How to restore Asahi Linux from a backup on an Apple Silicon Mac",
+      "description": "A Mac running Asahi Linux cannot be restored bare metal: macOS makes its boot chain. Reinstall from macOS, restore over it, fix the disk ids, rebuild the boot.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/linux-backup-system/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/linux-backup-system/restore-asahi-linux-from-backup/",
+      "about": { "@type": "SoftwareApplication", "name": "linux-backup-system", "url": "https://doug445.github.io/linux-backup-system/", "applicationCategory": "UtilitiesApplication", "operatingSystem": "Linux (aarch64, x86_64)" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "linux-backup-system", "item": "https://doug445.github.io/linux-backup-system/" },
+        { "@type": "ListItem", "position": 2, "name": "Restore Asahi Linux", "item": "https://doug445.github.io/linux-backup-system/restore-asahi-linux-from-backup/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Can I back up the Asahi stub partition itself?", "acceptedAnswer": { "@type": "Answer", "text": "No. m1n1, U-Boot and the partitions the Mac's firmware boots from live outside Linux and cannot be backed up or recreated by it. The stub is a small APFS container holding a minimal macOS with m1n1 in its kernel slot, under a boot policy the machine's own Secure Enclave signs when the installer sets it. Only the Asahi installer can make one." } },
+        { "@type": "Question", "name": "Can I delete macOS once Asahi Linux is installed?", "acceptedAnswer": { "@type": "Answer", "text": "Not if you want to be able to reinstall. The Asahi installer runs from a macOS that still boots and finishes with one step in recoveryOS, so keep macOS bootable, and never delete the 2–3 GB stub container beside your Linux partitions to reclaim its space." } },
+        { "@type": "Question", "name": "What happens if Apple stops serving the stub image for my Mac?", "acceptedAnswer": { "@type": "Answer", "text": "The installer downloads the stub macOS image for your model from Apple's servers. The day it stops being served, a Mac whose stub partitions are gone has no way to get a Linux boot chain back, and no backup can put it there. The recovery that needs nothing from Apple is a restore over the existing boot chain: keep the stub, the ESP and /boot, reformat or replace only the root, and restore over it." } },
+        { "@type": "Question", "name": "Can I boot a live USB on my Mac to run the restore?", "acceptedAnswer": { "@type": "Answer", "text": "Maybe. Asahi's U-Boot documentation describes booting a USB drive from the U-Boot prompt with run bootcmd_usb0. On the M2 Max used for testing, U-Boot enumerated none of the USB drives tried, through two bridges, direct and through a hub. Restore from a live USB is marked ⚠️ (under test) in the status table." } },
+        { "@type": "Question", "name": "Is a restore on an M2 Max verified?", "acceptedAnswer": { "@type": "Answer", "text": "Restored and booted in a VM, not yet booted by the Mac. On 2026-09-18 an M2 Max backup was restored onto a disk image and booted in QEMU, with the verdict PASS-VM and 99.991 % of files restored with the archived size. A PASS-VM is evidence for the restore, not for the Mac's firmware booting it; the real boot behind a second Asahi stub is still to come." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">linux-backup-system</a>
+    <a href="../restore-asahi-linux-from-backup/">Restore Asahi Linux</a>
+    <a href="../bootable-bare-metal-restore-borg/">Bootable Borg restore</a>
+    <a href="https://github.com/doug445/linux-backup-system">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">linux-backup-system</a> › Restore Asahi Linux</p>
+<h1>How to restore Asahi Linux from a backup on an Apple Silicon Mac</h1>
+<p class="lede">Your Fedora Asahi Remix install is gone — a dead disk, a wiped Linux partition, an upgrade that will not boot — and you have a backup of its files. On a PC you would partition a new disk, put the files back and reinstall the bootloader. On an Apple Silicon Mac that cannot work; this page explains why, the route that does work, what to protect now, and exactly how much of that route has been tested.</p>
+
+<h2 id="why-not-bare-metal">Why a Mac running Linux cannot be restored the x86 way</h2>
+<p>On an x86 PC the firmware boots a file from a FAT partition, the EFI System Partition (ESP). Everything between the firmware and the kernel is files, so a file-level backup plus a bootloader reinstall can rebuild the machine on a blank disk.</p>
+<p>A Mac running Linux starts a chain that Linux did not make and cannot make:</p>
+<ul>
+  <li><strong>A stub macOS.</strong> The Asahi installer creates a small APFS container per install — Asahi's partitioning notes put it at 2.5 GB, holding the parts of iBoot and macOS needed to boot the machine, including a copy of recoveryOS. Its boot policy is signed by the machine's own Secure Enclave when the installer sets it, and m1n1 sits in its kernel slot.</li>
+  <li><strong>m1n1 and U-Boot on the ESP.</strong> m1n1 loads its second stage and U-Boot from the ESP that belongs to that stub; each Asahi install gets its own ESP, logically tied to its stub.</li>
+  <li><strong>shim, then GRUB.</strong> U-Boot's UEFI implementation loads shim, which loads GRUB on <code>arm64-efi</code>, which boots a 16k-page kernel.</li>
+  <li><strong>Boot entries in a file.</strong> U-Boot keeps its EFI variables in <code>ubootefi.var</code> on the ESP the stub names. Entries shim's fallback writes at boot time persist there; entries <code>efibootmgr</code> writes from Linux do not survive a reboot.</li>
+  <li><strong>A 4Kn disk.</strong> Apple's NVMe uses 4096-byte logical sectors, and the first partitions on it can never be recreated from Linux.</li>
+</ul>
+<p>The first link — the stub and its signed boot policy — is not a file, so no backup can hold it and no restore can write it. On this hardware, “bare metal” means “after the installer”: you get a fresh boot chain from Apple's side first, then put your system back over it.</p>
+
+<h2 id="the-path-that-works">The path that works: reinstall from macOS, then restore over it</h2>
+<p>The order is fixed: a fresh Fedora Asahi Remix booting, then your backup restored over that install, then the restored system pointed at the new partitions and its boot files rebuilt from inside it.</p>
+
+<h3>1. Get a fresh Fedora Asahi Remix booting from macOS</h3>
+<p>In macOS, open Terminal and run the installer command that Asahi Linux publishes:</p>
+<div class="codeblock"><pre><code>curl https://alx.sh | sh</code></pre></div>
+<p>The installer runs from a macOS that still boots and finishes with one step in recoveryOS. It downloads the stub macOS image for your model from Apple's servers to build the boot chain — Asahi's own notes say the Apple components come from Apple's publicly available restore images, and that even a local install still reaches Apple's CDN for them. Boot the new install once, so you know the chain from the stub to GRUB works before you put anything over it.</p>
+
+<h3>2. Restore your files over the fresh install</h3>
+<p>The files go onto the new install's root (and <code>/home</code>), mounted at a target path the way the backed-up <code>fstab</code> mounts them. On Fedora Asahi Remix that is typically a btrfs root with <code>root</code> and <code>home</code> subvolumes, an ext4 <code>/boot</code> and the ESP at <code>/boot/efi</code>.</p>
+<p>Never restore over the root filesystem you are running from. The restore has to run from another system: a live USB, if your Mac's U-Boot boots one, or another Linux system that can see the disk. This is the weakest step on a Mac — see <a href="#verified">what is verified</a> below.</p>
+<p>From a Borg repository, the extraction looks like this. <code>borg extract</code> always writes into the current directory, so change into the target first; <code>--dry-run</code> runs every step except writing:</p>
+<div class="codeblock"><pre><code>cd /mnt/target
+borg list /mnt/backup/borg-backup
+borg extract --dry-run --list /mnt/backup/borg-backup::ARCHIVE
+borg extract --list --numeric-ids /mnt/backup/borg-backup::ARCHIVE</code></pre></div>
+<p><code>--numeric-ids</code> restores owners by number, not by name through the rescue system's own user database, which numbers system accounts differently from yours.</p>
+
+<h3>3. Point fstab, crypttab and the kernel command lines at the new partitions</h3>
+<p>The installer made new partitions with new ids. Your restored <code>/etc/fstab</code>, <code>/etc/crypttab</code> and kernel command lines still name the old ones. Read the new ids with <code>lsblk -f</code>, then rewrite each entry in the form it already uses (<code>UUID=</code>, <code>PARTUUID=</code>, <code>LABEL=</code>), leaving device-mapper <em>names</em> alone.</p>
+<p>On Fedora Asahi Remix the command lines live in the BLS entries under <code>/boot/loader/entries/</code> and in GRUB's defaults, <code>/etc/default/grub</code> and its drop-ins. An encrypted root adds <code>rd.luks.uuid=</code>; a stale one gives you a machine that stops in the initramfs with every file present.</p>
+<p>The small <code>grub.cfg</code> on the ESP, in <code>EFI/fedora/</code>, finds <code>/boot</code> with <code>search --fs-uuid</code>. Point it at the filesystem that now holds <code>/boot/grub2/</code>.</p>
+
+<h3>4. Rebuild the initramfs and GRUB from inside the restored system</h3>
+<p>Bind the running system's kernel interfaces into the target and chroot into it:</p>
+<div class="codeblock"><pre><code>mount --bind /dev /mnt/target/dev
+mount --bind /dev/pts /mnt/target/dev/pts
+mount -t proc proc /mnt/target/proc
+mount -t sysfs sys /mnt/target/sys
+mount --bind /run /mnt/target/run
+chroot /mnt/target /bin/bash</code></pre></div>
+<p>Inside, regenerate every initramfs and the GRUB configuration:</p>
+<div class="codeblock"><pre><code>dracut --regenerate-all --force
+grub2-mkconfig -o /boot/grub2/grub.cfg</code></pre></div>
+<p>Do not reinstall the loaders themselves. With shim on the ESP, the signed GRUB image stays where it is; <code>grub2-install</code> would replace it with an unsigned one. And do not trust <code>os-release</code> for the ESP's directory: Fedora Asahi Remix reports <code>ID=fedora-asahi-remix</code> but keeps its loaders in <code>EFI/fedora</code>. A rebuild keyed to the <code>ID</code> takes the wrong branch and can leave shim on the removable path with no <code>grubaa64.efi</code> beside it — which is exactly what testing on an M2 Max found.</p>
+
+<h3>5. Relabel for SELinux, check, then reboot</h3>
+<p>Fedora Asahi Remix uses SELinux (the M2 Max tested here runs it enforcing), and an enforcing system with unlabeled files refuses logins. Have the first boot relabel everything (still inside the chroot):</p>
+<div class="codeblock"><pre><code>touch /.autorelabel</code></pre></div>
+<p>The first boot relabels every file and reboots once. Before that reboot, search the restored <code>/etc</code>, <code>/boot</code> and ESP for every old id you replaced. Anything that still names one will boot, unlock or mount the wrong disk, or nothing.</p>
+
+<div class="tool"><p><strong>Automated:</strong> <a href="https://github.com/doug445/linux-backup-system">linux-backup-system</a> does steps 2 to 5 for you over a fresh Asahi install: every file comes back; <code>fstab</code>, <code>crypttab</code> and every kernel command line are rewritten to the new partitions' ids; the initramfs and the GRUB configuration are rebuilt inside the restored system, finding the ESP directory that actually holds the loaders; <code>/.autorelabel</code> is created on SELinux systems; and a verification refuses to call it done while anything would boot, unlock or mount the wrong disk. Its daily verify pass notes on every Asahi host that a restore there is never bare metal. Every script takes <code>--dry-run</code>.</p></div>
+
+<h2 id="protect-now">What to back up, and what to protect now</h2>
+<p>A file-level backup of an Asahi Mac should hold <code>/</code>, a separate <code>/home</code>, the separate <code>/boot</code> and the ESP at <code>/boot/efi</code>, plus a LUKS header backup of every encrypted device. That is what you can restore.</p>
+<p>The rest only the Asahi installer can make, and the installer depends on Apple still serving the stub image for your model. That matters most on the Macs Asahi is for — the ones that outlive their macOS support. So, while everything still works:</p>
+<ul>
+  <li><strong>Never delete the stub container</strong> (the 2–3 GB APFS partition beside your Linux partitions) to reclaim its space, and <strong>keep macOS bootable</strong>: the installer runs from it, and recoveryOS finishes it.</li>
+  <li><strong>Plan on restoring over the existing boot chain.</strong> Keep the stub, the ESP and <code>/boot</code> where they are, reformat or replace only the root, and restore over it. That route needs nothing from Apple.</li>
+  <li><strong>Consider a second stub.</strong> The installer's “UEFI environment only” install (about 3 GB, alongside the first) is cheap insurance while Apple still serves the image: a spare, machine-signed boot chain a restore can be pointed at.</li>
+</ul>
+
+<h2 id="verified">What has been verified, exactly</h2>
+<p>Two Macs, two different levels of proof. Read the result column literally.</p>
+<div class="table-scroll"><table>
+  <thead><tr><th>Mac</th><th>Layout</th><th>What was done</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>MacBook Pro, M1 Pro</td><td>Fedora Asahi Remix, btrfs root, GRUB on <code>arm64-efi</code> behind m1n1/U-Boot</td><td>Asahi installer from macOS, then the backup restored over the fresh install</td><td>✅ Boots — September 2026</td></tr>
+    <tr><td>MacBook Pro 14" (2023), M2 Max, 8 TB NVMe with 4096-byte sectors</td><td>Fedora Asahi Remix 44, btrfs <code>root</code> + <code>home</code> on LUKS2 argon2id, ext4 <code>/boot</code>, ESP at <code>/boot/efi</code>, shim → GRUB 2.12 behind m1n1/U-Boot, SELinux enforcing</td><td>Restored onto a 100 GiB disk image on the backup drive, then booted in QEMU</td><td><code>PASS-VM</code>, 2026-09-18 — 99.991 % of files restored with the archived size (309,477 of 309,505); not booted by the Mac</td></tr>
+  </tbody>
+</table></div>
+<p>A <code>PASS-VM</code> is evidence for the restore, not for the Mac's own firmware booting it, and it is never counted as a real boot. The M2 Max went to a disk image because its U-Boot enumerated none of the USB drives tried, so “restore onto a spare drive and boot it” was impossible there. A real boot on that Mac needs test partitions in free space behind a second Asahi stub, and that ✅ is still to earn.</p>
+<p>The M2 Max run found two faults that only an Apple Silicon machine would show: the <code>EFI/fedora</code> directory problem above (the first VM boot stopped at <code>Failed to open \EFI\BOOT\grubaa64.efi</code>), and the 4Kn disk — a VM that presents the same drive with 512-byte sectors reads its partition table at the wrong offsets. Both are handled now: the rebuild finds the directory that actually holds the loaders, and the VM boot passes the disk's logical sector size through. Restore from a live USB, on any machine, is still ⚠️ under test.</p>
+<div class="note"><p><strong>Testing only unless your setup is all green.</strong> Unless your distro, root filesystem and boot layout are all ✅ in the <em>Bare-metal restore</em> column of the <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/STATUS.md">status table</a>, use this for testing, not production. A backup you have never restored is a hope, not a backup.</p></div>
+
+<h2 id="faq">Frequently asked questions</h2>
+<details><summary>Can I back up the Asahi stub partition itself?</summary><p>No. m1n1, U-Boot and the partitions the Mac's firmware boots from live outside Linux and cannot be backed up or recreated by it. The stub is a small APFS container holding a minimal macOS with m1n1 in its kernel slot, under a boot policy the machine's own Secure Enclave signs when the installer sets it. Only the Asahi installer can make one.</p></details>
+<details><summary>Can I delete macOS once Asahi Linux is installed?</summary><p>Not if you want to be able to reinstall. The Asahi installer runs from a macOS that still boots and finishes with one step in recoveryOS, so keep macOS bootable, and never delete the 2–3 GB stub container beside your Linux partitions to reclaim its space.</p></details>
+<details><summary>What happens if Apple stops serving the stub image for my Mac?</summary><p>The installer downloads the stub macOS image for your model from Apple's servers. The day it stops being served, a Mac whose stub partitions are gone has no way to get a Linux boot chain back, and no backup can put it there. The recovery that needs nothing from Apple is a restore over the existing boot chain: keep the stub, the ESP and /boot, reformat or replace only the root, and restore over it.</p></details>
+<details><summary>Can I boot a live USB on my Mac to run the restore?</summary><p>Maybe. Asahi's U-Boot documentation describes booting a USB drive from the U-Boot prompt with run bootcmd_usb0. On the M2 Max used for testing, U-Boot enumerated none of the USB drives tried, through two bridges, direct and through a hub. Restore from a live USB is marked ⚠️ (under test) in the status table.</p></details>
+<details><summary>Is a restore on an M2 Max verified?</summary><p>Restored and booted in a VM, not yet booted by the Mac. On 2026-09-18 an M2 Max backup was restored onto a disk image and booted in QEMU, with the verdict PASS-VM and 99.991 % of files restored with the archived size. A PASS-VM is evidence for the restore, not for the Mac's firmware booting it; the real boot behind a second Asahi stub is still to come.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+  <li><a href="https://asahilinux.org/fedora/">Fedora Asahi Remix — Asahi Linux</a> (the install command from macOS)</li>
+  <li><a href="https://asahilinux.org/docs/sw/partitioning-cheatsheet/">Partitioning cheatsheet — Asahi Linux docs</a> (the 2.5 GB stub container, one ESP per install)</li>
+  <li><a href="https://asahilinux.org/docs/sw/u-boot/">Das U-Boot — Asahi Linux docs</a> (U-Boot as m1n1's payload, USB boot)</li>
+  <li><a href="https://asahilinux.org/docs/platform/open-os-interop/">Open OS Platform Interoperability — Asahi Linux docs</a> (Apple components from restore images and Apple's CDN)</li>
+  <li><a href="https://borgbackup.readthedocs.io/en/stable/usage/extract.html">borg extract — Borg documentation</a> and <a href="https://borgbackup.readthedocs.io/en/stable/usage/list.html">borg list</a></li>
+  <li>Manual pages: <code>lsblk(8)</code>, <code>dracut(8)</code></li>
+  <li>Project docs on GitHub: <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/STATUS.md">STATUS.md</a>, <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/TESTED-SYSTEMS.md">TESTED-SYSTEMS.md</a>, <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/RESTORE.md">RESTORE.md</a>, <a href="https://github.com/doug445/linux-backup-system/blob/main/docs/FAQ.md#can-i-run-it-on-apple-silicon">FAQ.md</a></li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>linux-backup-system</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/linux-backup-system">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/linux-backup-system/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with Borg, Back In Time, Timeshift, Asahi Linux or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>
