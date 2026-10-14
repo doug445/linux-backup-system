@@ -33,7 +33,7 @@
             "context": "SPDX header in every script"
           },
           {
-            "context": "tests (ubuntu-latest)"
+            "context": "tests (ubuntu-24.04)"
           },
           {
             "context": "tests (ubuntu-24.04-arm)"
