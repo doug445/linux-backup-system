@@ -1,5 +1,6 @@
 [![CI](https://github.com/doug445/linux-backup-system/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/linux-backup-system/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Free and open source](https://img.shields.io/badge/Free%20and%20open%20source-brightgreen.svg)](LICENSE)
 [![Platform: aarch64 | x86_64](https://img.shields.io/badge/platform-aarch64%20%7C%20x86__64-lightgrey.svg)](docs/STATUS.md#tested--untested)
 [![Layers: Borg | Back In Time | btrfs/Timeshift](https://img.shields.io/badge/layers-Borg%20%7C%20Back%20In%20Time%20%7C%20btrfs%2FTimeshift-blue.svg)](docs/LAYERS.md)
 [![Boot: GRUB | systemd-boot | UKI](https://img.shields.io/badge/boot-GRUB%20%7C%20systemd--boot%20%7C%20UKI-informational.svg)](docs/RESTORE.md)
